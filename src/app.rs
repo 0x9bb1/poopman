@@ -39,7 +39,7 @@ impl PoopmanApp {
         let tab_bar = cx.new(|cx| TabBar::new(window, cx));
 
         // Initialize with one empty tab
-        let mut request_tabs = vec![RequestTab::new_empty(0)];
+        let request_tabs = vec![RequestTab::new_empty(0)];
         let active_tab_index = 0;
         let next_tab_id = 1;
 
@@ -324,13 +324,14 @@ impl Render for PoopmanApp {
                                 v_resizable("request-response-splitter")
                                     .child(
                                         resizable_panel()
-                                            .size(px(400.)) // Request editor initial size
-                                            .size_range(px(200.)..px(800.)) // Can resize between 200px-800px
+                                            .size(px(350.)) // Request editor initial size (slightly smaller to reduce drift)
+                                            .size_range(px(150.)..px(700.)) // Can resize between 150px-700px
                                             .child(self.request_editor.clone())
                                     )
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_h(px(200.)) // Minimum height to prevent collapse
                                             .border_t_1()
                                             .border_color(theme.border)
                                             .child(self.response_viewer.clone())

@@ -520,6 +520,8 @@ impl RequestEditor {
     /// Parse URL query parameters into params list
     fn parse_url_to_params(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.updating_url || self.parsing_url {
+            log::debug!("Skipping parse_url_to_params (updating_url={}, parsing_url={})",
+                self.updating_url, self.parsing_url);
             return; // Prevent infinite loop
         }
 
@@ -529,6 +531,8 @@ impl RequestEditor {
         if url_str == self.last_parsed_url {
             return; // URL hasn't changed, skip parsing
         }
+
+        log::debug!("Parsing URL to params: {}", url_str);
 
         // Parse URL to get new params
         let mut new_params = Vec::new();
@@ -638,16 +642,14 @@ impl RequestEditor {
             input.set_value(&new_url, window, cx);
         });
 
-        // Reset flag asynchronously to ensure InputEvent is processed first
-        cx.spawn_in(window, async move |this, cx| {
-            let _ = this.update(cx, |this, _| {
-                this.updating_url = false;
-            });
-        }).detach();
+        // Reset flag immediately (synchronous to prevent race conditions)
+        self.updating_url = false;
     }
 
     /// Rebuild URL with current params
     fn rebuild_url_with_params(&self, url_str: &str, cx: &App) -> String {
+        log::debug!("Rebuilding URL from: {}", url_str);
+
         // Extract base URL (without query string)
         let base = if let Some(pos) = url_str.find('?') {
             &url_str[..pos]
@@ -671,11 +673,14 @@ impl RequestEditor {
             }
         }
 
-        if param_parts.is_empty() {
+        let result = if param_parts.is_empty() {
             base.to_string()
         } else {
             format!("{}?{}", base, param_parts.join("&"))
-        }
+        };
+
+        log::debug!("Rebuilt URL to: {}", result);
+        result
     }
 
     /// Add a new param row with auto-add functionality
@@ -781,10 +786,25 @@ impl RequestEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let url = self.url_input.read(cx).value().to_string();
+        let mut url = self.url_input.read(cx).value().to_string().trim().to_string();
         if url.is_empty() {
+            log::warn!("Cannot send request: URL is empty");
             return;
         }
+
+        // Auto-add scheme if missing (like Postman does) - default to http://
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            url = format!("http://{}", url);
+            log::debug!("Auto-added http:// scheme to URL: {}", url);
+        }
+
+        // Validate URL format after normalization
+        if url::Url::parse(&url).is_err() {
+            log::error!("Invalid URL format even after normalization: '{}'", url);
+            return;
+        }
+
+        log::debug!("Sending request to: {}", url);
 
         // Update Content-Length before sending
         self.update_content_length(window, cx);
@@ -847,6 +867,8 @@ impl RequestEditor {
         self.loading = true;
         cx.notify();
 
+        log::debug!("Starting {} request to: {}", method.as_str(), url);
+
         cx.spawn_in(window, async move |this, cx| {
             let start = std::time::Instant::now();
 
@@ -884,14 +906,24 @@ impl RequestEditor {
                 }
             };
 
-            // Add body
-            let http_request = if !body_bytes.is_empty() {
-                request_builder
-                    .body(AsyncBody::from(body_bytes))
-                    .unwrap()
+            // Add body with error handling
+            let http_request = match if !body_bytes.is_empty() {
+                request_builder.body(AsyncBody::from(body_bytes))
             } else {
-                request_builder.body(AsyncBody::default()).unwrap()
+                request_builder.body(AsyncBody::default())
+            } {
+                Ok(req) => req,
+                Err(e) => {
+                    log::error!("Failed to build HTTP request for URL '{}': {}", url, e);
+                    this.update(cx, |this, cx| {
+                        this.loading = false;
+                        cx.notify();
+                    })?;
+                    return Ok(());
+                }
             };
+
+            log::debug!("Sending HTTP request...");
 
             // Send request
             let response = match client.send(http_request).await {
@@ -924,6 +956,8 @@ impl RequestEditor {
             let duration = start.elapsed();
             let status = response.status().as_u16();
 
+            log::debug!("Request completed with status {} in {}ms", status, duration.as_millis());
+
             // Collect response headers
             let mut resp_headers = vec![];
             for (key, value) in response.headers() {
@@ -940,6 +974,8 @@ impl RequestEditor {
                 .await
                 .unwrap_or_default();
             let response_body = String::from_utf8_lossy(&body_bytes).to_string();
+
+            log::debug!("Response body size: {} bytes", body_bytes.len());
 
             let response_data = ResponseData {
                 status: Some(status),
