@@ -28,9 +28,11 @@ The application uses GPUI's entity-component system with a pub-sub event model:
   - Uses `v_resizable` for vertical resizing between request editor and response viewer
 
 - **`RequestEditor` (src/request_editor.rs)**: Top-right panel for configuring HTTP requests
-  - Contains `BodyEditor`, method selector, URL input, and headers management
+  - Contains `BodyEditor`, method selector, URL input, headers and query params management
   - Emits `RequestCompleted` event with both request and response data when send completes
   - Manages predefined headers (mandatory/toggleable) and custom headers separately via `HeaderType` enum
+  - Bidirectional URL-params synchronization: URL query string changes update Params tab, and Params tab changes update URL
+  - Uses flags (`updating_url`, `parsing_url`, `last_parsed_url`) to prevent infinite update loops during synchronization
 
 - **`ResponseViewer` (src/response_viewer.rs)**: Bottom-right panel for displaying responses
   - Shows status code, duration, response size in status bar
@@ -107,3 +109,9 @@ Custom `HttpClient` that bridges GPUI's async HTTP interface with reqwest:
 - Use `cx.subscribe_in(&entity, window, callback)` for event handling
 - GPUI rendering uses declarative `div()` builders with method chaining
 - Colors/spacing from `cx.theme()` for consistency
+- For bidirectional data synchronization, use boolean flags to prevent infinite update loops
+- Use `cx.spawn_in(window, async move |...| {...}).detach()` for deferred async operations
+
+## Platform Notes
+
+- **WSL2**: The application is not currently supported in WSL2 environments due to GPUI's GPU requirements

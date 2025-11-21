@@ -7,9 +7,10 @@ A Postman-like API client built with GPUI Component library.
 - ✅ **HTTP Requests**: Send GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS requests
 - ✅ **Request Configuration**:
   - URL input with autocomplete
-  - HTTP method selection
-  - Headers (Content-Type, Authorization)
-  - JSON request body with syntax highlighting
+  - HTTP method selection (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
+  - Query parameters editor with bidirectional URL synchronization
+  - Headers management (predefined + custom headers)
+  - Request body editor supporting multiple formats (JSON, XML, Text, JavaScript, Form-data)
 - ✅ **Response Viewer**:
   - Status code, duration, and size display
   - JSON response with syntax highlighting and formatting
@@ -23,17 +24,22 @@ A Postman-like API client built with GPUI Component library.
   - Right panel: Request editor (top) + Response viewer (bottom)
   - Resizable panels
 
+## Requirements
+
+- Rust 1.70+ (2021 edition)
+- GPU-capable environment (GPUI requires GPU acceleration)
+- **Note**: Not supported in WSL2 environments
+
 ## Running
 
 ```bash
-cargo run --example poopman
+cargo run
 ```
 
-Or from the examples directory:
+Build release version:
 
 ```bash
-cd examples/poopman
-cargo run
+cargo build --release
 ```
 
 ## Usage
@@ -41,8 +47,9 @@ cargo run
 1. **Make a Request**:
    - Select HTTP method (default: GET)
    - Enter URL (e.g., `https://api.github.com/zen`)
+   - (Optional) Configure query parameters in Params tab (automatically syncs with URL)
    - (Optional) Add headers in Headers tab
-   - (Optional) Add JSON body in Body tab
+   - (Optional) Configure request body in Body tab (supports JSON, XML, Text, JavaScript, Form-data)
    - Click "Send" button or press Ctrl/Cmd+Enter
 
 2. **View Response**:
@@ -76,19 +83,21 @@ src/
 
 ## Technologies
 
-- **GPUI**: GPU-accelerated UI framework
-- **GPUI Component**: UI component library (60+ components)
-- **SQLite**: Persistent storage via rusqlite
-- **ReqwestClient**: HTTP client
-- **Tree Sitter**: JSON syntax highlighting
+- **GPUI 0.2.2**: GPU-accelerated UI framework (Zed editor's UI layer)
+- **gpui-component 0.4**: UI component library providing buttons, inputs, selects, tabs, etc.
+- **rusqlite 0.32**: SQLite database with bundled feature
+- **reqwest 0.12**: HTTP client with json, multipart, and stream features
+- **tokio**: Async runtime for HTTP operations
+- **Tree Sitter**: Syntax highlighting for JSON, XML, JavaScript
 
 ## Future Enhancements
 
 - [ ] Environment variables support
 - [ ] Request collections/folders
-- [ ] More header presets
-- [ ] Query parameters table editor
-- [ ] Request/response body format options (XML, HTML, etc.)
-- [ ] Export/import collections
+- [ ] Authentication presets (Bearer token, Basic auth, OAuth)
+- [ ] Request/response body format options (HTML, etc.)
+- [ ] Export/import collections (Postman format)
 - [ ] Dark/Light theme toggle
-- [ ] Search in history
+- [ ] Search/filter in history
+- [ ] Request duplication
+- [ ] Response download/save to file

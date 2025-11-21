@@ -4,7 +4,9 @@ mod db;
 mod history_panel;
 mod http_client;
 mod request_editor;
+mod request_tab;
 mod response_viewer;
+mod tab_bar;
 mod types;
 
 use anyhow::anyhow;

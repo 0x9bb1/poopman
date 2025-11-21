@@ -160,6 +160,13 @@ impl RequestEditor {
         self.headers.clear();
         self._subscriptions.clear();
 
+        // Re-subscribe to URL input for URL → Params sync (cleared above)
+        let url_input = self.url_input.clone();
+        let url_sub = cx.subscribe_in(&url_input, window, |this, _, _event: &InputEvent, window, cx| {
+            this.parse_url_to_params(window, cx);
+        });
+        self._subscriptions.push(url_sub);
+
         // First, add all predefined headers
         self.init_predefined_headers(window, cx);
 
@@ -210,6 +217,187 @@ impl RequestEditor {
 
         // Parse URL to populate params (this will also add subscriptions)
         self.parse_url_to_params(window, cx);
+
+        cx.notify();
+    }
+
+    /// Extract current request data from the editor
+    pub fn get_current_request_data(&self, cx: &App) -> RequestData {
+        // Get URL
+        let url = self.url_input.read(cx).value().to_string();
+
+        // Get method
+        let method_index = self
+            .method_select
+            .read(cx)
+            .selected_index(cx)
+            .and_then(|idx| Some(idx.row))
+            .unwrap_or(0);
+        let method = HttpMethod::all().get(method_index).copied().unwrap_or(HttpMethod::GET);
+
+        // Get headers (only enabled ones, excluding empty custom headers)
+        let mut headers = Vec::new();
+        for header_row in &self.headers {
+            if header_row.enabled {
+                let key = header_row.key_input.read(cx).value().to_string();
+                let value = header_row.value_input.read(cx).value().to_string();
+
+                // Skip empty custom headers (the placeholder row)
+                if !key.is_empty() || !matches!(header_row.header_type, HeaderType::Custom) {
+                    headers.push((key, value));
+                }
+            }
+        }
+
+        // Get body
+        let body = self.body_editor.read(cx).get_body(cx);
+
+        RequestData {
+            method,
+            url,
+            headers,
+            body,
+        }
+    }
+
+    /// Extract complete params state including disabled params
+    pub fn get_params_state(&self, cx: &App) -> Vec<crate::types::ParamState> {
+        self.params
+            .iter()
+            .map(|param_row| {
+                let key = param_row.key_input.read(cx).value().to_string();
+                let value = param_row.value_input.read(cx).value().to_string();
+                crate::types::ParamState {
+                    enabled: param_row.enabled,
+                    key,
+                    value,
+                }
+            })
+            .filter(|state| !state.key.is_empty() || !state.value.is_empty())
+            .collect()
+    }
+
+    /// Extract complete headers state including disabled headers
+    pub fn get_headers_state(&self, cx: &App) -> Vec<crate::types::HeaderState> {
+        self.headers
+            .iter()
+            .map(|header_row| {
+                let key = header_row.key_input.read(cx).value().to_string();
+                let value = header_row.value_input.read(cx).value().to_string();
+                crate::types::HeaderState {
+                    enabled: header_row.enabled,
+                    key,
+                    value,
+                    header_type: header_row.header_type,
+                    predefined: header_row.predefined,
+                }
+            })
+            .collect()
+    }
+
+    /// Load params state (including disabled params)
+    pub fn load_params_state(&mut self, state: &[crate::types::ParamState], window: &mut Window, cx: &mut Context<Self>) {
+        // Clear existing params and subscriptions related to params
+        self.params.clear();
+
+        // Set flag to prevent syncing back to URL while we're building params
+        self.parsing_url = true;
+
+        // Rebuild params from saved state
+        for param_state in state {
+            let param_row = ParamRow {
+                enabled: param_state.enabled,
+                key_input: cx.new(|cx| {
+                    let mut input = InputState::new(window, cx);
+                    input.set_value(&param_state.key, window, cx);
+                    input
+                }),
+                value_input: cx.new(|cx| {
+                    let mut input = InputState::new(window, cx);
+                    input.set_value(&param_state.value, window, cx);
+                    input
+                }),
+            };
+
+            // Subscribe to changes for syncing back to URL
+            let sub1 = cx.subscribe_in(&param_row.key_input, window, |this, _, _event: &InputEvent, window, cx| {
+                this.sync_params_to_url(window, cx);
+            });
+            let sub2 = cx.subscribe_in(&param_row.value_input, window, |this, _, _event: &InputEvent, window, cx| {
+                this.sync_params_to_url(window, cx);
+            });
+
+            self._subscriptions.push(sub1);
+            self._subscriptions.push(sub2);
+            self.params.push(param_row);
+        }
+
+        // Add one empty row for new params
+        self.add_param_row(window, cx);
+
+        // Reset flag after params are built
+        self.parsing_url = false;
+
+        // Re-subscribe to URL input for URL → Params sync
+        // This is needed because load_request() may have cleared it
+        let url_input = self.url_input.clone();
+        let url_sub = cx.subscribe_in(&url_input, window, |this, _, _event: &InputEvent, window, cx| {
+            this.parse_url_to_params(window, cx);
+        });
+        self._subscriptions.push(url_sub);
+
+        cx.notify();
+    }
+
+    /// Load headers state (including disabled headers)
+    pub fn load_headers_state(&mut self, state: &[crate::types::HeaderState], window: &mut Window, cx: &mut Context<Self>) {
+        // Clear existing headers and subscriptions
+        self.headers.clear();
+
+        // Rebuild headers from saved state
+        for header_state in state {
+            let header_row = HeaderRow {
+                enabled: header_state.enabled,
+                key_input: cx.new(|cx| {
+                    let mut input = InputState::new(window, cx);
+                    input.set_value(&header_state.key, window, cx);
+                    input
+                }),
+                value_input: cx.new(|cx| {
+                    let mut input = InputState::new(window, cx);
+                    input.set_value(&header_state.value, window, cx);
+                    input
+                }),
+                header_type: header_state.header_type,
+                predefined: header_state.predefined,
+            };
+
+            // Subscribe to key input change if it's a custom header
+            if matches!(header_state.header_type, HeaderType::Custom) {
+                let key_input = header_row.key_input.clone();
+                let key_input_for_closure = key_input.clone();
+                let sub = cx.subscribe_in(&key_input, window, move |this, _, _event: &InputEvent, window, cx| {
+                    if let Some(last) = this.headers.last() {
+                        let has_key = !last.key_input.read(cx).value().is_empty();
+                        if has_key
+                            && matches!(last.header_type, HeaderType::Custom)
+                            && this.headers.last().map(|h| Entity::entity_id(&h.key_input)) == Some(Entity::entity_id(&key_input_for_closure))
+                        {
+                            this.add_custom_header_row(window, cx);
+                        }
+                    }
+                });
+                self._subscriptions.push(sub);
+            }
+
+            self.headers.push(header_row);
+        }
+
+        // Ensure there's at least one empty custom header row
+        let has_custom_headers = self.headers.iter().any(|h| matches!(h.header_type, HeaderType::Custom));
+        if !has_custom_headers {
+            self.add_custom_header_row(window, cx);
+        }
 
         cx.notify();
     }

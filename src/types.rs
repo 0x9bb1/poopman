@@ -296,3 +296,21 @@ impl HistoryItem {
         }
     }
 }
+
+/// Query parameter state for UI (including enabled/disabled state)
+#[derive(Debug, Clone)]
+pub struct ParamState {
+    pub enabled: bool,
+    pub key: String,
+    pub value: String,
+}
+
+/// Header state for UI (including enabled/disabled state and header type)
+#[derive(Debug, Clone)]
+pub struct HeaderState {
+    pub enabled: bool,
+    pub key: String,
+    pub value: String,
+    pub header_type: HeaderType,
+    pub predefined: Option<PredefinedHeader>,
+}
