@@ -9,6 +9,7 @@ pub struct ResponseViewer {
     response: Option<ResponseData>,
     body_display: Entity<InputState>,
     active_tab: usize,
+    headers_scroll_handle: ScrollHandle,
 }
 
 impl ResponseViewer {
@@ -24,6 +25,7 @@ impl ResponseViewer {
             response: None,
             body_display,
             active_tab: 0,
+            headers_scroll_handle: ScrollHandle::new(),
         }
     }
 
@@ -48,6 +50,21 @@ impl ResponseViewer {
 
         self.response = Some(response);
         self.active_tab = 0; // Reset to Body tab
+        cx.notify();
+    }
+
+    /// Get current response data
+    pub fn get_response(&self) -> Option<ResponseData> {
+        self.response.clone()
+    }
+
+    /// Clear response data
+    pub fn clear_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.response = None;
+        self.body_display.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        self.active_tab = 0;
         cx.notify();
     }
 
@@ -115,22 +132,43 @@ impl ResponseViewer {
     fn render_headers(&self, _cx: &App) -> impl IntoElement {
         if let Some(response) = &self.response {
             v_flex()
-                .gap_1()
-                .p_2()
-                .children(response.headers.iter().map(|(key, value)| {
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_sm()
-                                .flex_shrink_0()
-                                .child(format!("{}:", key)),
-                        )
-                        .child(div().text_sm().child(value.clone()))
-                }))
+                .id("response-headers-scroll")
+                .flex_1()
+                .w_full()
+                .min_h_0()
+                .track_scroll(&self.headers_scroll_handle)
+                .overflow_scroll()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .p_2()
+                        .children(response.headers.iter().map(|(key, value)| {
+                            h_flex()
+                                .gap_2()
+                                .w_full()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_sm()
+                                        .flex_shrink_0()
+                                        .child(format!("{}:", key)),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(value.clone()),
+                                )
+                        })),
+                )
         } else {
-            v_flex().p_2().child("No headers")
+            v_flex()
+                .id("response-headers-empty")
+                .flex_1()
+                .child(v_flex().p_2().child("No headers"))
         }
     }
 }
@@ -140,11 +178,14 @@ impl Render for ResponseViewer {
         let theme = cx.theme();
 
         div()
+            .id("response-viewer-root")
             .flex()
             .flex_col()
             .w_full()
             .h_full()
+            .overflow_hidden() // Prevent content overflow
             .bg(theme.background)
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())) // Prevent click events from propagating
             .child(
                 // Response section with header
                 div()
@@ -224,7 +265,15 @@ impl Render for ResponseViewer {
                             )
                         })
                         .when(self.active_tab == 1, |this| {
-                            this.child(self.render_headers(cx))
+                            this.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .child(self.render_headers(cx)),
+                            )
                         }),
                 )
             })

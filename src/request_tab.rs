@@ -1,4 +1,4 @@
-use crate::types::{BodyType, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData};
+use crate::types::{BodyType, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, ResponseData};
 
 /// Represents a single request tab
 #[derive(Debug, Clone)]
@@ -6,9 +6,13 @@ pub struct RequestTab {
     pub id: usize,
     pub title: String,
     pub request: RequestData,
+    /// Response data for this tab
+    pub response: Option<ResponseData>,
     // UI state (not persisted to database)
     pub params_state: Option<Vec<ParamState>>,
     pub headers_state: Option<Vec<HeaderState>>,
+    /// Associated history item ID (if opened from history)
+    pub history_id: Option<i64>,
 }
 
 impl RequestTab {
@@ -23,8 +27,10 @@ impl RequestTab {
                 headers: vec![],
                 body: BodyType::default(),
             },
+            response: None,
             params_state: None,
             headers_state: None,
+            history_id: None,
         }
     }
 
@@ -34,8 +40,10 @@ impl RequestTab {
             id,
             title: Self::generate_title(&item.request),
             request: item.request.clone(),
+            response: item.response.clone(),
             params_state: None,
             headers_state: None,
+            history_id: Some(item.id),
         }
     }
 
@@ -45,8 +53,10 @@ impl RequestTab {
             id,
             title: Self::generate_title(&request),
             request,
+            response: None,
             params_state: None,
             headers_state: None,
+            history_id: None,
         }
     }
 

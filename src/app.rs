@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::{
     ActiveTheme as _,
-    resizable::{resizable_panel, v_resizable},
+    resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
 use std::sync::Arc;
@@ -51,38 +51,48 @@ impl PoopmanApp {
             &request_editor,
             window,
             move |this, _, event: &RequestCompleted, window, cx| {
-                // Save to database
-                let request_headers =
-                    serde_json::to_string(&event.request.headers).unwrap_or_default();
-                let response_headers =
-                    serde_json::to_string(&event.response.headers).unwrap_or_default();
+                // Check if current tab is from history (has history_id)
+                let is_from_history = this
+                    .request_tabs
+                    .get(this.active_tab_index)
+                    .map(|tab| tab.history_id.is_some())
+                    .unwrap_or(false);
 
-                if let Err(e) = db_clone.insert_history(
-                    event.request.method.as_str(),
-                    &event.request.url,
-                    &request_headers,
-                    &event.request.body,
-                    event.response.status,
-                    Some(event.response.duration_ms),
-                    Some(&response_headers),
-                    Some(&event.response.body),
-                ) {
-                    log::error!("Failed to save history: {}", e);
+                // Only save to database if this is a new request (not from history)
+                if !is_from_history {
+                    let request_headers =
+                        serde_json::to_string(&event.request.headers).unwrap_or_default();
+                    let response_headers =
+                        serde_json::to_string(&event.response.headers).unwrap_or_default();
+
+                    if let Err(e) = db_clone.insert_history(
+                        event.request.method.as_str(),
+                        &event.request.url,
+                        &request_headers,
+                        &event.request.body,
+                        event.response.status,
+                        Some(event.response.duration_ms),
+                        Some(&response_headers),
+                        Some(&event.response.body),
+                    ) {
+                        log::error!("Failed to save history: {}", e);
+                    }
+
+                    // Reload history panel only when new history is created
+                    history_panel_clone.update(cx, |panel, cx| {
+                        panel.reload(window, cx);
+                    });
                 }
 
-                // Update response viewer
+                // Update response viewer (always)
                 response_viewer_clone.update(cx, |viewer, cx| {
                     viewer.set_response(event.response.clone(), window, cx);
                 });
 
-                // Reload history panel
-                history_panel_clone.update(cx, |panel, cx| {
-                    panel.reload(window, cx);
-                });
-
-                // Update current tab data with the completed request
+                // Update current tab data with the completed request and response (always)
                 if let Some(tab) = this.request_tabs.get_mut(this.active_tab_index) {
                     tab.request = event.request.clone();
+                    tab.response = Some(event.response.clone());
                     tab.update_title();
                     this.update_tab_bar(cx);
                 }
@@ -148,8 +158,10 @@ impl PoopmanApp {
             let request_data = self.request_editor.read(cx).get_current_request_data(cx);
             let params_state = self.request_editor.read(cx).get_params_state(cx);
             let headers_state = self.request_editor.read(cx).get_headers_state(cx);
+            let response = self.response_viewer.read(cx).get_response();
 
             tab.request = request_data;
+            tab.response = response;
             tab.params_state = Some(params_state);
             tab.headers_state = Some(headers_state);
             tab.update_title();
@@ -169,7 +181,7 @@ impl PoopmanApp {
         self.active_tab_index = index;
 
         // Load new tab data into editor
-        if let Some(tab) = self.request_tabs.get(index) {
+        if let Some(tab) = self.request_tabs.get(index).cloned() {
             self.request_editor.update(cx, |editor, cx| {
                 // Load basic request data first
                 editor.load_request(&tab.request, window, cx);
@@ -185,6 +197,15 @@ impl PoopmanApp {
                     if !headers_state.is_empty() {
                         editor.load_headers_state(headers_state, window, cx);
                     }
+                }
+            });
+
+            // Load response data
+            self.response_viewer.update(cx, |viewer, cx| {
+                if let Some(response) = &tab.response {
+                    viewer.set_response(response.clone(), window, cx);
+                } else {
+                    viewer.clear_response(window, cx);
                 }
             });
         }
@@ -209,6 +230,11 @@ impl PoopmanApp {
             editor.load_request(&new_tab.request, window, cx);
         });
 
+        // Clear response for new tab
+        self.response_viewer.update(cx, |viewer, cx| {
+            viewer.clear_response(window, cx);
+        });
+
         self.update_tab_bar(cx);
         cx.notify();
     }
@@ -223,6 +249,11 @@ impl PoopmanApp {
 
             self.request_editor.update(cx, |editor, cx| {
                 editor.load_request(&self.request_tabs[0].request, window, cx);
+            });
+
+            // Clear response for reset tab
+            self.response_viewer.update(cx, |viewer, cx| {
+                viewer.clear_response(window, cx);
             });
 
             self.update_tab_bar(cx);
@@ -243,9 +274,18 @@ impl PoopmanApp {
             }
 
             // Load the new active tab
-            if let Some(tab) = self.request_tabs.get(self.active_tab_index) {
+            if let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() {
                 self.request_editor.update(cx, |editor, cx| {
                     editor.load_request(&tab.request, window, cx);
+                });
+
+                // Load response for the new active tab
+                self.response_viewer.update(cx, |viewer, cx| {
+                    if let Some(response) = &tab.response {
+                        viewer.set_response(response.clone(), window, cx);
+                    } else {
+                        viewer.clear_response(window, cx);
+                    }
                 });
             }
         }
@@ -254,13 +294,24 @@ impl PoopmanApp {
         cx.notify();
     }
 
-    /// Open history item in a new tab
+    /// Open history item in a new tab (or switch to existing tab if already open)
     fn open_history_in_new_tab(
         &mut self,
         item: &crate::types::HistoryItem,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Check if this history item is already open in a tab
+        if let Some(existing_index) = self
+            .request_tabs
+            .iter()
+            .position(|tab| tab.history_id == Some(item.id))
+        {
+            // Switch to existing tab instead of creating a new one
+            self.switch_to_tab(existing_index, window, cx);
+            return;
+        }
+
         // Save current tab state
         self.save_current_tab_state(cx);
 
@@ -273,6 +324,15 @@ impl PoopmanApp {
         // Load into editor
         self.request_editor.update(cx, |editor, cx| {
             editor.load_request(&new_tab.request, window, cx);
+        });
+
+        // Load response from history
+        self.response_viewer.update(cx, |viewer, cx| {
+            if let Some(response) = &new_tab.response {
+                viewer.set_response(response.clone(), window, cx);
+            } else {
+                viewer.clear_response(window, cx);
+            }
         });
 
         self.update_tab_bar(cx);
@@ -293,52 +353,61 @@ impl Render for PoopmanApp {
 
         div()
             .size_full()
-            .flex()
-            .flex_row()
             .bg(theme.background)
             .child(
-                // Left: History panel - 1/4 width
-                div()
-                    .w(relative(0.25))
-                    .h_full()
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .child(self.history_panel.clone()),
-            )
-            .child(
-                // Right: Tab bar + Request editor and response viewer - 3/4 width
-                div()
-                    .flex_1()
-                    .h_full()
-                    .flex()
-                    .flex_col()
+                h_resizable("history-main-splitter")
                     .child(
-                        // Tab bar at the top
-                        self.tab_bar.clone()
+                        // Left: History panel with resizable width
+                        resizable_panel()
+                            .size(px(280.)) // Initial width
+                            .size_range(px(200.)..px(500.)) // Can resize between 200px-500px
+                            .child(
+                                div()
+                                    .h_full()
+                                    .border_r_1()
+                                    .border_color(theme.border)
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
+                                    .child(self.history_panel.clone()),
+                            ),
                     )
                     .child(
-                        // Request editor and response viewer with resizable splitter
+                        // Right: Tab bar + Request editor and response viewer
                         div()
                             .flex_1()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden() // Prevent content overflow
+                            .bg(theme.background) // Capture mouse events, prevent passthrough
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
                             .child(
-                                v_resizable("request-response-splitter")
-                                    .child(
-                                        resizable_panel()
-                                            .size(px(350.)) // Request editor initial size (slightly smaller to reduce drift)
-                                            .size_range(px(150.)..px(700.)) // Can resize between 150px-700px
-                                            .child(self.request_editor.clone())
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_h(px(200.)) // Minimum height to prevent collapse
-                                            .border_t_1()
-                                            .border_color(theme.border)
-                                            .child(self.response_viewer.clone())
-                                            .into_any_element()
-                                    )
+                                // Tab bar at the top
+                                self.tab_bar.clone(),
                             )
-                    )
+                            .child(
+                                // Request editor and response viewer with resizable splitter
+                                div().flex_1().overflow_hidden().child(
+                                    v_resizable("request-response-splitter")
+                                        .child(
+                                            resizable_panel()
+                                                .size(px(350.)) // Request editor initial size
+                                                .size_range(px(150.)..px(700.)) // Can resize between 150px-700px
+                                                .child(self.request_editor.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_h(px(200.)) // Minimum height to prevent collapse
+                                                .overflow_hidden() // Prevent content overflow
+                                                .border_t_1()
+                                                .border_color(theme.border)
+                                                .child(self.response_viewer.clone())
+                                                .into_any_element(),
+                                        ),
+                                ),
+                            )
+                            .into_any_element(),
+                    ),
             )
     }
 }
