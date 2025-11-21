@@ -1,0 +1,15 @@
+   Compiling poopman v0.1.0 (E:\code\poopman)
+warning: method `toggle_formdata_type` is never used
+   --> src\body_editor.rs:385:8
+    |
+ 51 | impl BodyEditor {
+    | --------------- method in this implementation
+...
+385 |     fn toggle_formdata_type(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    |        ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `poopman` (bin "poopman") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.58s
+     Running `target\debug\poopman.exe`
