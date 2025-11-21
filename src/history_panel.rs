@@ -91,8 +91,6 @@ impl Render for HistoryPanel {
         v_flex()
             .size_full()
             .bg(theme.background)
-            .border_r_1()
-            .border_color(theme.border)
             .child(
                 // Header
                 h_flex()
@@ -135,11 +133,11 @@ impl Render for HistoryPanel {
             })
             .when(!self.history.is_empty(), |this| {
                 this.child(
-                    // List
+                    // List - use size_full to fill available space
                     v_flex()
+                        .size_full()
                         .gap_2()
                         .p_2()
-                        .flex_1()
                         .children(self.history.iter().map(|item| {
                             let item_id = item.id;
                             let is_selected = self.selected_id == Some(item_id);
@@ -148,8 +146,8 @@ impl Render for HistoryPanel {
                             let time = Self::format_relative_time(&item.timestamp);
 
                             let method_color = match method {
-                                "GET" => theme.accent,
-                                "POST" => theme.success,
+                                "GET" => theme.success,
+                                "POST" => theme.accent,
                                 "PUT" => theme.warning,
                                 "DELETE" => theme.danger,
                                 _ => theme.muted_foreground,
@@ -171,6 +169,7 @@ impl Render for HistoryPanel {
 
                             div()
                                 .id(("history-item", item_id as u64))
+                                .w_full()
                                 .px_3()
                                 .py_2()
                                 .bg(if is_selected {
@@ -244,7 +243,8 @@ impl Render for HistoryPanel {
                                         ),
                                 )
                         }))
-                        .scrollable(ScrollbarAxis::Vertical),
+                        .scrollable(ScrollbarAxis::Vertical)
+                        .size_full(),
                 )
             })
     }

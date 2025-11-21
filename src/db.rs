@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::types::{HistoryItem, HttpMethod, RequestData, ResponseData};
+use crate::types::{HistoryItem, HttpMethod, RequestData};
 
 /// Database manager for Poopman
 pub struct Database {
@@ -55,17 +55,13 @@ impl Database {
         Ok(home.join(".poopman").join("history.db"))
     }
 
-    /// Insert a new history item
+    /// Insert a new history item (request only, no response - aligned with Postman)
     pub fn insert_history(
         &self,
         method: &str,
         url: &str,
         request_headers: &str,
         request_body: &crate::types::BodyType,
-        status_code: Option<u16>,
-        duration_ms: Option<u64>,
-        response_headers: Option<&str>,
-        response_body: Option<&str>,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
 
@@ -75,31 +71,26 @@ impl Database {
         let body_json = serde_json::to_string(request_body).unwrap_or_default();
 
         conn.execute(
-            "INSERT INTO history (timestamp, method, url, request_headers, request_body, status_code, duration_ms, response_headers, response_body)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO history (timestamp, method, url, request_headers, request_body)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 timestamp,
                 method,
                 url,
                 request_headers,
                 body_json,
-                status_code.map(|s| s as i64),
-                duration_ms.map(|d| d as i64),
-                response_headers,
-                response_body,
             ],
         )?;
 
         Ok(conn.last_insert_rowid())
     }
 
-    /// Load recent history items
+    /// Load recent history items (request only, no response - aligned with Postman)
     pub fn load_recent_history(&self, limit: usize) -> Result<Vec<HistoryItem>> {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare(
-            "SELECT id, timestamp, method, url, request_headers, request_body,
-                    status_code, duration_ms, response_headers, response_body
+            "SELECT id, timestamp, method, url, request_headers, request_body
              FROM history
              ORDER BY timestamp DESC
              LIMIT ?1",
@@ -112,10 +103,6 @@ impl Database {
             let url: String = row.get(3)?;
             let request_headers: String = row.get(4)?;
             let request_body: String = row.get(5)?;
-            let status_code: Option<i64> = row.get(6)?;
-            let duration_ms: Option<i64> = row.get(7)?;
-            let response_headers: Option<String> = row.get(8)?;
-            let response_body: Option<String> = row.get(9)?;
 
             let headers: Vec<(String, String)> =
                 serde_json::from_str(&request_headers).unwrap_or_default();
@@ -131,22 +118,7 @@ impl Database {
                 body,
             };
 
-            let response = if let (Some(status), Some(duration)) = (status_code, duration_ms) {
-                let resp_headers: Vec<(String, String)> = response_headers
-                    .and_then(|h| serde_json::from_str(&h).ok())
-                    .unwrap_or_default();
-
-                Some(ResponseData {
-                    status: Some(status as u16),
-                    duration_ms: duration as u64,
-                    headers: resp_headers,
-                    body: response_body.unwrap_or_default(),
-                })
-            } else {
-                None
-            };
-
-            Ok(HistoryItem::new(id, timestamp, request, response))
+            Ok(HistoryItem::new(id, timestamp, request, None))
         })?;
 
         let mut result = Vec::new();

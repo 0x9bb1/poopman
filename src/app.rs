@@ -59,21 +59,16 @@ impl PoopmanApp {
                     .unwrap_or(false);
 
                 // Only save to database if this is a new request (not from history)
+                // Note: Response is not saved to history (aligned with Postman behavior)
                 if !is_from_history {
                     let request_headers =
                         serde_json::to_string(&event.request.headers).unwrap_or_default();
-                    let response_headers =
-                        serde_json::to_string(&event.response.headers).unwrap_or_default();
 
                     if let Err(e) = db_clone.insert_history(
                         event.request.method.as_str(),
                         &event.request.url,
                         &request_headers,
                         &event.request.body,
-                        event.response.status,
-                        Some(event.response.duration_ms),
-                        Some(&response_headers),
-                        Some(&event.response.body),
                     ) {
                         log::error!("Failed to save history: {}", e);
                     }
@@ -363,9 +358,7 @@ impl Render for PoopmanApp {
                             .size_range(px(200.)..px(500.)) // Can resize between 200px-500px
                             .child(
                                 div()
-                                    .h_full()
-                                    .border_r_1()
-                                    .border_color(theme.border)
+                                    .size_full()
                                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
                                     .child(self.history_panel.clone()),
                             ),
