@@ -26,3 +26,18 @@ urlencoding = "2.1"
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
+
+[package.metadata.bundle]
+name = "Poopman"
+identifier = "com.poopman.app"
+icon = ["assets/icons/logo.ico"]
+version = "0.1.0"
+copyright = "Copyright (c) 2024"
+category = "Utility"
+short_description = "A Postman-like API client"
+
+[package.metadata.bundle.osx]
+minimum_system_version = "11.0"
+
+[package.metadata.bundle.windows]
+wix = true

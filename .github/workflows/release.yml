@@ -17,20 +17,17 @@ jobs:
           # macOS x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: poopman
-            asset_name: poopman-macos-x86_64
+            asset_name: Poopman-macos-x86_64
 
           # macOS ARM64 (Apple Silicon)
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: poopman
-            asset_name: poopman-macos-aarch64
+            asset_name: Poopman-macos-aarch64
 
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: poopman.exe
-            asset_name: poopman-windows-x86_64.exe
+            asset_name: Poopman-windows-x86_64
 
     steps:
       - name: Checkout code
@@ -66,40 +63,74 @@ jobs:
           xcode-select --print-path
           # GPUI requires Metal framework which is included in macOS SDK
 
+      - name: Install WiX Toolset (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          dotnet tool install --global wix --version 4.0.5
+          wix --version
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary (Linux and macOS)
-        if: runner.os != 'Windows'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+      - name: Create app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: cargo bundle --release --target ${{ matrix.target }}
 
-      - name: Create archive (Linux and macOS)
-        if: runner.os != 'Windows'
+      - name: Create DMG (macOS)
+        if: runner.os == 'macOS'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
-          mv ${{ matrix.asset_name }}.tar.gz ../../../
+          APP_PATH="target/${{ matrix.target }}/release/bundle/osx/Poopman.app"
+          DMG_NAME="${{ matrix.asset_name }}.dmg"
 
-      - name: Create archive (Windows)
+          # Create a temporary directory for DMG contents
+          mkdir -p dmg_contents
+          cp -r "$APP_PATH" dmg_contents/
+
+          # Create a symbolic link to /Applications
+          ln -s /Applications dmg_contents/Applications
+
+          # Create the DMG
+          hdiutil create -volname "Poopman" -srcfolder dmg_contents -ov -format UDZO "$DMG_NAME"
+
+          # Cleanup
+          rm -rf dmg_contents
+
+      - name: Create MSI (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path ${{ matrix.artifact_name }} -DestinationPath ../../../${{ matrix.asset_name }}.zip
+          cargo bundle --release --target ${{ matrix.target }}
 
-      - name: Upload artifact (Linux and macOS)
-        if: runner.os != 'Windows'
+      - name: Prepare Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $msiPath = Get-ChildItem -Path "target/${{ matrix.target }}/release/bundle/msi/*.msi" -ErrorAction SilentlyContinue
+          if ($msiPath) {
+            Copy-Item $msiPath.FullName -Destination "${{ matrix.asset_name }}.msi"
+          } else {
+            # Fallback to exe if MSI generation fails
+            Copy-Item "target/${{ matrix.target }}/release/poopman.exe" -Destination "${{ matrix.asset_name }}.exe"
+          }
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.tar.gz
+          path: ${{ matrix.asset_name }}.dmg
 
-      - name: Upload artifact (Windows)
+      - name: Upload artifact (Windows MSI)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.zip
+          path: |
+            ${{ matrix.asset_name }}.msi
+            ${{ matrix.asset_name }}.exe
 
   release:
     name: Create Release
@@ -128,8 +159,9 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            artifacts/poopman-macos-x86_64/poopman-macos-x86_64.tar.gz
-            artifacts/poopman-macos-aarch64/poopman-macos-aarch64.tar.gz
-            artifacts/poopman-windows-x86_64.exe/poopman-windows-x86_64.exe.zip
+            artifacts/Poopman-macos-x86_64/Poopman-macos-x86_64.dmg
+            artifacts/Poopman-macos-aarch64/Poopman-macos-aarch64.dmg
+            artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.msi
+            artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
