@@ -38,23 +38,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -63,13 +50,8 @@ jobs:
           xcode-select --print-path
           # GPUI requires Metal framework which is included in macOS SDK
 
-      - name: Install WiX Toolset (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          dotnet tool install --global wix --version 4.0.5
-          wix --version
-
-      - name: Install cargo-bundle
+      - name: Install cargo-bundle (macOS)
+        if: runner.os == 'macOS'
         run: cargo install cargo-bundle
 
       - name: Build release binary
@@ -98,23 +80,12 @@ jobs:
           # Cleanup
           rm -rf dmg_contents
 
-      - name: Create MSI (Windows)
+      - name: Create archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo bundle --release --target ${{ matrix.target }}
-
-      - name: Prepare Windows artifact
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $msiPath = Get-ChildItem -Path "target/${{ matrix.target }}/release/bundle/msi/*.msi" -ErrorAction SilentlyContinue
-          if ($msiPath) {
-            Copy-Item $msiPath.FullName -Destination "${{ matrix.asset_name }}.msi"
-          } else {
-            # Fallback to exe if MSI generation fails
-            Copy-Item "target/${{ matrix.target }}/release/poopman.exe" -Destination "${{ matrix.asset_name }}.exe"
-          }
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path poopman.exe -DestinationPath ../../../${{ matrix.asset_name }}.zip
 
       - name: Upload artifact (macOS)
         if: runner.os == 'macOS'
@@ -123,14 +94,12 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}.dmg
 
-      - name: Upload artifact (Windows MSI)
+      - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: |
-            ${{ matrix.asset_name }}.msi
-            ${{ matrix.asset_name }}.exe
+          path: ${{ matrix.asset_name }}.zip
 
   release:
     name: Create Release
@@ -161,7 +130,6 @@ jobs:
           files: |
             artifacts/Poopman-macos-x86_64/Poopman-macos-x86_64.dmg
             artifacts/Poopman-macos-aarch64/Poopman-macos-aarch64.dmg
-            artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.msi
-            artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.exe
+            artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
