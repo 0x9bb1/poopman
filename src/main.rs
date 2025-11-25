@@ -10,6 +10,7 @@ mod request_tab;
 mod response_viewer;
 mod tab_bar;
 mod types;
+mod url_params;
 
 use gpui::*;
 use gpui_component::Root;

@@ -8,10 +8,10 @@ use gpui_component::{
     select::*, v_flex, ActiveTheme as _, Disableable as _, IndexPath, Sizable as _,
 };
 use gpui_component::input::InputEvent;
-use url::Url;
 
 use crate::body_editor::BodyEditor;
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
+use crate::url_params::{self, QueryParam};
 
 /// Event emitted when a request is sent and response is received
 #[derive(Clone)]
@@ -159,6 +159,12 @@ impl RequestEditor {
         // Set headers - reinitialize with predefined headers
         self.headers.clear();
         self._subscriptions.clear();
+
+        // Clear params to force rebuild with fresh subscriptions
+        // This is critical because _subscriptions.clear() removes all params subscriptions
+        // but self.params still holds old ParamRow entities with dead subscriptions
+        self.params.clear();
+        self.last_parsed_url.clear(); // Reset to force URL parsing
 
         // Re-subscribe to URL input for URL → Params sync (cleared above)
         let url_input = self.url_input.clone();
@@ -517,120 +523,121 @@ impl RequestEditor {
         }
     }
 
-    /// Parse URL query parameters into params list
+    /// Parse URL query parameters into params list.
+    ///
+    /// This function synchronizes the params list with the URL's query string.
+    /// It uses pure functions from url_params module for parsing logic.
     fn parse_url_to_params(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Guard: prevent infinite loop during bidirectional sync
         if self.updating_url || self.parsing_url {
             log::debug!("Skipping parse_url_to_params (updating_url={}, parsing_url={})",
                 self.updating_url, self.parsing_url);
-            return; // Prevent infinite loop
+            return;
         }
 
         let url_str = self.url_input.read(cx).value().to_string();
 
-        // Check if URL actually changed since last parse
-        if url_str == self.last_parsed_url {
-            return; // URL hasn't changed, skip parsing
+        // Early exit: URL unchanged and params list is not empty
+        // (if params is empty, we need to add an empty row even if URL unchanged)
+        if url_str == self.last_parsed_url && !self.params.is_empty() {
+            return;
         }
 
         log::debug!("Parsing URL to params: {}", url_str);
 
-        // Parse URL to get new params
-        let mut new_params = Vec::new();
+        // Use pure function to parse query params
+        let new_params = url_params::parse_query_params(&url_str);
 
-        if let Ok(url) = Url::parse(&url_str) {
-            // URL is valid, extract query parameters
-            for (key, value) in url.query_pairs() {
-                new_params.push((key.to_string(), value.to_string()));
-            }
-        } else {
-            // URL parsing failed, try to parse as query string manually
-            if let Some(query_start) = url_str.find('?') {
-                let query = &url_str[query_start + 1..];
-                for pair in query.split('&') {
-                    if let Some(eq_pos) = pair.find('=') {
-                        let key = urlencoding::decode(&pair[..eq_pos])
-                            .map(|s| s.to_string())
-                            .unwrap_or_default();
-                        let value = urlencoding::decode(&pair[eq_pos + 1..])
-                            .map(|s| s.to_string())
-                            .unwrap_or_default();
-                        if !key.is_empty() {
-                            new_params.push((key, value));
-                        }
-                    }
-                }
-            } else if !url_str.is_empty() {
-                // URL is not empty but has no query string and isn't parseable
-                // Keep existing params unchanged
-                return;
-            }
-            // If url_str is empty, new_params remains empty, which is correct
-        }
-
-        // Compare with existing params (excluding empty last row)
-        let mut current_params = Vec::new();
-        for param in &self.params {
-            let key = param.key_input.read(cx).value().to_string();
-            let value = param.value_input.read(cx).value().to_string();
-            if !key.is_empty() || !value.is_empty() {
-                current_params.push((key, value));
-            }
-        }
-
-        // If params are the same, don't rebuild (avoids destroying input focus)
-        if new_params == current_params {
-            self.last_parsed_url = url_str; // Update last parsed URL
+        // Handle special case: URL has no query string but is not empty
+        // In this case, keep existing params unchanged (don't clear them)
+        if new_params.is_empty() && !url_str.is_empty() && !url_str.contains('?') && !self.params.is_empty() {
+            self.last_parsed_url = url_str;
             return;
         }
 
-        // Set flag to prevent syncing back to URL while we're building params
-        self.parsing_url = true;
-        self.last_parsed_url = url_str; // Update last parsed URL
+        // Collect current params for comparison (excluding empty placeholder row)
+        let current_params: Vec<(String, String)> = self.params
+            .iter()
+            .map(|p| {
+                (
+                    p.key_input.read(cx).value().to_string(),
+                    p.value_input.read(cx).value().to_string(),
+                )
+            })
+            .filter(|(k, v)| !k.is_empty() || !v.is_empty())
+            .collect();
 
-        // Clear and rebuild params
-        self.params.clear();
-
-        for (key_str, value_str) in new_params {
-            let param_row = ParamRow {
-                enabled: true,
-                key_input: cx.new(|cx| {
-                    let mut input = InputState::new(window, cx);
-                    input.set_value(&key_str, window, cx);
-                    input
-                }),
-                value_input: cx.new(|cx| {
-                    let mut input = InputState::new(window, cx);
-                    input.set_value(&value_str, window, cx);
-                    input
-                }),
-            };
-
-            // Subscribe to changes for syncing back to URL
-            let sub1 = cx.subscribe_in(&param_row.key_input, window, |this, _, _event: &InputEvent, window, cx| {
-                this.sync_params_to_url(window, cx);
-            });
-            let sub2 = cx.subscribe_in(&param_row.value_input, window, |this, _, _event: &InputEvent, window, cx| {
-                this.sync_params_to_url(window, cx);
-            });
-
-            self._subscriptions.push(sub1);
-            self._subscriptions.push(sub2);
-            self.params.push(param_row);
+        // Early exit: params content unchanged (and list is not empty)
+        if url_params::params_equal(&new_params, &current_params) && !self.params.is_empty() {
+            self.last_parsed_url = url_str;
+            return;
         }
 
-        // Add one empty row for new params
+        // === Rebuild params list ===
+        self.parsing_url = true;
+        self.last_parsed_url = url_str;
+        self.params.clear();
+
+        // Create ParamRow for each parsed param
+        for (key_str, value_str) in new_params {
+            self.add_param_row_with_values(&key_str, &value_str, true, window, cx);
+        }
+
+        // Always add one empty row for new params
         self.add_param_row(window, cx);
 
-        // Reset flag after params are built
         self.parsing_url = false;
-
         cx.notify();
     }
 
-    /// Sync params list to URL input box
+    /// Add a param row with specific values (helper for parse_url_to_params)
+    fn add_param_row_with_values(
+        &mut self,
+        key: &str,
+        value: &str,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Convert to String to avoid lifetime issues
+        let key_string = key.to_string();
+        let value_string = value.to_string();
+
+        let param_row = ParamRow {
+            enabled,
+            key_input: cx.new(|cx| {
+                let mut input = InputState::new(window, cx);
+                input.set_value(&key_string, window, cx);
+                input
+            }),
+            value_input: cx.new(|cx| {
+                let mut input = InputState::new(window, cx);
+                input.set_value(&value_string, window, cx);
+                input
+            }),
+        };
+
+        // Subscribe to changes for syncing back to URL
+        let sub1 = cx.subscribe_in(&param_row.key_input, window, |this, _, _event: &InputEvent, window, cx| {
+            this.sync_params_to_url(window, cx);
+        });
+        let sub2 = cx.subscribe_in(&param_row.value_input, window, |this, _, _event: &InputEvent, window, cx| {
+            this.sync_params_to_url(window, cx);
+        });
+
+        self._subscriptions.push(sub1);
+        self._subscriptions.push(sub2);
+        self.params.push(param_row);
+    }
+
+    /// Sync params list to URL input box.
+    ///
+    /// This function rebuilds the URL query string from the current params list
+    /// and updates the URL input. Uses pure functions from url_params module.
     fn sync_params_to_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Guard: prevent infinite loop during bidirectional sync
         if self.updating_url || self.parsing_url {
-            return; // Prevent infinite loop and avoid syncing while parsing URL
+            return;
         }
 
         self.updating_url = true;
@@ -638,46 +645,39 @@ impl RequestEditor {
         let current_url = self.url_input.read(cx).value().to_string();
         let new_url = self.rebuild_url_with_params(&current_url, cx);
 
+        // Update last_parsed_url BEFORE setting the URL input
+        // This prevents parse_url_to_params from re-parsing the URL we just built
+        // (InputEvent may be delivered asynchronously after this function returns)
+        self.last_parsed_url = new_url.clone();
+
         self.url_input.update(cx, |input, cx| {
             input.set_value(&new_url, window, cx);
         });
 
-        // Reset flag immediately (synchronous to prevent race conditions)
         self.updating_url = false;
     }
 
-    /// Rebuild URL with current params
+    /// Rebuild URL by combining base URL with current params.
+    ///
+    /// Uses pure functions from url_params module for URL building.
     fn rebuild_url_with_params(&self, url_str: &str, cx: &App) -> String {
         log::debug!("Rebuilding URL from: {}", url_str);
 
-        // Extract base URL (without query string)
-        let base = if let Some(pos) = url_str.find('?') {
-            &url_str[..pos]
-        } else {
-            url_str
-        };
+        // Extract base URL using pure function
+        let base = url_params::extract_base_url(url_str);
 
-        // Collect enabled params with non-empty keys
-        let mut param_parts = vec![];
-        for param in &self.params {
-            if param.enabled {
-                let key = param.key_input.read(cx).value().to_string();
-                let value = param.value_input.read(cx).value().to_string();
-                if !key.is_empty() {
-                    param_parts.push(format!(
-                        "{}={}",
-                        urlencoding::encode(&key),
-                        urlencoding::encode(&value)
-                    ));
-                }
-            }
-        }
+        // Collect params as QueryParam structs
+        let params: Vec<QueryParam> = self.params
+            .iter()
+            .map(|p| QueryParam::new(
+                p.key_input.read(cx).value().to_string(),
+                p.value_input.read(cx).value().to_string(),
+                p.enabled,
+            ))
+            .collect();
 
-        let result = if param_parts.is_empty() {
-            base.to_string()
-        } else {
-            format!("{}?{}", base, param_parts.join("&"))
-        };
+        // Build URL using pure function
+        let result = url_params::build_url_with_params(base, &params);
 
         log::debug!("Rebuilt URL to: {}", result);
         result
@@ -1261,3 +1261,4 @@ impl Render for RequestEditor {
         )
     }
 }
+
