@@ -5,7 +5,6 @@ use gpui_component::{
     button::*, checkbox::Checkbox, h_flex, input::{Input, InputState, InputEvent as InputChangeEvent}, radio::RadioGroup,
     select::*, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
 };
-use std::collections::HashMap;
 
 use crate::types::{BodyType, FormDataRow, FormDataValue, RawSubtype};
 
@@ -14,11 +13,15 @@ use gpui::Subscription;
 pub struct BodyEditor {
     body_type_index: usize,
     raw_subtype_select: Entity<SelectState<Vec<&'static str>>>,
-    raw_inputs: HashMap<RawSubtype, Entity<InputState>>,
+    raw_body_editor: Entity<InputState>,  // Single editor for all raw types
+    current_raw_subtype: RawSubtype,      // Track current subtype
     formdata_rows: Vec<FormDataRow>,
     formdata_input_states: Vec<(Entity<InputState>, Entity<InputState>, Entity<SelectState<Vec<&'static str>>>)>,
     formdata_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
+    // Format/validation state
+    validation_message: Option<String>,
+    validation_error: bool,
 }
 
 impl BodyEditor {
@@ -60,40 +63,67 @@ impl BodyEditor {
             )
         });
 
-        // Create input editors for each raw subtype
-        let mut raw_inputs = HashMap::new();
-        for subtype in RawSubtype::all() {
-            let placeholder = match subtype {
-                RawSubtype::Json => r#"{"key": "value"}"#,
-                RawSubtype::Xml => r#"<root></root>"#,
-                RawSubtype::Text => "Plain text...",
-                RawSubtype::JavaScript => "console.log('Hello');",
-            };
+        // Create single editor for all raw types (default to JSON)
+        let current_raw_subtype = RawSubtype::Json;
+        let raw_body_editor = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor(current_raw_subtype.as_str())
+                .line_number(true)
+                .indent_guides(true)
+                .placeholder(r#"{"key": "value"}"#)
+        });
 
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .code_editor(subtype.as_str())
-                    .line_number(true)
-                    .multi_line()
-                    .placeholder(placeholder)
-            });
-            raw_inputs.insert(subtype, input);
-        }
+        log::info!("Created single body editor with default language: 'json'");
 
         let mut editor = Self {
             body_type_index: 1, // Default to Raw
-            raw_subtype_select,
-            raw_inputs,
+            raw_subtype_select: raw_subtype_select.clone(),
+            raw_body_editor: raw_body_editor.clone(),
+            current_raw_subtype,
             formdata_rows: vec![],
             formdata_input_states: vec![],
             formdata_scroll_handle: ScrollHandle::new(),
             _subscriptions: vec![],
+            validation_message: None,
+            validation_error: false,
         };
 
         // Initialize with one empty form-data row for auto-add functionality
         editor.add_formdata_row(window, cx);
 
+        // Subscribe to raw subtype changes to switch syntax highlighting
+        let select_subscription = cx.subscribe_in(
+            &raw_subtype_select,
+            window,
+            |this: &mut BodyEditor, _select, _event: &SelectEvent<Vec<&'static str>>, _window, cx| {
+                this.handle_subtype_change(cx);
+            },
+        );
+        editor._subscriptions.push(select_subscription);
+
         editor
+    }
+
+    /// Handle raw subtype change - switch syntax highlighting
+    fn handle_subtype_change(&mut self, cx: &mut Context<Self>) {
+        let subtype_index = self.raw_subtype_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|idx| idx.row)
+            .unwrap_or(0);
+        let new_subtype = RawSubtype::all()[subtype_index];
+
+        if new_subtype != self.current_raw_subtype {
+            log::info!("Switching body editor language from {:?} to {:?}",
+                      self.current_raw_subtype, new_subtype);
+
+            self.current_raw_subtype = new_subtype;
+            self.raw_body_editor.update(cx, |state, cx| {
+                state.set_highlighter(new_subtype.as_str(), cx);
+            });
+
+            cx.notify();
+        }
     }
 
     /// Get current body type from UI state
@@ -101,17 +131,12 @@ impl BodyEditor {
         match self.body_type_index {
             0 => BodyType::None,
             1 => {
-                // Raw
-                let subtype_index = self.raw_subtype_select
-                    .read(cx)
-                    .selected_index(cx)
-                    .map(|idx| idx.row)
-                    .unwrap_or(0);
-                let subtype = RawSubtype::all()[subtype_index];
-                let content = self.raw_inputs.get(&subtype)
-                    .map(|input| input.read(cx).value().to_string())
-                    .unwrap_or_default();
-                BodyType::Raw { content, subtype }
+                // Raw - read from single editor
+                let content = self.raw_body_editor.read(cx).value().to_string();
+                BodyType::Raw {
+                    content,
+                    subtype: self.current_raw_subtype
+                }
             }
             2 => {
                 // Form-data
@@ -147,11 +172,12 @@ impl BodyEditor {
                 self.raw_subtype_select.update(cx, |select, cx| {
                     select.set_selected_index(Some(IndexPath::default().row(subtype_index)), window, cx);
                 });
-                if let Some(input) = self.raw_inputs.get(subtype) {
-                    input.update(cx, |input, cx| {
-                        input.set_value(content, window, cx);
-                    });
-                }
+                // Update current subtype and syntax highlighting
+                self.current_raw_subtype = *subtype;
+                self.raw_body_editor.update(cx, |input, cx| {
+                    input.set_value(content, window, cx);
+                    input.set_highlighter(subtype.as_str(), cx);
+                });
             }
             BodyType::FormData(rows) => {
                 self.body_type_index = 2;
@@ -237,16 +263,8 @@ impl BodyEditor {
         match self.body_type_index {
             0 => 0, // None
             1 => {
-                // Raw
-                let subtype_index = self.raw_subtype_select
-                    .read(cx)
-                    .selected_index(cx)
-                    .map(|idx| idx.row)
-                    .unwrap_or(0);
-                let subtype = RawSubtype::all()[subtype_index];
-                self.raw_inputs.get(&subtype)
-                    .map(|input| input.read(cx).value().len())
-                    .unwrap_or(0)
+                // Raw - read from single editor
+                self.raw_body_editor.read(cx).value().len()
             }
             2 | 3 => 0, // Form-data and UrlEncoded - approximate
             _ => 0,
@@ -418,6 +436,67 @@ impl BodyEditor {
         }
     }
 
+    /// Format current raw body content
+    fn format_raw_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let content = self.raw_body_editor.read(cx).value().to_string();
+
+        let result = match self.current_raw_subtype {
+            RawSubtype::Json => crate::code_formatter::format_json(&content),
+            RawSubtype::Xml => crate::code_formatter::format_xml(&content),
+            _ => {
+                self.validation_message = Some("Formatting not supported for this type".to_string());
+                self.validation_error = true;
+                cx.notify();
+                return;
+            }
+        };
+
+        match result {
+            Ok(formatted) => {
+                self.raw_body_editor.update(cx, |input, cx| {
+                    input.set_value(&formatted, window, cx);
+                });
+                self.validation_message = Some(format!("{} formatted successfully", self.current_raw_subtype.as_str().to_uppercase()));
+                self.validation_error = false;
+            }
+            Err(err) => {
+                self.validation_message = Some(err);
+                self.validation_error = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Validate current raw body content
+    fn validate_raw_body(&mut self, cx: &mut Context<Self>) {
+        let content = self.raw_body_editor.read(cx).value().to_string();
+
+        let result = match self.current_raw_subtype {
+            RawSubtype::Json => crate::code_formatter::validate_json(&content),
+            RawSubtype::Xml => crate::code_formatter::validate_xml(&content),
+            _ => {
+                // Text and JavaScript don't need validation
+                return;
+            }
+        };
+
+        match result {
+            Ok(_) => {
+                if !content.trim().is_empty() {
+                    self.validation_message = Some(format!("✓ Valid {}", self.current_raw_subtype.as_str().to_uppercase()));
+                    self.validation_error = false;
+                } else {
+                    self.validation_message = None;
+                }
+            }
+            Err(err) => {
+                self.validation_message = Some(err);
+                self.validation_error = true;
+            }
+        }
+        cx.notify();
+    }
+
     fn select_file_for_row(&mut self, index: usize, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let path = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -469,11 +548,28 @@ impl Render for BodyEditor {
                             }))
                     )
                     .when(self.body_type_index == 1, |this| {
-                        // Raw subtype dropdown - only show when Raw is selected
+                        // Raw subtype dropdown and format button - only show when Raw is selected
                         this.child(
                             div()
                                 .w(px(120.))
                                 .child(Select::new(&self.raw_subtype_select))
+                        )
+                        .child(
+                            Button::new("format-button")
+                                .small()
+                                .label("Format")
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.format_raw_body(window, cx);
+                                }))
+                        )
+                        .child(
+                            Button::new("validate-button")
+                                .small()
+                                .ghost()
+                                .label("Validate")
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.validate_raw_body(cx);
+                                }))
                         )
                     })
             )
@@ -491,28 +587,16 @@ impl Render for BodyEditor {
                 )
             })
             .when(self.body_type_index == 1, |this| {
-                // Raw - show code editor for selected subtype
+                // Raw - use single editor with dynamic syntax highlighting
                 this.child(
                     div()
-                        .flex_1()
-                        .w_full()
                         .flex()
                         .flex_col()
-                        .min_h_0()  // Allow child to shrink and scroll
-                        .child({
-                            let subtype_index = self.raw_subtype_select
-                                .read(cx)
-                                .selected_index(cx)
-                                .map(|idx| idx.row)
-                                .unwrap_or(0);
-                            let subtype = RawSubtype::all()[subtype_index];
-                            if let Some(input) = self.raw_inputs.get(&subtype) {
-                                Input::new(input).w_full().h_full()
-                            } else {
-                                // Fallback
-                                Input::new(self.raw_inputs.values().next().unwrap()).w_full().h_full()
-                            }
-                        })
+                        .flex_1()
+                        .w_full()
+                        .child(
+                            Input::new(&self.raw_body_editor).w_full().h_full()
+                        )
                 )
             })
             .when(self.body_type_index == 2, |this| {

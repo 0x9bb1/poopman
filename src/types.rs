@@ -140,11 +140,15 @@ pub enum RawSubtype {
 }
 
 impl RawSubtype {
+    /// Returns the language string for syntax highlighting.
+    ///
+    /// Note: XML is not supported by gpui-component's tree-sitter-languages feature,
+    /// so it falls back to "plain" (no syntax highlighting).
     pub fn as_str(&self) -> &'static str {
         match self {
             RawSubtype::Json => "json",
-            RawSubtype::Xml => "xml",
-            RawSubtype::Text => "text",
+            RawSubtype::Xml => "plain",  // XML not supported, fallback to plain
+            RawSubtype::Text => "plain",
             RawSubtype::JavaScript => "javascript",
         }
     }

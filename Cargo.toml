@@ -8,7 +8,7 @@ version = "0.1.0"
 [dependencies]
 anyhow = "1"
 gpui = "0.2.2"
-gpui-component = "0.4"
+gpui-component = { version = "0.4", features = ["tree-sitter-languages"] }
 log = "0.4"
 env_logger = "0.11"
 
@@ -20,6 +20,7 @@ rust-embed = "8.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+quick-xml = "0.36"
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 url = "2.5"
 urlencoding = "2.1"

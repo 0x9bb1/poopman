@@ -2,6 +2,7 @@
 
 mod app;
 mod body_editor;
+mod code_formatter;
 mod db;
 mod history_panel;
 mod http_client;
