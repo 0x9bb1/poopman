@@ -9,7 +9,7 @@ use gpui_component::{
 };
 use gpui_component::input::InputEvent;
 
-use crate::body_editor::BodyEditor;
+use crate::body_editor::{BodyEditor, BodyTypeChanged};
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
 use crate::url_params::{self, QueryParam};
 
@@ -69,6 +69,11 @@ impl RequestEditor {
 
         let body_editor = cx.new(|cx| BodyEditor::new(window, cx));
 
+        // Subscribe to body type changes to auto-update Content-Type header
+        let body_sub = cx.subscribe_in(&body_editor, window, |this: &mut RequestEditor, _, event: &BodyTypeChanged, window, cx| {
+            this.update_content_type_from_body(&event.content_type, window, cx);
+        });
+
         let mut editor = Self {
             url_input: url_input.clone(),
             method_select,
@@ -90,6 +95,7 @@ impl RequestEditor {
             this.parse_url_to_params(window, cx);
         });
         editor._subscriptions.push(url_sub);
+        editor._subscriptions.push(body_sub);
 
         // Initialize with predefined headers
         editor.init_predefined_headers(window, cx);
@@ -223,6 +229,14 @@ impl RequestEditor {
 
         // Parse URL to populate params (this will also add subscriptions)
         self.parse_url_to_params(window, cx);
+
+        // Force sync Content-Type with body type to auto-correct any inconsistencies in history
+        let content_type = match &request.body {
+            crate::types::BodyType::None => None,
+            crate::types::BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
+            crate::types::BodyType::FormData(_) => Some("multipart/form-data".to_string()),
+        };
+        self.update_content_type_from_body(&content_type, window, cx);
 
         cx.notify();
     }
@@ -517,6 +531,26 @@ impl RequestEditor {
                     header.value_input.update(cx, |input, cx| {
                         input.set_value(&content_length, window, cx);
                     });
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Update Content-Type header to match body type
+    fn update_content_type_from_body(&mut self, content_type: &Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // Find Content-Type header and update it
+        let new_value = content_type.clone().unwrap_or_default();
+        for header in &mut self.headers {
+            if let Some(predefined) = header.predefined {
+                if matches!(predefined, PredefinedHeader::ContentType) {
+                    // Update Content-Type value
+                    let value_to_set = new_value.clone();
+                    header.value_input.update(cx, |input, cx| {
+                        input.set_value(&value_to_set, window, cx);
+                    });
+
+                    log::debug!("Auto-updated Content-Type header to: {}", new_value);
                     break;
                 }
             }
@@ -843,19 +877,8 @@ impl RequestEditor {
             }
         }
 
-        // Auto-add Content-Type header based on body type if not already present
-        let has_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("Content-Type"));
-        if !has_content_type {
-            match &body {
-                crate::types::BodyType::Raw { subtype, .. } => {
-                    headers.push(("Content-Type".to_string(), subtype.content_type().to_string()));
-                }
-                crate::types::BodyType::FormData(_) => {
-                    // Will be set by multipart builder
-                }
-                _ => {}
-            }
-        }
+        // Note: Content-Type is now automatically synced via BodyTypeChanged event
+        // No need to auto-add here as it's already in the headers list
 
         let request = RequestData {
             method,
@@ -1154,13 +1177,13 @@ impl Render for RequestEditor {
                                                         .child(Input::new(&header.key_input).disabled(is_predefined)),
                                                 )
                                                 .child(
-                                                    // Value input - disabled for auto-calculated headers
+                                                    // Value input - disabled for auto-calculated headers and Content-Type
                                                     // Delete button embedded as suffix for custom headers
                                                     div()
                                                         .flex_1()
                                                         .child(
                                                             Input::new(&header.value_input)
-                                                                .disabled(is_auto_calculated)
+                                                                .disabled(is_auto_calculated || header.predefined == Some(PredefinedHeader::ContentType))
                                                                 .when(is_custom, |input| {
                                                                     input.suffix(
                                                                         Button::new(("delete-header", index))

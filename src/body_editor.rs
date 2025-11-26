@@ -10,6 +10,22 @@ use crate::types::{BodyType, FormDataRow, FormDataValue, RawSubtype};
 
 use gpui::Subscription;
 
+/// Event emitted when body type changes, carrying the computed Content-Type
+#[derive(Clone, Debug)]
+pub struct BodyTypeChanged {
+    pub content_type: Option<String>, // Some("application/json") or None for BodyType::None
+}
+
+/// Get appropriate placeholder text for each raw subtype
+fn get_placeholder_for_subtype(subtype: RawSubtype) -> &'static str {
+    match subtype {
+        RawSubtype::Json => r#"{"key": "value"}"#,
+        RawSubtype::Xml => r#"<root><element>value</element></root>"#,
+        RawSubtype::Text => "Enter plain text here...",
+        RawSubtype::JavaScript => "console.log('Hello, world!');",
+    }
+}
+
 pub struct BodyEditor {
     body_type_index: usize,
     raw_subtype_select: Entity<SelectState<Vec<&'static str>>>,
@@ -70,7 +86,7 @@ impl BodyEditor {
                 .code_editor(current_raw_subtype.as_str())
                 .line_number(true)
                 .indent_guides(true)
-                .placeholder(r#"{"key": "value"}"#)
+                .placeholder(get_placeholder_for_subtype(current_raw_subtype))
         });
 
         log::info!("Created single body editor with default language: 'json'");
@@ -95,8 +111,8 @@ impl BodyEditor {
         let select_subscription = cx.subscribe_in(
             &raw_subtype_select,
             window,
-            |this: &mut BodyEditor, _select, _event: &SelectEvent<Vec<&'static str>>, _window, cx| {
-                this.handle_subtype_change(cx);
+            |this: &mut BodyEditor, _select, _event: &SelectEvent<Vec<&'static str>>, window, cx| {
+                this.handle_subtype_change(window, cx);
             },
         );
         editor._subscriptions.push(select_subscription);
@@ -104,8 +120,8 @@ impl BodyEditor {
         editor
     }
 
-    /// Handle raw subtype change - switch syntax highlighting
-    fn handle_subtype_change(&mut self, cx: &mut Context<Self>) {
+    /// Handle raw subtype change - switch syntax highlighting and placeholder
+    fn handle_subtype_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let subtype_index = self.raw_subtype_select
             .read(cx)
             .selected_index(cx)
@@ -120,6 +136,13 @@ impl BodyEditor {
             self.current_raw_subtype = new_subtype;
             self.raw_body_editor.update(cx, |state, cx| {
                 state.set_highlighter(new_subtype.as_str(), cx);
+                // Update placeholder based on subtype
+                state.set_placeholder(get_placeholder_for_subtype(new_subtype), window, cx);
+            });
+
+            // Emit event to notify RequestEditor to update Content-Type header
+            cx.emit(BodyTypeChanged {
+                content_type: Some(new_subtype.content_type().to_string()),
             });
 
             cx.notify();
@@ -177,6 +200,8 @@ impl BodyEditor {
                 self.raw_body_editor.update(cx, |input, cx| {
                     input.set_value(content, window, cx);
                     input.set_highlighter(subtype.as_str(), cx);
+                    // Also update placeholder when loading
+                    input.set_placeholder(get_placeholder_for_subtype(*subtype), window, cx);
                 });
             }
             BodyType::FormData(rows) => {
@@ -256,6 +281,15 @@ impl BodyEditor {
                 self.add_formdata_row(window, cx);
             }
         }
+
+        // Emit event after all state updates are complete
+        let content_type = match body {
+            BodyType::None => None,
+            BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
+            BodyType::FormData(_) => Some("multipart/form-data".to_string()),
+        };
+
+        cx.emit(BodyTypeChanged { content_type });
     }
 
     /// Calculate body content length
@@ -544,6 +578,16 @@ impl Render for BodyEditor {
                             .selected_index(Some(self.body_type_index))
                             .on_click(cx.listener(|this, selected_ix: &usize, _window, cx| {
                                 this.body_type_index = *selected_ix;
+
+                                // Emit event to notify Content-Type changes
+                                let content_type = match *selected_ix {
+                                    0 => None, // BodyType::None
+                                    1 => Some(this.current_raw_subtype.content_type().to_string()), // Raw
+                                    2 => Some("multipart/form-data".to_string()), // FormData
+                                    _ => None,
+                                };
+
+                                cx.emit(BodyTypeChanged { content_type });
                                 cx.notify();
                             }))
                     )
@@ -682,3 +726,5 @@ impl Render for BodyEditor {
             })
     }
 }
+
+impl EventEmitter<BodyTypeChanged> for BodyEditor {}
