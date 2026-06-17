@@ -7,6 +7,7 @@ use gpui_component::{
 };
 
 use crate::types::{BodyType, FormDataRow, FormDataValue, RawSubtype};
+use crate::theme::RAW_SUBTYPE_WIDTH;
 
 use gpui::Subscription;
 
@@ -595,7 +596,7 @@ impl Render for BodyEditor {
                         // Raw subtype dropdown and format button - only show when Raw is selected
                         this.child(
                             div()
-                                .w(px(120.))
+                                .w(px(RAW_SUBTYPE_WIDTH))
                                 .child(Select::new(&self.raw_subtype_select))
                         )
                         .child(
