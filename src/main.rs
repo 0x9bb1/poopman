@@ -10,6 +10,7 @@ mod request_editor;
 mod request_tab;
 mod response_viewer;
 mod tab_bar;
+mod theme;
 mod types;
 mod url_params;
 
@@ -100,6 +101,7 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+        crate::theme::apply_theme(cx);
 
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
