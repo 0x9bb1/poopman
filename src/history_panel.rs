@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex, Icon, scroll::ScrollableElement as _, v_flex, ActiveTheme as _,
+    button::*, h_flex, scroll::ScrollableElement as _, v_flex, ActiveTheme as _,
     Sizable as _,
 };
 use std::sync::Arc;
@@ -100,15 +100,10 @@ impl Render for HistoryPanel {
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Icon::default()
-                                    .path("icons/logo.svg")
-                                    .size_5()
-                            )
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("History"))
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("History")
                     )
                     .child(
                         Button::new("clear-btn")
@@ -136,96 +131,58 @@ impl Render for HistoryPanel {
                     // List - use size_full to fill available space
                     v_flex()
                         .size_full()
-                        .gap_2()
-                        .p_2()
+                        .gap_0p5()
+                        .px_2()
+                        .py_1()
                         .children(self.history.iter().map(|item| {
                             let item_id = item.id;
                             let is_selected = self.selected_id == Some(item_id);
-                            let method = item.request.method.as_str();
-                            let url = &item.request.url;
+                            let verb = item.request.method.as_str();
+                            let verb_color = crate::theme::method_color(item.request.method, theme);
+                            let url = item.request.url.clone();
                             let time = Self::format_relative_time(&item.timestamp);
-
-                            let method_color = match method {
-                                "GET" => theme.success,
-                                "POST" => theme.accent,
-                                "PUT" => theme.warning,
-                                "DELETE" => theme.danger,
-                                _ => theme.muted_foreground,
-                            };
-
-                            let status_color = if let Some(response) = &item.response {
-                                if response.is_success() {
-                                    Some(theme.success)
-                                } else if response.is_error() {
-                                    Some(theme.danger)
-                                } else {
-                                    Some(theme.accent)
-                                }
-                            } else {
-                                None
-                            };
-
                             let item_clone = item.clone();
 
-                            div()
+                            h_flex()
                                 .id(("history-item", item_id as u64))
+                                .gap_2()
+                                .items_start()
                                 .w_full()
-                                .px_3()
-                                .py_2()
-                                .bg(if is_selected {
-                                    theme.list_active
-                                } else {
-                                    theme.list
-                                })
+                                .px_2p5()
+                                .py_1p5()
+                                .rounded(theme.radius)
                                 .border_1()
                                 .border_color(if is_selected {
                                     theme.list_active_border
                                 } else {
-                                    theme.border
+                                    gpui::transparent_black()
                                 })
-                                .rounded(theme.radius)
+                                .bg(if is_selected {
+                                    theme.list_active
+                                } else {
+                                    gpui::transparent_black()
+                                })
                                 .cursor_pointer()
-                                .on_click(cx.listener(
-                                    move |this, _event: &gpui::ClickEvent, window, cx| {
-                                        this.on_item_click(&item_clone, window, cx);
-                                    },
-                                ))
+                                .hover(|s| s.bg(if is_selected { theme.list_active } else { theme.list_hover }))
+                                .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, window, cx| {
+                                    this.on_item_click(&item_clone, window, cx);
+                                }))
+                                .child(
+                                    // small mono method label, no filled pill
+                                    div()
+                                        .flex_shrink_0()
+                                        .w(px(34.))
+                                        .text_right()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(verb_color)
+                                        .child(verb),
+                                )
                                 .child(
                                     v_flex()
-                                        .gap_1()
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .items_center()
-                                                .child(
-                                                    div()
-                                                        .px_2()
-                                                        .py_1()
-                                                        .rounded(theme.radius)
-                                                        .bg(method_color)
-                                                        .text_color(gpui::white())
-                                                        .text_xs()
-                                                        .flex_shrink_0()
-                                                        .child(method),
-                                                )
-                                                .when_some(status_color, |this, color| {
-                                                    this.child(
-                                                        div()
-                                                            .px_2()
-                                                            .py_1()
-                                                            .rounded(theme.radius)
-                                                            .bg(color)
-                                                            .text_color(gpui::white())
-                                                            .text_xs()
-                                                            .flex_shrink_0()
-                                                                                                                          .child(
-                                                                                                                            item.response
-                                                                                                                                .as_ref()
-                                                                                                                                .map(|r| r.status_text())
-                                                                                                                                .unwrap_or("NET ERR"),
-                                                                                                                        ),                                                    )
-                                                }),
-                                        )
+                                        .min_w_0()
+                                        .flex_1()
+                                        .gap_0p5()
                                         .child(
                                             div()
                                                 .text_sm()
@@ -233,7 +190,7 @@ impl Render for HistoryPanel {
                                                 .overflow_x_hidden()
                                                 .whitespace_nowrap()
                                                 .text_ellipsis()
-                                                .child(url.clone()),
+                                                .child(url),
                                         )
                                         .child(
                                             div()
