@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{button::*, h_flex, input::*, v_flex, ActiveTheme as _};
+use gpui_component::{h_flex, input::*, v_flex, ActiveTheme as _};
 
 use crate::types::ResponseData;
 
@@ -93,8 +93,8 @@ impl ResponseViewer {
             h_flex()
                 .gap_3()
                 .items_center()
-                .p_2()
-                .bg(cx.theme().muted)
+                .px_4()
+                .py_2p5()
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .child(
@@ -121,10 +121,11 @@ impl ResponseViewer {
                 })
         } else {
             h_flex()
-                .p_2()
-                .bg(cx.theme().muted)
+                .px_4()
+                .py_2p5()
                 .border_b_1()
                 .border_color(cx.theme().border)
+                .text_color(cx.theme().muted_foreground)
                 .child("No response yet")
         }
     }
@@ -219,30 +220,58 @@ impl Render for ResponseViewer {
                             div()
                                 .flex()
                                 .flex_row()
-                                .gap_1()
+                                .gap_5()
+                                .border_b_1()
+                                .border_color(theme.border)
                                 .child(
-                                    Button::new("tab-body")
-                                        .ghost()
-                                        .label("Body")
-                                        .when(self.active_tab == 0, |btn| btn.primary())
+                                    div()
+                                        .id("resp-tab-body")
+                                        .px_0p5()
+                                        .pb_2()
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .border_b_2()
+                                        .when(self.active_tab == 0, |this| {
+                                            this.border_color(theme.primary)
+                                                .text_color(theme.primary)
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                        })
+                                        .when(self.active_tab != 0, |this| {
+                                            this.border_color(gpui::transparent_black())
+                                                .text_color(theme.muted_foreground)
+                                        })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
                                                 this.active_tab = 0;
                                                 cx.notify();
                                             },
-                                        )),
+                                        ))
+                                        .child("Body"),
                                 )
                                 .child(
-                                    Button::new("tab-headers")
-                                        .ghost()
-                                        .label("Headers")
-                                        .when(self.active_tab == 1, |btn| btn.primary())
+                                    div()
+                                        .id("resp-tab-headers")
+                                        .px_0p5()
+                                        .pb_2()
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .border_b_2()
+                                        .when(self.active_tab == 1, |this| {
+                                            this.border_color(theme.primary)
+                                                .text_color(theme.primary)
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                        })
+                                        .when(self.active_tab != 1, |this| {
+                                            this.border_color(gpui::transparent_black())
+                                                .text_color(theme.muted_foreground)
+                                        })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
                                                 this.active_tab = 1;
                                                 cx.notify();
                                             },
-                                        )),
+                                        ))
+                                        .child("Headers"),
                                 ),
                         )
                         .when(self.active_tab == 0, |this| {
@@ -256,6 +285,11 @@ impl Render for ResponseViewer {
                                     .flex_col()
                                     .flex_1()
                                     .w_full()
+                                    .rounded(theme.radius_lg)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.popover)
+                                    .overflow_hidden()
                                     .child(
                                         Input::new(&self.body_display)
                                             .disabled(is_error)
