@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex, Icon, scroll::ScrollbarAxis, v_flex, ActiveTheme as _, Sizable as _,
-    StyledExt as _,
+    button::*, h_flex, Icon, scroll::ScrollableElement as _, v_flex, ActiveTheme as _,
+    Sizable as _,
 };
 use std::sync::Arc;
 
@@ -243,7 +243,7 @@ impl Render for HistoryPanel {
                                         ),
                                 )
                         }))
-                        .scrollable(ScrollbarAxis::Vertical)
+                        .overflow_y_scrollbar()
                         .size_full(),
                 )
             })

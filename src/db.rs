@@ -96,7 +96,8 @@ impl Database {
              LIMIT ?1",
         )?;
 
-        let items = stmt.query_map([limit], |row| {
+        // rusqlite 0.40 dropped the `ToSql` impl for `usize`; bind as i64.
+        let items = stmt.query_map([limit as i64], |row| {
             let id: i64 = row.get(0)?;
             let timestamp: String = row.get(1)?;
             let method: String = row.get(2)?;
