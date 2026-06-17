@@ -18,7 +18,7 @@ impl ResponseViewer {
             InputState::new(window, cx)
                 .code_editor("json")
                 .line_number(true)
-                .multi_line()
+                .multi_line(true)
         });
 
         Self {
