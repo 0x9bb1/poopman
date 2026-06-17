@@ -1074,42 +1074,83 @@ impl Render for RequestEditor {
                             div()
                                 .flex()
                                 .flex_row()
-                                .gap_1()
+                                .gap_5()
+                                .border_b_1()
+                                .border_color(theme.border)
                                 .child(
-                                    Button::new("tab-headers")
-                                        .ghost()
-                                        .label("Headers")
-                                        .when(self.active_tab == 0, |btn| btn.primary())
+                                    div()
+                                        .id("tab-headers")
+                                        .px_0p5()
+                                        .pb_2()
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .border_b_2()
+                                        .when(self.active_tab == 0, |this| {
+                                            this.border_color(theme.primary)
+                                                .text_color(theme.primary)
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                        })
+                                        .when(self.active_tab != 0, |this| {
+                                            this.border_color(gpui::transparent_black())
+                                                .text_color(theme.muted_foreground)
+                                        })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
                                                 this.active_tab = 0;
                                                 cx.notify();
                                             },
-                                        )),
+                                        ))
+                                        .child("Headers"),
                                 )
                                 .child(
-                                    Button::new("tab-params")
-                                        .ghost()
-                                        .label("Params")
-                                        .when(self.active_tab == 1, |btn| btn.primary())
+                                    div()
+                                        .id("tab-params")
+                                        .px_0p5()
+                                        .pb_2()
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .border_b_2()
+                                        .when(self.active_tab == 1, |this| {
+                                            this.border_color(theme.primary)
+                                                .text_color(theme.primary)
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                        })
+                                        .when(self.active_tab != 1, |this| {
+                                            this.border_color(gpui::transparent_black())
+                                                .text_color(theme.muted_foreground)
+                                        })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
                                                 this.active_tab = 1;
                                                 cx.notify();
                                             },
-                                        )),
+                                        ))
+                                        .child("Params"),
                                 )
                                 .child(
-                                    Button::new("tab-body")
-                                        .ghost()
-                                        .label("Body")
-                                        .when(self.active_tab == 2, |btn| btn.primary())
+                                    div()
+                                        .id("tab-body")
+                                        .px_0p5()
+                                        .pb_2()
+                                        .text_sm()
+                                        .cursor_pointer()
+                                        .border_b_2()
+                                        .when(self.active_tab == 2, |this| {
+                                            this.border_color(theme.primary)
+                                                .text_color(theme.primary)
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                        })
+                                        .when(self.active_tab != 2, |this| {
+                                            this.border_color(gpui::transparent_black())
+                                                .text_color(theme.muted_foreground)
+                                        })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
                                                 this.active_tab = 2;
                                                 cx.notify();
                                             },
-                                        )),
+                                        ))
+                                        .child("Body"),
                                 ),
                         )
                         .when(self.active_tab == 0, |this| {
