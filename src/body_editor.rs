@@ -602,6 +602,7 @@ impl Render for BodyEditor {
                         .child(
                             Button::new("format-button")
                                 .small()
+                                .ghost()
                                 .label("Format")
                                 .on_click(cx.listener(|this, _event, window, cx| {
                                     this.format_raw_body(window, cx);
