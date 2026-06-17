@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Poopman 重设计预览 — 暖调浅色 / 布局 B</title>
+<style>
+  :root{
+    --bg:#FAF9F5;          /* 主画布 */
+    --sidebar:#F0EEE6;     /* 侧边栏 */
+    --card:#FFFFFF;        /* 卡片/输入框 */
+    --fg:#1A1915;          /* 主文字 */
+    --muted:#73706A;       /* 次要文字 */
+    --border:#E7E4DA;      /* 发丝边框 */
+    --primary:#C15F3C;     /* 珊瑚/陶土橘 强调色 */
+    --primary-hover:#AD5435;
+    --primary-fg:#FFFFFF;
+    --wash:#F3E7E0;        /* 选中浅珊瑚晕染 */
+    --success:#4F8A5B;
+    --danger:#C0503F;
+    --warn:#C98A3C;
+    --radius-card:8px;
+    --radius-ctl:6px;
+    --mono:"SF Mono",ui-monospace,"Cascadia Code","Consolas",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:-apple-system,"Segoe UI",system-ui,sans-serif;
+    background:var(--bg);color:var(--fg);font-size:13px;line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .caption{padding:6px 14px;font-size:12px;color:var(--muted);background:var(--sidebar);border-bottom:1px solid var(--border)}
+  .caption b{color:var(--primary)}
+
+  .app{display:flex;height:calc(100vh - 33px)}
+
+  /* ---------- Sidebar ---------- */
+  .sidebar{width:264px;flex:none;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column}
+  .sidebar-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px}
+  .sidebar-head h1{font-size:14px;font-weight:600;letter-spacing:.2px}
+  .sidebar-head .clear{font-size:12px;color:var(--muted);cursor:pointer}
+  .sidebar-head .clear:hover{color:var(--primary)}
+  .hist{overflow-y:auto;padding:2px 8px 8px}
+  .hist-item{display:flex;align-items:baseline;gap:8px;padding:7px 10px;border-radius:var(--radius-ctl);cursor:pointer;border:1px solid transparent}
+  .hist-item:hover{background:rgba(0,0,0,.03)}
+  .hist-item.active{background:var(--wash);border-color:#E8D3C8}
+  .verb{font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.4px;flex:none;width:34px;text-align:right;padding-top:1px}
+  .verb.get{color:var(--success)}
+  .verb.post{color:var(--warn)}
+  .verb.del{color:var(--danger)}
+  .hist-main{min-width:0;flex:1}
+  .hist-url{font-size:12.5px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hist-time{font-size:11px;color:var(--muted);margin-top:1px}
+
+  /* ---------- Main ---------- */
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+
+  /* tab strip */
+  .tabs{display:flex;align-items:center;gap:4px;padding:8px 12px 0;background:var(--bg)}
+  .tab{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:8px 8px 0 0;font-size:12.5px;color:var(--muted);cursor:pointer;border:1px solid transparent;border-bottom:none}
+  .tab .v{font-family:var(--mono);font-size:10px;font-weight:700}
+  .tab.active{background:var(--card);color:var(--fg);border-color:var(--border)}
+  .tab .x{color:var(--muted);font-size:13px;opacity:.6}
+  .tab .x:hover{opacity:1;color:var(--danger)}
+  .tab-add{padding:6px 9px;color:var(--muted);cursor:pointer;border-radius:6px;font-size:15px}
+  .tab-add:hover{background:rgba(0,0,0,.04);color:var(--primary)}
+  .tabs-rule{height:1px;background:var(--border)}
+
+  .req{padding:16px 18px;display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;overflow:auto}
+
+  /* URL bar */
+  .urlbar{display:flex;gap:8px;align-items:stretch}
+  .method{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-weight:700;font-size:12px;color:var(--success);
+    background:var(--card);border:1px solid var(--border);border-radius:var(--radius-ctl);padding:0 12px;cursor:pointer;flex:none}
+  .method .car{color:var(--muted);font-weight:400}
+  .url{flex:1;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-ctl);padding:9px 12px;font-size:13px;color:var(--fg)}
+  .url.ph{color:var(--muted)}
+  .send{flex:none;background:var(--primary);color:var(--primary-fg);border:none;border-radius:var(--radius-ctl);padding:0 20px;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px}
+  .send:hover{background:var(--primary-hover)}
+
+  /* inner underline tabs */
+  .itabs{display:flex;gap:20px;border-bottom:1px solid var(--border)}
+  .itab{padding:6px 1px 9px;font-size:13px;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .itab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+  .itab:hover:not(.active){color:var(--fg)}
+
+  /* headers table */
+  .ktable{display:flex;flex-direction:column;gap:6px}
+  .krow{display:flex;align-items:center;gap:10px}
+  .ck{width:15px;height:15px;border-radius:4px;border:1.5px solid #CFC9BC;flex:none;position:relative;background:var(--card)}
+  .ck.on{background:var(--primary);border-color:var(--primary)}
+  .ck.on::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .kin{flex:1;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-ctl);padding:7px 11px;font-size:12.5px;min-width:0;color:var(--fg)}
+  .kin.dim{color:var(--muted)}
+  .kin.locked{background:#FBFAF6;color:var(--muted)}
+
+  /* ---------- Response ---------- */
+  .resp{border-top:1px solid var(--border);display:flex;flex-direction:column;height:42%;flex:none;background:var(--bg)}
+  .statusbar{display:flex;align-items:center;gap:14px;padding:10px 18px;border-bottom:1px solid var(--border)}
+  .pill{font-family:var(--mono);font-size:11.5px;font-weight:700;color:#fff;background:var(--success);padding:3px 9px;border-radius:5px}
+  .meta{font-size:12px;color:var(--muted)}
+  .meta b{color:var(--fg);font-weight:600}
+  .resp-itabs{display:flex;gap:20px;padding:0 18px;border-bottom:1px solid var(--border)}
+  .body{flex:1;overflow:auto;padding:14px 18px;font-family:var(--mono);font-size:12.5px;line-height:1.6;background:var(--card);margin:12px 18px 16px;border:1px solid var(--border);border-radius:var(--radius-card)}
+  .ln{color:#B8B2A4;-webkit-user-select:none;display:inline-block;width:22px;text-align:right;margin-right:14px}
+  .j-key{color:var(--primary)}
+  .j-str{color:#3F7E54}
+  .j-num{color:#9A5B2E}
+  .j-punc{color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="caption">静态预览 · 布局 <b>B</b>(侧边栏 + 请求上/响应下)· 暖调浅色 · 强调色 <b>#C15F3C</b> — 非真实应用，仅看观感方向（数据为虚构占位）</div>
+  <div class="app">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <h1>History</h1>
+        <span class="clear">Clear</span>
+      </div>
+      <div class="hist">
+        <div class="hist-item active">
+          <span class="verb get">GET</span>
+          <div class="hist-main">
+            <div class="hist-url">api.example.com/v1/users/profile</div>
+            <div class="hist-time">2 hours ago</div>
+          </div>
+        </div>
+        <div class="hist-item">
+          <span class="verb get">GET</span>
+          <div class="hist-main">
+            <div class="hist-url">api.example.com/v1/products?page=1</div>
+            <div class="hist-time">3 hours ago</div>
+          </div>
+        </div>
+        <div class="hist-item">
+          <span class="verb get">GET</span>
+          <div class="hist-main">
+            <div class="hist-url">example.com/health</div>
+            <div class="hist-time">yesterday</div>
+          </div>
+        </div>
+        <div class="hist-item">
+          <span class="verb post">POST</span>
+          <div class="hist-main">
+            <div class="hist-url">api.example.com/v1/messages/send</div>
+            <div class="hist-time">yesterday</div>
+          </div>
+        </div>
+        <div class="hist-item">
+          <span class="verb post">POST</span>
+          <div class="hist-main">
+            <div class="hist-url">api.example.com/v1/coupons/claim</div>
+            <div class="hist-time">2 days ago</div>
+          </div>
+        </div>
+        <div class="hist-item">
+          <span class="verb post">POST</span>
+          <div class="hist-main">
+            <div class="hist-url">api.example.com/v1/orders/create</div>
+            <div class="hist-time">2 days ago</div>
+          </div>
+        </div>
+        <div class="hist-item">
+          <span class="verb del">DEL</span>
+          <div class="hist-main">
+            <div class="hist-url">api.example.com/v1/coupons/8821</div>
+            <div class="hist-time">3 days ago</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <section class="main">
+      <div class="tabs">
+        <div class="tab"><span class="v" style="color:var(--success)">GET</span> New Request <span class="x">✕</span></div>
+        <div class="tab active"><span class="v" style="color:var(--success)">GET</span> users/profile <span class="x">✕</span></div>
+        <div class="tab-add">＋</div>
+      </div>
+      <div class="tabs-rule"></div>
+
+      <div class="req">
+        <!-- URL bar -->
+        <div class="urlbar">
+          <div class="method">GET <span class="car">▾</span></div>
+          <div class="url">https://api.example.com/v1/users/profile?active=true&amp;role=admin&amp;page=1</div>
+          <button class="send">Send ▸</button>
+        </div>
+
+        <!-- inner tabs -->
+        <div class="itabs">
+          <div class="itab">Headers</div>
+          <div class="itab active">Params</div>
+          <div class="itab">Body</div>
+        </div>
+
+        <!-- params table -->
+        <div class="ktable">
+          <div class="krow"><span class="ck on"></span><input class="kin" value="active"><input class="kin" value="true"></div>
+          <div class="krow"><span class="ck on"></span><input class="kin" value="role"><input class="kin" value="admin"></div>
+          <div class="krow"><span class="ck on"></span><input class="kin" value="page"><input class="kin" value="1"></div>
+          <div class="krow"><span class="ck"></span><input class="kin dim" placeholder="Parameter"><input class="kin dim" placeholder="Value"></div>
+        </div>
+      </div>
+
+      <!-- Response -->
+      <div class="resp">
+        <div class="statusbar">
+          <span class="pill">200 OK</span>
+          <span class="meta"><b>128</b> ms</span>
+          <span class="meta"><b>1.2</b> KB</span>
+        </div>
+        <div class="resp-itabs">
+          <div class="itab active">Body</div>
+          <div class="itab">Headers</div>
+        </div>
+        <div class="body"><div><span class="ln">1</span><span class="j-punc">{</span></div><div><span class="ln">2</span>  <span class="j-key">"code"</span><span class="j-punc">:</span> <span class="j-num">0</span><span class="j-punc">,</span></div><div><span class="ln">3</span>  <span class="j-key">"message"</span><span class="j-punc">:</span> <span class="j-str">"success"</span><span class="j-punc">,</span></div><div><span class="ln">4</span>  <span class="j-key">"data"</span><span class="j-punc">:</span> <span class="j-punc">{</span></div><div><span class="ln">5</span>    <span class="j-key">"id"</span><span class="j-punc">:</span> <span class="j-num">1024</span><span class="j-punc">,</span></div><div><span class="ln">6</span>    <span class="j-key">"name"</span><span class="j-punc">:</span> <span class="j-str">"Ada"</span><span class="j-punc">,</span></div><div><span class="ln">7</span>    <span class="j-key">"active"</span><span class="j-punc">:</span> <span class="j-num">true</span></div><div><span class="ln">8</span>  <span class="j-punc">}</span></div><div><span class="ln">9</span><span class="j-punc">}</span></div></div>
+      </div>
+    </section>
+
+  </div>
+</body>
+</html>
