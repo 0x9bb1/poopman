@@ -216,8 +216,10 @@ impl RequestEditor {
         // Add one empty custom header row at the end with subscription
         self.add_custom_header_row(window, cx);
 
-        // Parse URL to populate params (this will also add subscriptions)
-        self.parse_url_to_params(window, cx);
+        // Populate params from the URL. Use the ungated rebuild directly: this is a
+        // programmatic load, so the URL input does not hold focus and the focus-gated
+        // parse_url_to_params would otherwise bail and leave Params empty.
+        self.rebuild_params_from_url(window, cx);
 
         // Force sync Content-Type with body type to auto-correct any inconsistencies in history
         let content_type = match &request.body {
@@ -545,6 +547,15 @@ impl RequestEditor {
             return;
         }
 
+        self.rebuild_params_from_url(window, cx);
+    }
+
+    /// Rebuild the params list from the URL's query string. No focus gating.
+    ///
+    /// Used by the focus-gated `parse_url_to_params` wrapper (live URL edits) and
+    /// directly by `load_request`, where the URL is set programmatically and never
+    /// holds focus — so it must populate params unconditionally.
+    fn rebuild_params_from_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url_str = self.url_input.read(cx).value().to_string();
         let new_params = url_params::parse_query_params(&url_str);
 
