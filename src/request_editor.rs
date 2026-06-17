@@ -47,10 +47,8 @@ pub struct RequestEditor {
     params_scroll_handle: ScrollHandle,
     active_tab: usize,
     loading: bool,
-    _subscriptions: Vec<Subscription>,
-    updating_url: bool, // Flag to prevent infinite loop between URL and params updates
-    parsing_url: bool, // Flag to prevent syncing back to URL while parsing URL to params
-    last_parsed_url: String, // Last URL that was parsed to params
+    _subscriptions: Vec<Subscription>,       // Permanent: URL input + body editor subscriptions
+    _row_subscriptions: Vec<Subscription>,   // Header/param row subscriptions; rebuilt on load
 }
 
 impl RequestEditor {
@@ -85,9 +83,7 @@ impl RequestEditor {
             active_tab: 0,
             loading: false,
             _subscriptions: vec![],
-            updating_url: false,
-            parsing_url: false,
-            last_parsed_url: String::new(),
+            _row_subscriptions: vec![],
         };
 
         // Subscribe to URL input changes to parse params
@@ -164,20 +160,13 @@ impl RequestEditor {
 
         // Set headers - reinitialize with predefined headers
         self.headers.clear();
-        self._subscriptions.clear();
+        // Only clear ROW subscriptions (header/param rows). The permanent URL and body
+        // subscriptions in self._subscriptions must survive, otherwise body Content-Type
+        // sync and header auto-add silently break after switching tabs / loading history.
+        self._row_subscriptions.clear();
 
-        // Clear params to force rebuild with fresh subscriptions
-        // This is critical because _subscriptions.clear() removes all params subscriptions
-        // but self.params still holds old ParamRow entities with dead subscriptions
+        // Clear params to force rebuild with fresh subscriptions.
         self.params.clear();
-        self.last_parsed_url.clear(); // Reset to force URL parsing
-
-        // Re-subscribe to URL input for URL → Params sync (cleared above)
-        let url_input = self.url_input.clone();
-        let url_sub = cx.subscribe_in(&url_input, window, |this, _, _event: &InputEvent, window, cx| {
-            this.parse_url_to_params(window, cx);
-        });
-        self._subscriptions.push(url_sub);
 
         // First, add all predefined headers
         self.init_predefined_headers(window, cx);
@@ -320,9 +309,6 @@ impl RequestEditor {
         // Clear existing params and subscriptions related to params
         self.params.clear();
 
-        // Set flag to prevent syncing back to URL while we're building params
-        self.parsing_url = true;
-
         // Rebuild params from saved state
         for param_state in state {
             let param_row = ParamRow {
@@ -347,24 +333,13 @@ impl RequestEditor {
                 this.sync_params_to_url(window, cx);
             });
 
-            self._subscriptions.push(sub1);
-            self._subscriptions.push(sub2);
+            self._row_subscriptions.push(sub1);
+            self._row_subscriptions.push(sub2);
             self.params.push(param_row);
         }
 
         // Add one empty row for new params
         self.add_param_row(window, cx);
-
-        // Reset flag after params are built
-        self.parsing_url = false;
-
-        // Re-subscribe to URL input for URL → Params sync
-        // This is needed because load_request() may have cleared it
-        let url_input = self.url_input.clone();
-        let url_sub = cx.subscribe_in(&url_input, window, |this, _, _event: &InputEvent, window, cx| {
-            this.parse_url_to_params(window, cx);
-        });
-        self._subscriptions.push(url_sub);
 
         cx.notify();
     }
@@ -407,7 +382,7 @@ impl RequestEditor {
                         }
                     }
                 });
-                self._subscriptions.push(sub);
+                self._row_subscriptions.push(sub);
             }
 
             self.headers.push(header_row);
@@ -480,7 +455,7 @@ impl RequestEditor {
             }
         });
 
-        self._subscriptions.push(sub);
+        self._row_subscriptions.push(sub);
         self.headers.push(new_row);
         cx.notify();
     }
@@ -562,35 +537,31 @@ impl RequestEditor {
     /// This function synchronizes the params list with the URL's query string.
     /// It uses pure functions from url_params module for parsing logic.
     fn parse_url_to_params(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Guard: prevent infinite loop during bidirectional sync
-        if self.updating_url || self.parsing_url {
-            log::debug!("Skipping parse_url_to_params (updating_url={}, parsing_url={})",
-                self.updating_url, self.parsing_url);
+        // Focus arbitration: only parse when the URL input is the focused widget.
+        // sync_params_to_url's programmatic set_value also emits InputEvent::Change,
+        // but the URL input is not focused then, so this returns early and the
+        // bidirectional loop is broken without any reentrancy flags.
+        if !self.url_input.read(cx).focus_handle(cx).is_focused(window) {
             return;
         }
 
         let url_str = self.url_input.read(cx).value().to_string();
-
-        // Early exit: URL unchanged and params list is not empty
-        // (if params is empty, we need to add an empty row even if URL unchanged)
-        if url_str == self.last_parsed_url && !self.params.is_empty() {
-            return;
-        }
-
-        log::debug!("Parsing URL to params: {}", url_str);
-
-        // Use pure function to parse query params
         let new_params = url_params::parse_query_params(&url_str);
 
-        // Handle special case: URL has no query string but is not empty
-        // In this case, keep existing params unchanged (don't clear them)
-        if new_params.is_empty() && !url_str.is_empty() && !url_str.contains('?') && !self.params.is_empty() {
-            self.last_parsed_url = url_str;
+        // URL is non-empty but has no query string (user still typing the base URL):
+        // keep existing params instead of wiping them.
+        if new_params.is_empty()
+            && !url_str.is_empty()
+            && !url_str.contains('?')
+            && !self.params.is_empty()
+        {
             return;
         }
 
-        // Collect current params for comparison (excluding empty placeholder row)
-        let current_params: Vec<(String, String)> = self.params
+        // Skip rebuild if the parsed params match current params (avoids disrupting
+        // the user mid-edit and avoids needless entity churn).
+        let current_params: Vec<(String, String)> = self
+            .params
             .iter()
             .map(|p| {
                 (
@@ -600,27 +571,18 @@ impl RequestEditor {
             })
             .filter(|(k, v)| !k.is_empty() || !v.is_empty())
             .collect();
-
-        // Early exit: params content unchanged (and list is not empty)
         if url_params::params_equal(&new_params, &current_params) && !self.params.is_empty() {
-            self.last_parsed_url = url_str;
             return;
         }
 
-        // === Rebuild params list ===
-        self.parsing_url = true;
-        self.last_parsed_url = url_str;
+        // Rebuild params list from the URL query string.
         self.params.clear();
-
-        // Create ParamRow for each parsed param
         for (key_str, value_str) in new_params {
             self.add_param_row_with_values(&key_str, &value_str, true, window, cx);
         }
-
-        // Always add one empty row for new params
+        // Always keep one trailing empty row for adding new params.
         self.add_param_row(window, cx);
 
-        self.parsing_url = false;
         cx.notify();
     }
 
@@ -659,8 +621,8 @@ impl RequestEditor {
             this.sync_params_to_url(window, cx);
         });
 
-        self._subscriptions.push(sub1);
-        self._subscriptions.push(sub2);
+        self._row_subscriptions.push(sub1);
+        self._row_subscriptions.push(sub2);
         self.params.push(param_row);
     }
 
@@ -669,26 +631,32 @@ impl RequestEditor {
     /// This function rebuilds the URL query string from the current params list
     /// and updates the URL input. Uses pure functions from url_params module.
     fn sync_params_to_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Guard: prevent infinite loop during bidirectional sync
-        if self.updating_url || self.parsing_url {
+        // Focus arbitration: only sync when a param input is the focused widget.
+        // Otherwise this Change was triggered by a programmatic set_value (e.g. from
+        // parse_url_to_params rebuilding rows), and syncing back would loop.
+        let param_focused = self.params.iter().any(|p| {
+            p.key_input.read(cx).focus_handle(cx).is_focused(window)
+                || p.value_input.read(cx).focus_handle(cx).is_focused(window)
+        });
+        if !param_focused {
             return;
         }
 
-        self.updating_url = true;
+        self.rebuild_url_from_params(window, cx);
+    }
 
+    /// Rebuild the URL input from the current params list. No focus gating.
+    ///
+    /// Used both by `sync_params_to_url` (the focus-gated wrapper for text edits)
+    /// and directly by button callbacks (toggle/remove), where no text input holds
+    /// focus. The resulting `set_value` emits InputEvent::Change, but the URL input
+    /// is not focused, so `parse_url_to_params` short-circuits — no loop.
+    fn rebuild_url_from_params(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current_url = self.url_input.read(cx).value().to_string();
         let new_url = self.rebuild_url_with_params(&current_url, cx);
-
-        // Update last_parsed_url BEFORE setting the URL input
-        // This prevents parse_url_to_params from re-parsing the URL we just built
-        // (InputEvent may be delivered asynchronously after this function returns)
-        self.last_parsed_url = new_url.clone();
-
         self.url_input.update(cx, |input, cx| {
             input.set_value(&new_url, window, cx);
         });
-
-        self.updating_url = false;
     }
 
     /// Rebuild URL by combining base URL with current params.
@@ -777,8 +745,8 @@ impl RequestEditor {
             this.sync_params_to_url(window, cx);
         });
 
-        self._subscriptions.push(sub_key);
-        self._subscriptions.push(sub_value);
+        self._row_subscriptions.push(sub_key);
+        self._row_subscriptions.push(sub_value);
         self.params.push(new_row);
         cx.notify();
     }
@@ -787,7 +755,7 @@ impl RequestEditor {
     fn toggle_param(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(param) = self.params.get_mut(index) {
             param.enabled = !param.enabled;
-            self.sync_params_to_url(window, cx);
+            self.rebuild_url_from_params(window, cx);
             cx.notify();
         }
     }
@@ -809,7 +777,7 @@ impl RequestEditor {
                 self.add_param_row(window, cx);
             }
 
-            self.sync_params_to_url(window, cx);
+            self.rebuild_url_from_params(window, cx);
             cx.notify();
         }
     }
