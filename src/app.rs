@@ -12,6 +12,9 @@ use crate::request_editor::{RequestCompleted, RequestEditor};
 use crate::request_tab::RequestTab;
 use crate::response_viewer::ResponseViewer;
 use crate::tab_bar::{NewTabClicked, TabBar, TabClicked, TabCloseClicked};
+use crate::theme::{
+    REQUEST_INITIAL_HEIGHT, REQUEST_MAX, REQUEST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH,
+};
 
 /// Main application view
 pub struct PoopmanApp {
@@ -354,8 +357,8 @@ impl Render for PoopmanApp {
                     .child(
                         // Left: History panel with resizable width
                         resizable_panel()
-                            .size(px(280.)) // Initial width
-                            .size_range(px(200.)..px(500.)) // Can resize between 200px-500px
+                            .size(px(SIDEBAR_WIDTH))
+                            .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
                             .child(
                                 div()
                                     .size_full()
@@ -383,8 +386,8 @@ impl Render for PoopmanApp {
                                     v_resizable("request-response-splitter")
                                         .child(
                                             resizable_panel()
-                                                .size(px(350.)) // Request editor initial size
-                                                .size_range(px(150.)..px(700.)) // Can resize between 150px-700px
+                                                .size(px(REQUEST_INITIAL_HEIGHT))
+                                                .size_range(px(REQUEST_MIN)..px(REQUEST_MAX))
                                                 .child(self.request_editor.clone()),
                                         )
                                         .child(

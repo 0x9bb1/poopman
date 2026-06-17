@@ -12,6 +12,7 @@ use gpui_component::input::InputEvent;
 use crate::body_editor::{BodyEditor, BodyTypeChanged};
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
 use crate::url_params::{self, QueryParam};
+use crate::theme::METHOD_SELECT_WIDTH;
 
 /// Event emitted when a request is sent and response is received
 #[derive(Clone)]
@@ -1038,7 +1039,7 @@ impl Render for RequestEditor {
                             // Method selector - prevent it from growing
                             div()
                                 .flex_shrink_0()
-                                .w(px(100.))
+                                .w(px(METHOD_SELECT_WIDTH))
                                 .child(Select::new(&self.method_select)),
                         )
                         .child(
