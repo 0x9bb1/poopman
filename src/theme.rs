@@ -47,7 +47,6 @@ fn c(hex: u32) -> Hsla {
 }
 
 /// Semantic color for an HTTP method label (used by tab bar + history).
-#[allow(dead_code)]
 pub fn method_color(method: HttpMethod, theme: &Theme) -> Hsla {
     match method {
         HttpMethod::GET => theme.success,

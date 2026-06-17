@@ -3,6 +3,7 @@ use gpui::px;
 use gpui_component::{h_flex, ActiveTheme as _};
 
 use crate::request_tab::RequestTab;
+use crate::theme::method_color;
 
 /// Event emitted when a tab is clicked
 #[derive(Clone)]
@@ -83,16 +84,7 @@ impl Render for TabBar {
                         let tab_index = index;
                         let method = tab.request.method.as_str();
 
-                        // Method color badge
-                        let method_color = match tab.request.method {
-                            crate::types::HttpMethod::GET => gpui::rgb(0x61affe),
-                            crate::types::HttpMethod::POST => gpui::rgb(0x49cc90),
-                            crate::types::HttpMethod::PUT => gpui::rgb(0xfca130),
-                            crate::types::HttpMethod::DELETE => gpui::rgb(0xf93e3e),
-                            crate::types::HttpMethod::PATCH => gpui::rgb(0x50e3c2),
-                            crate::types::HttpMethod::HEAD => gpui::rgb(0x9012fe),
-                            crate::types::HttpMethod::OPTIONS => gpui::rgb(0x0d5aa7),
-                        };
+                        let verb_color = method_color(tab.request.method, theme);
 
                         h_flex()
                             .id(("tab", tab.id))
@@ -103,25 +95,17 @@ impl Render for TabBar {
                             .rounded_sm()
                             .border_1()
                             .border_color(if is_active { theme.border } else { gpui::transparent_black() })
-                            .bg(if is_active { theme.list_active } else { theme.background })
+                            .bg(if is_active { theme.tab_active } else { theme.background })
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, event, window, cx| {
                                 this.on_tab_click(tab_index, event, window, cx);
                             }))
                             .child(
-                                // Method badge
                                 div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(method_color)
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(gpui::white())
-                                            .child(method)
-                                    )
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(verb_color)
+                                    .child(method)
                             )
                             .child(
                                 // Tab title
