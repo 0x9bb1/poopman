@@ -546,7 +546,7 @@ impl Render for BodyEditor {
                     .w_full()
                     .child(
                         h_flex().gap_4().items_center().children(
-                            ["None", "Raw", "Form-data"].into_iter().enumerate().map(|(i, label)| {
+                            ["none", "raw", "form-data"].into_iter().enumerate().map(|(i, label)| {
                                 let selected = self.body_type_index == i;
                                 h_flex()
                                     .id(("body-type", i))
@@ -587,21 +587,25 @@ impl Render for BodyEditor {
                                             })
                                             .child(label),
                                     )
-                            }),
-                        ),
+                            })
+                        )
+                        .when(self.body_type_index == 1, |this| {
+                            // JSON subtype dropdown sits right after the radios (left-packed)
+                            this.child(Select::new(&self.raw_subtype_select).small().appearance(false))
+                        }),
                     )
                     .child(
-                        h_flex().gap_3().items_center().when(self.body_type_index == 1, |this| {
-                            this.child(Select::new(&self.raw_subtype_select).small().appearance(false))
-                                .child(
-                                    Button::new("format-button")
-                                        .small()
-                                        .ghost()
-                                        .label("Format")
-                                        .on_click(cx.listener(|this, _event, window, cx| {
-                                            this.format_raw_body(window, cx);
-                                        })),
-                                )
+                        // Right-aligned action, like Postman's Beautify
+                        h_flex().items_center().when(self.body_type_index == 1, |this| {
+                            this.child(
+                                Button::new("beautify-button")
+                                    .small()
+                                    .ghost()
+                                    .label("Beautify")
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.format_raw_body(window, cx);
+                                    })),
+                            )
                         }),
                     )
             )
