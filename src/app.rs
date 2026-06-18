@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar, WindowExt,
+    button::*, h_flex, v_flex, ActiveTheme as _, Root, Sizable as _, TitleBar, WindowExt,
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
@@ -407,7 +407,7 @@ impl PoopmanApp {
 }
 
 impl Render for PoopmanApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
         let env_label = format!(
@@ -501,5 +501,8 @@ impl Render for PoopmanApp {
                     ),
             ),
             )
+            // gpui-component dialogs/modals are stored on Root but must be rendered
+            // by the app's root view; embed the dialog overlay here.
+            .children(Root::render_dialog_layer(window, cx))
     }
 }
