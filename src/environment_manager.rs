@@ -236,14 +236,25 @@ impl Render for EnvironmentManager {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_environment(window, cx);
                             }))
-                            .child(div().w(px(6.)).flex_shrink_0())
+                            .child(
+                                // indicator column (centered "+"), same width as env rows
+                                div()
+                                    .w(px(14.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(theme.primary)
+                                    .child("+"),
+                            )
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .text_sm()
                                     .text_color(theme.primary)
-                                    .child("+ New environment"),
+                                    .child("New environment"),
                             ),
                     )
                     .child(
@@ -271,13 +282,21 @@ impl Render for EnvironmentManager {
                                         this.select(id, window, cx);
                                     }))
                                     .child(
-                                        // active dot (fixed 6px leading column)
+                                        // indicator column (centered dot), matches the
+                                        // "+" column on the add row so they align.
                                         div()
-                                            .w(px(6.))
-                                            .h(px(6.))
+                                            .w(px(14.))
                                             .flex_shrink_0()
-                                            .rounded_full()
-                                            .when(is_active, |d| d.bg(theme.primary)),
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                div()
+                                                    .w(px(6.))
+                                                    .h(px(6.))
+                                                    .rounded_full()
+                                                    .when(is_active, |d| d.bg(theme.primary)),
+                                            ),
                                     )
                                     .child(
                                         div()
