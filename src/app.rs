@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex, v_flex, ActiveTheme as _, TitleBar, WindowExt,
+    button::*, h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar, WindowExt,
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
@@ -19,7 +19,6 @@ use crate::theme::{
 
 /// Main application view
 pub struct PoopmanApp {
-    #[allow(dead_code)]
     db: Arc<Database>,
     history_panel: Entity<HistoryPanel>,
     request_editor: Entity<RequestEditor>,
@@ -28,6 +27,9 @@ pub struct PoopmanApp {
     request_tabs: Vec<RequestTab>,
     active_tab_index: usize,
     next_tab_id: usize,
+    environments: Vec<crate::types::Environment>,
+    active_environment_id: Option<i64>,
+    env_manager: Entity<EnvironmentManager>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -36,11 +38,20 @@ impl PoopmanApp {
         // Initialize database
         let db = Arc::new(Database::new().expect("Failed to initialize database"));
 
+        // Load environments + active selection
+        let environments = db.load_environments().unwrap_or_default();
+        let active_environment_id = db.get_active_environment_id().unwrap_or(None);
+
         // Create components
         let request_editor = cx.new(|cx| RequestEditor::new(window, cx));
         let response_viewer = cx.new(|cx| ResponseViewer::new(window, cx));
         let history_panel = cx.new(|cx| HistoryPanel::new(db.clone(), window, cx));
         let tab_bar = cx.new(|cx| TabBar::new(window, cx));
+        let env_manager = cx.new(|cx| EnvironmentManager::new(db.clone(), window, cx));
+
+        // Push the active environment's variables into the request editor.
+        let initial_env_vars = Self::active_env_vars(&environments, active_environment_id);
+        request_editor.update(cx, |editor, _| editor.set_env_vars(initial_env_vars));
 
         // Initialize with one empty tab
         let request_tabs = vec![RequestTab::new_empty(0)];
@@ -132,6 +143,15 @@ impl PoopmanApp {
             },
         );
 
+        // Reload environments + refresh editor vars whenever the manager changes them.
+        let env_changed_sub = cx.subscribe_in(
+            &env_manager,
+            window,
+            move |this, _, _e: &EnvironmentsChanged, _window, cx| {
+                this.reload_environments(cx);
+            },
+        );
+
         Self {
             db,
             history_panel,
@@ -141,14 +161,54 @@ impl PoopmanApp {
             request_tabs,
             active_tab_index,
             next_tab_id,
+            environments,
+            active_environment_id,
+            env_manager,
             _subscriptions: vec![
                 request_sub,
                 history_sub,
                 tab_clicked_sub,
                 new_tab_sub,
                 close_tab_sub,
+                env_changed_sub,
             ],
         }
+    }
+
+    /// Build the active environment's enabled variables as a flat map.
+    fn active_env_vars(
+        environments: &[crate::types::Environment],
+        active_id: Option<i64>,
+    ) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        if let Some(id) = active_id {
+            if let Some(env) = environments.iter().find(|e| e.id == id) {
+                for v in &env.variables {
+                    if v.enabled && !v.key.is_empty() {
+                        map.insert(v.key.clone(), v.value.clone());
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// Reload environments + active selection from the DB and push the active
+    /// variable map to the request editor.
+    fn reload_environments(&mut self, cx: &mut Context<Self>) {
+        self.environments = self.db.load_environments().unwrap_or_default();
+        self.active_environment_id = self.db.get_active_environment_id().unwrap_or(None);
+        let vars = Self::active_env_vars(&self.environments, self.active_environment_id);
+        self.request_editor.update(cx, |editor, _| editor.set_env_vars(vars));
+        cx.notify();
+    }
+
+    /// Open the environment management dialog.
+    fn open_env_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let manager = self.env_manager.clone();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            dialog.title("Environments").w(px(720.)).child(manager.clone())
+        });
     }
 
     /// Save current editor state to active tab
@@ -350,17 +410,40 @@ impl Render for PoopmanApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
+        let env_label = format!(
+            "Env: {}",
+            self.active_environment_id
+                .and_then(|id| self.environments.iter().find(|e| e.id == id))
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "No Environment".to_string())
+        );
+
         v_flex()
             .size_full()
             .bg(theme.background)
             .child(
                 // Custom warm title bar (replaces the white native title bar)
                 TitleBar::new().child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.foreground)
-                        .child("Poopman"),
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .child("Poopman"),
+                        )
+                        .child(
+                            Button::new("env-selector")
+                                .ghost()
+                                .small()
+                                .label(env_label)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_env_manager(window, cx);
+                                })),
+                        ),
                 ),
             )
             .child(
