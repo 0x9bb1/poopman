@@ -1020,14 +1020,6 @@ impl Render for RequestEditor {
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
-                    // Section title
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.muted_foreground)
-                        .child("REQUEST"),
-                )
-                .child(
                     // URL bar
                     div()
                         .flex()
