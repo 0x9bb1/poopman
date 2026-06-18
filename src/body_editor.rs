@@ -2,7 +2,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui::px;
 use gpui_component::{
-    button::*, checkbox::Checkbox, h_flex, input::{Input, InputState, InputEvent as InputChangeEvent},
+    button::*, checkbox::Checkbox, h_flex, input::{Input, InputState, InputEvent as InputChangeEvent, TabSize},
     select::*, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
 };
 
@@ -86,6 +86,7 @@ impl BodyEditor {
                 .code_editor(current_raw_subtype.as_str())
                 .line_number(true)
                 .indent_guides(true)
+                .tab_size(TabSize { tab_size: 4, hard_tabs: false })
                 .placeholder(get_placeholder_for_subtype(current_raw_subtype))
         });
 
