@@ -590,8 +590,16 @@ impl Render for BodyEditor {
                             })
                         )
                         .when(self.body_type_index == 1, |this| {
-                            // JSON subtype dropdown sits right after the radios (left-packed)
-                            this.child(Select::new(&self.raw_subtype_select).small().appearance(false))
+                            // JSON subtype dropdown, slightly separated from the radios.
+                            // Explicit menu_width so longer names (JavaScript) aren't truncated.
+                            this.child(
+                                div().ml_2().child(
+                                    Select::new(&self.raw_subtype_select)
+                                        .small()
+                                        .appearance(false)
+                                        .menu_width(px(130.)),
+                                ),
+                            )
                         }),
                     )
                     .child(
