@@ -364,6 +364,22 @@ pub struct HeaderState {
     pub predefined: Option<PredefinedHeader>,
 }
 
+/// A named environment holding a set of variables.
+#[derive(Debug, Clone)]
+pub struct Environment {
+    pub id: i64,
+    pub name: String,
+    pub variables: Vec<EnvVar>,
+}
+
+/// A single environment variable (key/value, toggleable).
+#[derive(Debug, Clone)]
+pub struct EnvVar {
+    pub enabled: bool,
+    pub key: String,
+    pub value: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
