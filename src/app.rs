@@ -1,12 +1,13 @@
 use gpui::*;
 use gpui_component::{
-    v_flex, ActiveTheme as _, TitleBar,
+    button::*, h_flex, v_flex, ActiveTheme as _, TitleBar, WindowExt,
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
 use std::sync::Arc;
 
 use crate::db::Database;
+use crate::environment_manager::{EnvironmentManager, EnvironmentsChanged};
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
 use crate::request_editor::{RequestCompleted, RequestEditor};
 use crate::request_tab::RequestTab;
