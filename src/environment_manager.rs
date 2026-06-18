@@ -218,15 +218,33 @@ impl Render for EnvironmentManager {
                     .mr_3()
                     .border_r_1()
                     .border_color(theme.border)
-                    .gap_2()
+                    .gap_0p5()
+                    // "+ New environment" — same row geometry as the env rows below
+                    // (full width, px_2/py_1p5, 6px leading column, gap_2) so they
+                    // align in left edge, width, and height.
                     .child(
-                        Button::new("env-add")
-                            .small()
-                            .ghost()
-                            .label("+ New environment")
+                        h_flex()
+                            .id("env-add")
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .gap_2()
+                            .items_center()
+                            .rounded(theme.radius)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.list_hover))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_environment(window, cx);
-                            })),
+                            }))
+                            .child(div().w(px(6.)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .text_color(theme.primary)
+                                    .child("+ New environment"),
+                            ),
                     )
                     .child(
                         v_flex()
@@ -253,16 +271,18 @@ impl Render for EnvironmentManager {
                                         this.select(id, window, cx);
                                     }))
                                     .child(
-                                        // active dot
+                                        // active dot (fixed 6px leading column)
                                         div()
                                             .w(px(6.))
                                             .h(px(6.))
+                                            .flex_shrink_0()
                                             .rounded_full()
                                             .when(is_active, |d| d.bg(theme.primary)),
                                     )
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
                                             .text_sm()
                                             .when(is_active, |d| {
                                                 d.font_weight(FontWeight::SEMIBOLD)
