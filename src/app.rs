@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _,
+    v_flex, ActiveTheme as _, TitleBar,
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
@@ -349,10 +349,21 @@ impl Render for PoopmanApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        div()
+        v_flex()
             .size_full()
             .bg(theme.background)
             .child(
+                // Custom warm title bar (replaces the white native title bar)
+                TitleBar::new().child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child("Poopman"),
+                ),
+            )
+            .child(
+                div().flex_1().min_h_0().child(
                 h_resizable("history-main-splitter")
                     .child(
                         // Left: History panel with resizable width
@@ -404,6 +415,7 @@ impl Render for PoopmanApp {
                             )
                             .into_any_element(),
                     ),
+            ),
             )
     }
 }
