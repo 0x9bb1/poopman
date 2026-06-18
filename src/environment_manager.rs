@@ -207,18 +207,22 @@ impl Render for EnvironmentManager {
 
         h_flex()
             .w_full()
-            .h(px(420.))
-            .gap_3()
+            .h(px(440.))
             // ---- Left: environment list ----
             .child(
                 v_flex()
-                    .w(px(200.))
+                    .w(px(190.))
                     .h_full()
                     .flex_shrink_0()
-                    .gap_1()
+                    .pr_3()
+                    .mr_3()
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .gap_2()
                     .child(
                         Button::new("env-add")
                             .small()
+                            .ghost()
                             .label("+ New environment")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_environment(window, cx);
@@ -274,12 +278,14 @@ impl Render for EnvironmentManager {
                 v_flex()
                     .flex_1()
                     .h_full()
-                    .gap_2()
+                    .min_w_0()
+                    .gap_3()
                     .child(
                         h_flex()
+                            .w_full()
                             .gap_2()
                             .items_center()
-                            .child(div().flex_1().child(Input::new(&self.name_input)))
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.name_input)))
                             .when(active_id != Some(sel_id), |this| {
                                 this.child(
                                     Button::new("env-set-active")
@@ -301,6 +307,19 @@ impl Render for EnvironmentManager {
                             ),
                     )
                     .child(
+                        // column headers
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(div().w(px(18.)))
+                            .child(div().flex_1().child("Key"))
+                            .child(div().flex_1().child("Value"))
+                            .child(div().w(px(22.))),
+                    )
+                    .child(
                         v_flex()
                             .id("env-vars")
                             .flex_1()
@@ -318,27 +337,25 @@ impl Render for EnvironmentManager {
                                                 this.toggle_var(index, cx);
                                             })),
                                     )
-                                    .child(div().flex_1().child(Input::new(&row.key_input)))
+                                    .child(div().flex_1().min_w_0().child(Input::new(&row.key_input)))
+                                    .child(div().flex_1().min_w_0().child(Input::new(&row.value_input)))
                                     .child(
-                                        div().flex_1().child(
-                                            Input::new(&row.value_input).suffix(
-                                                Button::new(("var-del", index))
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .label("×")
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _window, cx| {
-                                                            this.remove_var_row(index, cx);
-                                                        },
-                                                    )),
-                                            ),
-                                        ),
+                                        Button::new(("var-del", index))
+                                            .ghost()
+                                            .xsmall()
+                                            .label("×")
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                this.remove_var_row(index, cx);
+                                            })),
                                     )
                             })),
                     )
                     .child(
                         h_flex()
+                            .w_full()
                             .gap_2()
+                            .items_center()
+                            .justify_between()
                             .child(
                                 Button::new("env-add-var")
                                     .small()

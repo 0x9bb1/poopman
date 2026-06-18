@@ -424,26 +424,11 @@ impl Render for PoopmanApp {
             .child(
                 // Custom warm title bar (replaces the white native title bar)
                 TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.foreground)
-                                .child("Poopman"),
-                        )
-                        .child(
-                            Button::new("env-selector")
-                                .ghost()
-                                .small()
-                                .label(env_label)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_env_manager(window, cx);
-                                })),
-                        ),
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child("Poopman"),
                 ),
             )
             .child(
@@ -472,8 +457,31 @@ impl Render for PoopmanApp {
                             .bg(theme.background) // Capture mouse events, prevent passthrough
                             .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
                             .child(
-                                // Tab bar at the top
-                                self.tab_bar.clone(),
+                                // Tab bar row with the environment selector at the right end
+                                h_flex()
+                                    .w_full()
+                                    .child(div().flex_1().min_w_0().child(self.tab_bar.clone()))
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .px_2()
+                                            .bg(theme.background)
+                                            .border_b_1()
+                                            .border_color(theme.border)
+                                            .child(
+                                                Button::new("env-selector")
+                                                    .ghost()
+                                                    .small()
+                                                    .label(env_label)
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.open_env_manager(window, cx);
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
                             )
                             .child(
                                 // Request editor and response viewer with resizable splitter
