@@ -39,7 +39,7 @@ impl ResponseViewer {
         // Try to format JSON body for better display
         let formatted_body =
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response.body) {
-                serde_json::to_string_pretty(&json).unwrap_or(response.body.clone())
+                crate::code_formatter::pretty_json_4(&json).unwrap_or(response.body.clone())
             } else {
                 response.body.clone()
             };

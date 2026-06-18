@@ -3,19 +3,32 @@
 //! This module provides pure functions for formatting and validating JSON, XML,
 //! and JavaScript code. All functions are stateless and can be tested independently.
 
+use serde::Serialize;
+
+/// Pretty-print a parsed JSON value with 4-space indentation (Postman-style).
+pub fn pretty_json_4(value: &serde_json::Value) -> Result<String, String> {
+    let mut buf = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value
+        .serialize(&mut ser)
+        .map_err(|e| format!("JSON format error: {}", e))?;
+    String::from_utf8(buf).map_err(|e| format!("JSON encode error: {}", e))
+}
+
 /// Format JSON string with pretty indentation.
 ///
 /// # Arguments
 /// * `input` - Raw JSON string
 ///
 /// # Returns
-/// * `Ok(String)` - Formatted JSON with 2-space indentation
+/// * `Ok(String)` - Formatted JSON with 4-space indentation
 /// * `Err(String)` - Parse error message
 ///
 /// # Examples
 /// ```
 /// let formatted = format_json(r#"{"key":"value"}"#)?;
-/// assert_eq!(formatted, "{\n  \"key\": \"value\"\n}");
+/// assert_eq!(formatted, "{\n    \"key\": \"value\"\n}");
 /// ```
 pub fn format_json(input: &str) -> Result<String, String> {
     if input.trim().is_empty() {
@@ -25,8 +38,7 @@ pub fn format_json(input: &str) -> Result<String, String> {
     let value: serde_json::Value = serde_json::from_str(input)
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
-    serde_json::to_string_pretty(&value)
-        .map_err(|e| format!("JSON format error: {}", e))
+    pretty_json_4(&value)
 }
 
 /// Validate JSON syntax without formatting.
@@ -134,6 +146,13 @@ mod tests {
         assert!(result.contains("\"key\""));
         assert!(result.contains("\"value\""));
         assert!(result.contains('\n')); // Has newlines
+    }
+
+    #[test]
+    fn test_format_json_4_space_indent() {
+        // Postman-style 4-space indentation
+        let result = format_json(r#"{"key":"value"}"#).unwrap();
+        assert_eq!(result, "{\n    \"key\": \"value\"\n}");
     }
 
     #[test]
