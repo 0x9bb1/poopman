@@ -4,6 +4,7 @@ mod app;
 mod body_editor;
 mod code_formatter;
 mod db;
+mod environment_manager;
 mod history_panel;
 mod http_client;
 mod request_editor;
