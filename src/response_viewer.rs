@@ -188,23 +188,11 @@ impl Render for ResponseViewer {
             .bg(theme.background)
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())) // Prevent click events from propagating
             .child(
-                // Response section with header
+                // Response status bar (self-styled with its own padding + bottom border)
                 div()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .p_4()
                     .w_full()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        // Section title
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child("RESPONSE"),
-                    )
                     .child(self.render_status_bar(cx)),
             )
             .when_some(self.response.as_ref(), |this, _| {

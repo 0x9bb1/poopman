@@ -597,7 +597,7 @@ impl Render for BodyEditor {
                         this.child(
                             div()
                                 .w(px(RAW_SUBTYPE_WIDTH))
-                                .child(Select::new(&self.raw_subtype_select))
+                                .child(Select::new(&self.raw_subtype_select).small())
                         )
                         .child(
                             Button::new("format-button")
@@ -640,6 +640,11 @@ impl Render for BodyEditor {
                         .flex_col()
                         .flex_1()
                         .w_full()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .overflow_hidden()
                         .child(
                             Input::new(&self.raw_body_editor).w_full().h_full()
                         )
