@@ -314,10 +314,10 @@ impl Render for EnvironmentManager {
                             .items_center()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(div().w(px(18.)))
+                            .child(div().w(px(20.)).flex_shrink_0())
                             .child(div().flex_1().child("Key"))
                             .child(div().flex_1().child("Value"))
-                            .child(div().w(px(22.))),
+                            .child(div().w(px(24.)).flex_shrink_0()),
                     )
                     .child(
                         v_flex()
@@ -331,22 +331,26 @@ impl Render for EnvironmentManager {
                                     .gap_2()
                                     .items_center()
                                     .child(
-                                        Checkbox::new(("var-check", index))
-                                            .checked(row.enabled)
-                                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                                this.toggle_var(index, cx);
-                                            })),
+                                        div().w(px(20.)).flex_shrink_0().flex().justify_center().child(
+                                            Checkbox::new(("var-check", index))
+                                                .checked(row.enabled)
+                                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                                    this.toggle_var(index, cx);
+                                                })),
+                                        ),
                                     )
                                     .child(div().flex_1().min_w_0().child(Input::new(&row.key_input)))
                                     .child(div().flex_1().min_w_0().child(Input::new(&row.value_input)))
                                     .child(
-                                        Button::new(("var-del", index))
-                                            .ghost()
-                                            .xsmall()
-                                            .label("×")
-                                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                                this.remove_var_row(index, cx);
-                                            })),
+                                        div().w(px(24.)).flex_shrink_0().flex().justify_center().child(
+                                            Button::new(("var-del", index))
+                                                .ghost()
+                                                .xsmall()
+                                                .label("×")
+                                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                                    this.remove_var_row(index, cx);
+                                                })),
+                                        ),
                                     )
                             })),
                     )
