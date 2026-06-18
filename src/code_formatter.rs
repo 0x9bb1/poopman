@@ -37,6 +37,7 @@ pub fn format_json(input: &str) -> Result<String, String> {
 /// # Returns
 /// * `Ok(())` - Valid JSON
 /// * `Err(String)` - Validation error message
+#[allow(dead_code)] // retained for tests and future validation feature
 pub fn validate_json(input: &str) -> Result<(), String> {
     if input.trim().is_empty() {
         return Ok(()); // Empty is considered valid (no content to validate)

@@ -2,12 +2,11 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui::px;
 use gpui_component::{
-    button::*, checkbox::Checkbox, h_flex, input::{Input, InputState, InputEvent as InputChangeEvent}, radio::RadioGroup,
+    button::*, checkbox::Checkbox, h_flex, input::{Input, InputState, InputEvent as InputChangeEvent},
     select::*, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
 };
 
 use crate::types::{BodyType, FormDataRow, FormDataValue, RawSubtype};
-use crate::theme::RAW_SUBTYPE_WIDTH;
 
 use gpui::Subscription;
 
@@ -502,35 +501,6 @@ impl BodyEditor {
         cx.notify();
     }
 
-    /// Validate current raw body content
-    fn validate_raw_body(&mut self, cx: &mut Context<Self>) {
-        let content = self.raw_body_editor.read(cx).value().to_string();
-
-        let result = match self.current_raw_subtype {
-            RawSubtype::Json => crate::code_formatter::validate_json(&content),
-            RawSubtype::Xml => crate::code_formatter::validate_xml(&content),
-            _ => {
-                // Text and JavaScript don't need validation
-                return;
-            }
-        };
-
-        match result {
-            Ok(_) => {
-                if !content.trim().is_empty() {
-                    self.validation_message = Some(format!("✓ Valid {}", self.current_raw_subtype.as_str().to_uppercase()));
-                    self.validation_error = false;
-                } else {
-                    self.validation_message = None;
-                }
-            }
-            Err(err) => {
-                self.validation_message = Some(err);
-                self.validation_error = true;
-            }
-        }
-        cx.notify();
-    }
 
     fn select_file_for_row(&mut self, index: usize, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let path = cx.prompt_for_paths(PathPromptOptions {
@@ -569,55 +539,71 @@ impl Render for BodyEditor {
             .flex_1()
             .min_h_0()  // Critical for scrolling to work in form-data
             .child(
-                // Body type selector (RadioGroup) with Raw subtype dropdown always visible
+                // Body type selector (custom muted radios) + Raw controls right-aligned
                 h_flex()
-                    .gap_2()
+                    .justify_between()
                     .items_center()
+                    .w_full()
                     .child(
-                        RadioGroup::horizontal("body-type")
-                            .children(vec!["None", "Raw", "Form-data"])
-                            .selected_index(Some(self.body_type_index))
-                            .on_click(cx.listener(|this, selected_ix: &usize, _window, cx| {
-                                this.body_type_index = *selected_ix;
-
-                                // Emit event to notify Content-Type changes
-                                let content_type = match *selected_ix {
-                                    0 => None, // BodyType::None
-                                    1 => Some(this.current_raw_subtype.content_type().to_string()), // Raw
-                                    2 => Some("multipart/form-data".to_string()), // FormData
-                                    _ => None,
-                                };
-
-                                cx.emit(BodyTypeChanged { content_type });
-                                cx.notify();
-                            }))
+                        h_flex().gap_4().items_center().children(
+                            ["None", "Raw", "Form-data"].into_iter().enumerate().map(|(i, label)| {
+                                let selected = self.body_type_index == i;
+                                h_flex()
+                                    .id(("body-type", i))
+                                    .gap_1p5()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.body_type_index = i;
+                                        let content_type = match i {
+                                            0 => None,
+                                            1 => Some(this.current_raw_subtype.content_type().to_string()),
+                                            2 => Some("multipart/form-data".to_string()),
+                                            _ => None,
+                                        };
+                                        cx.emit(BodyTypeChanged { content_type });
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .size(px(14.))
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(if selected { theme.primary } else { theme.border })
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(selected, |d| {
+                                                d.child(div().size(px(6.)).rounded_full().bg(theme.primary))
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(if selected {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(label),
+                                    )
+                            }),
+                        ),
                     )
-                    .when(self.body_type_index == 1, |this| {
-                        // Raw subtype dropdown and format button - only show when Raw is selected
-                        this.child(
-                            div()
-                                .w(px(RAW_SUBTYPE_WIDTH))
-                                .child(Select::new(&self.raw_subtype_select).small())
-                        )
-                        .child(
-                            Button::new("format-button")
-                                .small()
-                                .ghost()
-                                .label("Format")
-                                .on_click(cx.listener(|this, _event, window, cx| {
-                                    this.format_raw_body(window, cx);
-                                }))
-                        )
-                        .child(
-                            Button::new("validate-button")
-                                .small()
-                                .ghost()
-                                .label("Validate")
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.validate_raw_body(cx);
-                                }))
-                        )
-                    })
+                    .child(
+                        h_flex().gap_3().items_center().when(self.body_type_index == 1, |this| {
+                            this.child(Select::new(&self.raw_subtype_select).small().appearance(false))
+                                .child(
+                                    Button::new("format-button")
+                                        .small()
+                                        .ghost()
+                                        .label("Format")
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.format_raw_body(window, cx);
+                                        })),
+                                )
+                        }),
+                    )
             )
             // Body content based on selected type
             .when(self.body_type_index == 0, |this| {
