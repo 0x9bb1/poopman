@@ -287,7 +287,7 @@ impl BodyEditor {
         let content_type = match body {
             BodyType::None => None,
             BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
-            BodyType::FormData(_) => Some("multipart/form-data".to_string()),
+            BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
         };
 
         cx.emit(BodyTypeChanged { content_type });
@@ -559,7 +559,7 @@ impl Render for BodyEditor {
                                         let content_type = match i {
                                             0 => None,
                                             1 => Some(this.current_raw_subtype.content_type().to_string()),
-                                            2 => Some("multipart/form-data".to_string()),
+                                            2 => Some("multipart/form-data; boundary=<auto>".to_string()),
                                             _ => None,
                                         };
                                         cx.emit(BodyTypeChanged { content_type });

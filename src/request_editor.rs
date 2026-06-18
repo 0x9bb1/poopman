@@ -1,5 +1,3 @@
-use futures::AsyncReadExt;
-use gpui::http_client::{http, AsyncBody};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui::px;
@@ -226,7 +224,7 @@ impl RequestEditor {
         let content_type = match &request.body {
             crate::types::BodyType::None => None,
             crate::types::BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
-            crate::types::BodyType::FormData(_) => Some("multipart/form-data".to_string()),
+            crate::types::BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
         };
         self.update_content_type_from_body(&content_type, window, cx);
 
@@ -875,64 +873,16 @@ impl RequestEditor {
         cx.spawn_in(window, async move |this, cx| {
             let start = std::time::Instant::now();
 
-            // Use HttpClient which manages its own tokio runtime
+            // HttpClient builds the reqwest request natively (real multipart for form-data)
             let client = crate::http_client::HttpClient::new();
-
-            // Build HTTP request using http crate from gpui
-            let mut request_builder = http::Request::builder().method(method.as_str()).uri(&url);
-
-            // Add headers
-            for (key, value) in &headers {
-                request_builder = request_builder.header(key.as_str(), value.as_str());
-            }
-
-            // Build body based on type
-            let body_bytes = match &body {
-                crate::types::BodyType::None => Vec::new(),
-                crate::types::BodyType::Raw { content, .. } => content.clone().into_bytes(),
-                crate::types::BodyType::FormData(rows) => {
-                    // Build form data (simplified, actual multipart would be more complex)
-                    let mut form_parts = vec![];
-                    for row in rows {
-                        if row.enabled {
-                            match &row.value {
-                                crate::types::FormDataValue::Text(text) => {
-                                    form_parts.push(format!("{}={}", row.key, text));
-                                }
-                                crate::types::FormDataValue::File { path } => {
-                                    form_parts.push(format!("{}=@{}", row.key, path));
-                                }
-                            }
-                        }
-                    }
-                    form_parts.join("&").into_bytes()
-                }
-            };
-
-            // Add body with error handling
-            let http_request = match if !body_bytes.is_empty() {
-                request_builder.body(AsyncBody::from(body_bytes))
-            } else {
-                request_builder.body(AsyncBody::default())
-            } {
-                Ok(req) => req,
-                Err(e) => {
-                    log::error!("Failed to build HTTP request for URL '{}': {}", url, e);
-                    this.update(cx, |this, cx| {
-                        this.loading = false;
-                        cx.notify();
-                    })?;
-                    return Ok(());
-                }
-            };
 
             log::debug!("Sending HTTP request...");
 
             // Send request
-            let response = match client.send(http_request).await {
+            let response = match client.send(method, url.clone(), headers.clone(), body.clone()).await {
                 Ok(r) => r,
                 Err(e) => {
-                    // Handle request error (timeout, network error, etc.)
+                    // Handle request error (network error, file read error, etc.)
                     let duration = start.elapsed();
                     let error_message = format!("Request failed: {}", e);
                     log::error!("{}", error_message);
@@ -957,33 +907,17 @@ impl RequestEditor {
             };
 
             let duration = start.elapsed();
-            let status = response.status().as_u16();
+            let status = response.status;
 
             log::debug!("Request completed with status {} in {}ms", status, duration.as_millis());
 
-            // Collect response headers
-            let mut resp_headers = vec![];
-            for (key, value) in response.headers() {
-                if let Ok(v) = value.to_str() {
-                    resp_headers.push((key.to_string(), v.to_string()));
-                }
-            }
-
-            // Read response body
-            let mut body_reader = response.into_body();
-            let mut body_bytes = Vec::new();
-            body_reader
-                .read_to_end(&mut body_bytes)
-                .await
-                .unwrap_or_default();
-            let response_body = String::from_utf8_lossy(&body_bytes).to_string();
-
-            log::debug!("Response body size: {} bytes", body_bytes.len());
+            let response_body = String::from_utf8_lossy(&response.body).to_string();
+            log::debug!("Response body size: {} bytes", response.body.len());
 
             let response_data = ResponseData {
                 status: Some(status),
                 duration_ms: duration.as_millis() as u64,
-                headers: resp_headers,
+                headers: response.headers,
                 body: response_body,
             };
 
