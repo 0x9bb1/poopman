@@ -812,6 +812,10 @@ impl RequestEditor {
             return;
         }
 
+        // Substitute {{env vars}} BEFORE scheme normalization/validation, so a
+        // value like "https://host" doesn't get an extra "http://" prefix.
+        url = crate::variables::substitute(&url, &self.env_vars);
+
         // Auto-add scheme if missing (like Postman does) - default to http://
         if !url.starts_with("http://") && !url.starts_with("https://") {
             url = format!("http://{}", url);
@@ -866,9 +870,9 @@ impl RequestEditor {
         // Note: Content-Type is now automatically synced via BodyTypeChanged event
         // No need to auto-add here as it's already in the headers list
 
-        // Substitute {{env vars}} into url / headers / body at send time.
+        // Substitute {{env vars}} into headers / body at send time. (URL was
+        // already substituted earlier, before scheme normalization.)
         let env = &self.env_vars;
-        let url = crate::variables::substitute(&url, env);
         let headers: Vec<(String, String)> = headers
             .iter()
             .map(|(k, v)| {
