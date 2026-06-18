@@ -1,9 +1,9 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::types::{HistoryItem, HttpMethod, RequestData};
+use crate::types::{Environment, EnvVar, HistoryItem, HttpMethod, RequestData};
 
 /// Database manager for Poopman
 pub struct Database {
@@ -21,6 +21,9 @@ impl Database {
         }
 
         let conn = Connection::open(&db_path)?;
+
+        // Foreign keys are off per-connection by default in SQLite.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
         // Initialize schema
         conn.execute(
@@ -41,6 +44,35 @@ impl Database {
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_timestamp ON history(timestamp DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS environments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS env_variables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                environment_id INTEGER NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
             [],
         )?;
 
@@ -151,5 +183,167 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))?;
         Ok(count as usize)
+    }
+
+    // ===== Environments =====
+
+    /// Load all environments (with their variables), ordered by position.
+    pub fn load_environments(&self) -> Result<Vec<Environment>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt =
+            conn.prepare("SELECT id, name FROM environments ORDER BY position, id")?;
+        let env_rows: Vec<(i64, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut result = Vec::with_capacity(env_rows.len());
+        for (id, name) in env_rows {
+            let mut vstmt = conn.prepare(
+                "SELECT enabled, key, value FROM env_variables
+                 WHERE environment_id = ?1 ORDER BY position, id",
+            )?;
+            let variables = vstmt
+                .query_map([id], |row| {
+                    Ok(EnvVar {
+                        enabled: row.get::<_, i64>(0)? != 0,
+                        key: row.get(1)?,
+                        value: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            result.push(Environment { id, name, variables });
+        }
+        Ok(result)
+    }
+
+    /// Create a new (empty) environment, returning its id.
+    pub fn create_environment(&self, name: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO environments (name, position)
+             VALUES (?1, (SELECT COALESCE(MAX(position), 0) + 1 FROM environments))",
+            params![name],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn rename_environment(&self, id: i64, name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE environments SET name = ?1 WHERE id = ?2", params![name, id])?;
+        Ok(())
+    }
+
+    pub fn delete_environment(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        // env_variables rows are removed by ON DELETE CASCADE (foreign_keys = ON).
+        conn.execute("DELETE FROM environments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Replace all variables of an environment in a single transaction.
+    pub fn replace_variables(&self, environment_id: i64, vars: &[EnvVar]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM env_variables WHERE environment_id = ?1",
+            params![environment_id],
+        )?;
+        for (position, v) in vars.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO env_variables (environment_id, enabled, key, value, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![environment_id, v.enabled as i64, v.key, v.value, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Active environment id, or None for "No Environment".
+    pub fn get_active_environment_id(&self) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_meta WHERE key = 'active_environment_id'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.and_then(|s| s.parse::<i64>().ok()))
+    }
+
+    pub fn set_active_environment_id(&self, id: Option<i64>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        match id {
+            Some(id) => {
+                conn.execute(
+                    "INSERT INTO app_meta (key, value) VALUES ('active_environment_id', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![id.to_string()],
+                )?;
+            }
+            None => {
+                conn.execute("DELETE FROM app_meta WHERE key = 'active_environment_id'", [])?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_db() -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute(
+            "CREATE TABLE environments (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "CREATE TABLE env_variables (id INTEGER PRIMARY KEY AUTOINCREMENT, environment_id INTEGER NOT NULL REFERENCES environments(id) ON DELETE CASCADE, enabled INTEGER NOT NULL DEFAULT 1, key TEXT NOT NULL, value TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        ).unwrap();
+        Database { conn: Arc::new(Mutex::new(conn)) }
+    }
+
+    #[test]
+    fn crud_and_active() {
+        let db = mem_db();
+        let id = db.create_environment("dev").unwrap();
+        db.replace_variables(
+            id,
+            &[
+                EnvVar { enabled: true, key: "baseUrl".into(), value: "http://x".into() },
+                EnvVar { enabled: false, key: "token".into(), value: "abc".into() },
+            ],
+        )
+        .unwrap();
+
+        let envs = db.load_environments().unwrap();
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].name, "dev");
+        assert_eq!(envs[0].variables.len(), 2);
+        assert_eq!(envs[0].variables[0].key, "baseUrl");
+        assert!(!envs[0].variables[1].enabled);
+
+        db.rename_environment(id, "staging").unwrap();
+        assert_eq!(db.load_environments().unwrap()[0].name, "staging");
+
+        assert_eq!(db.get_active_environment_id().unwrap(), None);
+        db.set_active_environment_id(Some(id)).unwrap();
+        assert_eq!(db.get_active_environment_id().unwrap(), Some(id));
+        db.set_active_environment_id(None).unwrap();
+        assert_eq!(db.get_active_environment_id().unwrap(), None);
+
+        db.delete_environment(id).unwrap();
+        assert!(db.load_environments().unwrap().is_empty());
     }
 }
