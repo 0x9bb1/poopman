@@ -891,7 +891,8 @@ impl RequestEditor {
                         status: None, // Use None to indicate network error
                         duration_ms: duration.as_millis() as u64,
                         headers: vec![],
-                        body: error_message,
+                        body: error_message.into_bytes(),
+                        is_text: true,
                     };
 
                     this.update(cx, |this, cx| {
@@ -911,14 +912,15 @@ impl RequestEditor {
 
             log::debug!("Request completed with status {} in {}ms", status, duration.as_millis());
 
-            let response_body = String::from_utf8_lossy(&response.body).to_string();
-            log::debug!("Response body size: {} bytes", response.body.len());
+            let is_text = crate::types::is_text_response(&response.headers, &response.body);
+            log::debug!("Response body size: {} bytes (text={})", response.body.len(), is_text);
 
             let response_data = ResponseData {
                 status: Some(status),
                 duration_ms: duration.as_millis() as u64,
                 headers: response.headers,
-                body: response_body,
+                body: response.body,
+                is_text,
             };
 
             this.update(cx, |this, cx| {

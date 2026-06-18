@@ -1,8 +1,44 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{h_flex, input::*, v_flex, ActiveTheme as _};
+use gpui_component::{button::*, h_flex, input::*, v_flex, ActiveTheme as _};
 
 use crate::types::ResponseData;
+
+/// Pick a sensible file extension for a (lowercased, param-stripped) Content-Type.
+///
+/// Uses a curated map for common types because mime_guess's extension ordering is
+/// unreliable (e.g. `image/jpeg` yields `jfif` first), falling back to mime_guess
+/// for the long tail.
+fn extension_for_content_type(ct: &str) -> Option<String> {
+    let curated = match ct {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/bmp" => "bmp",
+        "image/svg+xml" => "svg",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        "application/pdf" => "pdf",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        "application/javascript" | "text/javascript" => "js",
+        "text/html" => "html",
+        "text/css" => "css",
+        "text/csv" => "csv",
+        "text/plain" => "txt",
+        "audio/mpeg" => "mp3",
+        "video/mp4" => "mp4",
+        _ => "",
+    };
+    if !curated.is_empty() {
+        return Some(curated.to_string());
+    }
+    mime_guess::get_mime_extensions_str(ct)
+        .and_then(|exts| exts.first())
+        .map(|e| e.to_string())
+}
 
 /// Response viewer panel
 pub struct ResponseViewer {
@@ -37,16 +73,21 @@ impl ResponseViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Try to format JSON body for better display
-        let formatted_body =
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&response.body) {
-                crate::code_formatter::pretty_json_4(&json).unwrap_or(response.body.clone())
+        // Only feed the text editor for text responses; binary is shown in a
+        // dedicated panel and never decoded to (lossy) text.
+        let display = if response.is_text {
+            let text = response.body_text();
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                crate::code_formatter::pretty_json_4(&json).unwrap_or_else(|_| text.to_string())
             } else {
-                response.body.clone()
-            };
+                text.to_string()
+            }
+        } else {
+            String::new()
+        };
 
         self.body_display.update(cx, |input, cx| {
-            input.set_value(&formatted_body, window, cx);
+            input.set_value(&display, window, cx);
         });
 
         self.response = Some(response);
@@ -67,6 +108,35 @@ impl ResponseViewer {
         });
         self.active_tab = 0;
         cx.notify();
+    }
+
+    /// Save the (binary) response body to a file chosen via the OS dialog.
+    fn save_binary(&mut self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(response) = self.response.as_ref() else {
+            return;
+        };
+        let bytes = response.body.clone();
+        // Suggest a filename with the right extension based on Content-Type.
+        let suggested = response
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+            .and_then(|ct| extension_for_content_type(&ct))
+            .map(|ext| format!("response.{}", ext))
+            .unwrap_or_else(|| "response.bin".to_string());
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
+        cx.spawn_in(window, async move |_this, _cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                if let Err(e) = std::fs::write(&path, &bytes) {
+                    log::error!("Failed to save response to {:?}: {}", path, e);
+                }
+            }
+        })
+        .detach();
     }
 
     fn render_status_bar(&self, cx: &App) -> impl IntoElement {
@@ -264,28 +334,72 @@ impl Render for ResponseViewer {
                                 ),
                         )
                         .when(self.active_tab == 0, |this| {
-                            let is_error = self
-                                .response
-                                .as_ref()
-                                .map_or(false, |r| r.is_network_error());
-                            this.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .w_full()
-                                    .rounded(theme.radius_lg)
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.popover)
-                                    .overflow_hidden()
-                                    .child(
-                                        Input::new(&self.body_display)
-                                            .disabled(is_error)
-                                            .w_full()
-                                            .h_full(),
-                                    ),
-                            )
+                            let resp_is_text = self.response.as_ref().map_or(true, |r| r.is_text);
+                            if resp_is_text {
+                                let is_error = self
+                                    .response
+                                    .as_ref()
+                                    .map_or(false, |r| r.is_network_error());
+                                this.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_1()
+                                        .w_full()
+                                        .rounded(theme.radius_lg)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .bg(theme.popover)
+                                        .overflow_hidden()
+                                        .child(
+                                            Input::new(&self.body_display)
+                                                .disabled(is_error)
+                                                .w_full()
+                                                .h_full(),
+                                        ),
+                                )
+                            } else {
+                                // Binary response: don't decode to lossy text — show info + Save.
+                                let (content_type, len) = self
+                                    .response
+                                    .as_ref()
+                                    .map(|r| {
+                                        let ct = r
+                                            .headers
+                                            .iter()
+                                            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                                            .map(|(_, v)| v.clone())
+                                            .unwrap_or_else(|| "application/octet-stream".to_string());
+                                        (ct, r.body.len())
+                                    })
+                                    .unwrap_or_else(|| ("application/octet-stream".to_string(), 0));
+                                this.child(
+                                    v_flex()
+                                        .flex_1()
+                                        .w_full()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.foreground)
+                                                .child("Binary response"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!("{} · {} bytes", content_type, len)),
+                                        )
+                                        .child(
+                                            Button::new("save-binary")
+                                                .primary()
+                                                .label("Save to file…")
+                                                .on_click(cx.listener(Self::save_binary)),
+                                        ),
+                                )
+                            }
                         })
                         .when(self.active_tab == 1, |this| {
                             this.child(
