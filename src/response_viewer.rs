@@ -19,6 +19,7 @@ impl ResponseViewer {
                 .code_editor("json")
                 .line_number(true)
                 .multi_line(true)
+                .tab_size(TabSize { tab_size: 4, hard_tabs: false })
         });
 
         Self {
