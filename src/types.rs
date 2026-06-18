@@ -230,10 +230,59 @@ pub struct ResponseData {
     pub status: Option<u16>,
     pub duration_ms: u64,
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    /// Raw response bytes (lossless — preserves binary payloads).
+    pub body: Vec<u8>,
+    /// Whether the body should be shown as text (vs treated as binary).
+    pub is_text: bool,
+}
+
+/// Decide whether a response body should be shown as text.
+///
+/// Uses the `Content-Type` header first (clear text vs clear binary families),
+/// falling back to a UTF-8 validity sniff when the type is missing/ambiguous.
+pub fn is_text_response(headers: &[(String, String)], body: &[u8]) -> bool {
+    let content_type = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase());
+
+    if let Some(ct) = content_type.as_deref() {
+        // Clearly text
+        if ct.starts_with("text/")
+            || ct == "application/json"
+            || ct == "application/xml"
+            || ct == "application/javascript"
+            || ct == "application/x-www-form-urlencoded"
+            || ct == "image/svg+xml"
+            || ct.ends_with("+json")
+            || ct.ends_with("+xml")
+        {
+            return true;
+        }
+        // Clearly binary
+        if ct.starts_with("image/")
+            || ct.starts_with("audio/")
+            || ct.starts_with("video/")
+            || ct.starts_with("font/")
+            || ct == "application/octet-stream"
+            || ct == "application/pdf"
+            || ct == "application/zip"
+            || ct == "application/gzip"
+        {
+            return false;
+        }
+        // else: unknown application/* — fall through to UTF-8 sniff
+    }
+
+    std::str::from_utf8(body).is_ok()
 }
 
 impl ResponseData {
+    /// Lossy text view of the body (for display when `is_text`).
+    pub fn body_text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.body)
+    }
+
     pub fn status_text(&self) -> &'static str {
         match self.status {
             Some(200) => "OK",
@@ -313,4 +362,39 @@ pub struct HeaderState {
     pub value: String,
     pub header_type: HeaderType,
     pub predefined: Option<PredefinedHeader>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h(ct: &str) -> Vec<(String, String)> {
+        vec![("Content-Type".to_string(), ct.to_string())]
+    }
+
+    #[test]
+    fn text_content_types_are_text() {
+        assert!(is_text_response(&h("application/json"), b"{}"));
+        assert!(is_text_response(&h("text/html; charset=utf-8"), b"<html>"));
+        assert!(is_text_response(&h("application/xml"), b"<x/>"));
+        assert!(is_text_response(&h("application/problem+json"), b"{}"));
+        assert!(is_text_response(&h("image/svg+xml"), b"<svg/>"));
+    }
+
+    #[test]
+    fn binary_content_types_are_binary() {
+        assert!(!is_text_response(&h("image/png"), &[0x89, 0x50]));
+        assert!(!is_text_response(&h("application/octet-stream"), &[0, 1, 2]));
+        assert!(!is_text_response(&h("application/pdf"), b"%PDF"));
+        assert!(!is_text_response(&h("application/zip"), &[0x50, 0x4b]));
+    }
+
+    #[test]
+    fn unknown_or_missing_type_falls_back_to_utf8_sniff() {
+        assert!(is_text_response(&[], b"plain text"));
+        assert!(!is_text_response(&[], &[0xff, 0xfe, 0x00]));
+        // unknown application/* defers to sniff
+        assert!(is_text_response(&h("application/weird"), b"readable"));
+        assert!(!is_text_response(&h("application/weird"), &[0xff, 0x00]));
+    }
 }
