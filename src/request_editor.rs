@@ -48,6 +48,8 @@ pub struct RequestEditor {
     loading: bool,
     _subscriptions: Vec<Subscription>,       // Permanent: URL input + body editor subscriptions
     _row_subscriptions: Vec<Subscription>,   // Header/param row subscriptions; rebuilt on load
+    /// Active environment variables, pushed by PoopmanApp; used at send time.
+    env_vars: std::collections::HashMap<String, String>,
 }
 
 impl RequestEditor {
@@ -83,6 +85,7 @@ impl RequestEditor {
             loading: false,
             _subscriptions: vec![],
             _row_subscriptions: vec![],
+            env_vars: std::collections::HashMap::new(),
         };
 
         // Subscribe to URL input changes to parse params
@@ -229,6 +232,11 @@ impl RequestEditor {
         self.update_content_type_from_body(&content_type, window, cx);
 
         cx.notify();
+    }
+
+    /// Replace the active environment variable map (called by PoopmanApp).
+    pub fn set_env_vars(&mut self, vars: std::collections::HashMap<String, String>) {
+        self.env_vars = vars;
     }
 
     /// Extract current request data from the editor
@@ -857,6 +865,40 @@ impl RequestEditor {
 
         // Note: Content-Type is now automatically synced via BodyTypeChanged event
         // No need to auto-add here as it's already in the headers list
+
+        // Substitute {{env vars}} into url / headers / body at send time.
+        let env = &self.env_vars;
+        let url = crate::variables::substitute(&url, env);
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    crate::variables::substitute(k, env),
+                    crate::variables::substitute(v, env),
+                )
+            })
+            .collect();
+        let body = match body {
+            crate::types::BodyType::Raw { content, subtype } => crate::types::BodyType::Raw {
+                content: crate::variables::substitute(&content, env),
+                subtype,
+            },
+            crate::types::BodyType::FormData(rows) => crate::types::BodyType::FormData(
+                rows.into_iter()
+                    .map(|mut row| {
+                        row.key = crate::variables::substitute(&row.key, env);
+                        row.value = match row.value {
+                            crate::types::FormDataValue::Text(t) => {
+                                crate::types::FormDataValue::Text(crate::variables::substitute(&t, env))
+                            }
+                            other => other, // file path left as-is
+                        };
+                        row
+                    })
+                    .collect(),
+            ),
+            crate::types::BodyType::None => crate::types::BodyType::None,
+        };
 
         let request = RequestData {
             method,
