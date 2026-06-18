@@ -117,4 +117,8 @@ pub fn apply_theme(cx: &mut App) {
     // Scrollbar
     theme.scrollbar_thumb = c(SCROLLBAR);
     theme.scrollbar_thumb_hover = c(MUTED_FG);
+
+    // Custom title bar (warm, matches sidebar)
+    theme.title_bar = c(SIDEBAR);
+    theme.title_bar_border = c(BORDER);
 }

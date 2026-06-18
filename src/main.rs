@@ -104,7 +104,12 @@ fn main() {
         crate::theme::apply_theme(cx);
 
         cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), |window, cx| {
+            let window_options = WindowOptions {
+                titlebar: Some(gpui_component::TitleBar::title_bar_options()),
+                window_min_size: Some(size(px(720.), px(480.))),
+                ..Default::default()
+            };
+            cx.open_window(window_options, |window, cx| {
                 let view = cx.new(|cx| PoopmanApp::new(window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
