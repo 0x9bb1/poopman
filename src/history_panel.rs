@@ -149,8 +149,8 @@ impl Render for HistoryPanel {
                                 .items_start()
                                 .w_full()
                                 .px_2p5()
-                                .py_1p5()
-                                .rounded(theme.radius)
+                                .py_2()
+                                .rounded(theme.radius_lg)
                                 .border_1()
                                 .border_color(if is_selected {
                                     theme.list_active_border
