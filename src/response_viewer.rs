@@ -257,7 +257,6 @@ impl Render for ResponseViewer {
             .w_full()
             .h_full()
             .overflow_hidden() // Prevent content overflow
-            .bg(theme.background)
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())) // Prevent click events from propagating
             .child(
                 // Response status bar (self-styled with its own padding + bottom border)

@@ -72,7 +72,6 @@ impl Render for TabBar {
             .items_center()
             .px_1p5()
             .py_1()
-            .bg(theme.background)
             .child(
                 // Render all tabs
                 h_flex()
