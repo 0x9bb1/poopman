@@ -448,63 +448,62 @@ impl Render for PoopmanApp {
                     .gap(px(10.))
                     .p_3()
                     .child(
-                h_resizable("history-main-splitter")
-                    .child(
-                        // Left: History panel with resizable width
-                        resizable_panel()
-                            .size(px(SIDEBAR_WIDTH))
-                            .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
+                        h_resizable("history-main-splitter")
                             .child(
-                                crate::ui::card_panel(theme)
-                                    .size_full()
-                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                    .child(self.history_panel.clone()),
-                            ),
-                    )
-                    .child(
-                        // Right: Tab bar + Request editor and response viewer
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .overflow_hidden() // Prevent content overflow
-                            .bg(theme.background) // Capture mouse events, prevent passthrough
-                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
-                            .child(
-                                // Tab bar card (its own floating row)
-                                crate::ui::card_panel(theme).child(
-                                    h_flex()
-                                        .w_full()
-                                        .child(div().flex_1().min_w_0().child(self.tab_bar.clone())),
-                                ),
+                                // Left: History panel with resizable width
+                                resizable_panel()
+                                    .size(px(SIDEBAR_WIDTH))
+                                    .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
+                                    .child(
+                                        crate::ui::card_panel(theme)
+                                            .size_full()
+                                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                            .child(self.history_panel.clone()),
+                                    ),
                             )
                             .child(
-                                // Request editor and response viewer with resizable splitter
-                                div().flex_1().overflow_hidden().child(
-                                    v_resizable("request-response-splitter")
-                                        .child(
-                                            resizable_panel()
-                                                .size(px(REQUEST_INITIAL_HEIGHT))
-                                                .size_range(px(REQUEST_MIN)..px(REQUEST_MAX))
+                                // Right: Tab bar + Request editor and response viewer
+                                div()
+                                    .flex_1()
+                                    .h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden() // Prevent content overflow
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
+                                    .child(
+                                        // Tab bar card (its own floating row)
+                                        crate::ui::card_panel(theme).child(
+                                            h_flex()
+                                                .w_full()
+                                                .child(div().flex_1().min_w_0().child(self.tab_bar.clone())),
+                                        ),
+                                    )
+                                    .child(
+                                        // Request editor and response viewer with resizable splitter
+                                        div().flex_1().overflow_hidden().child(
+                                            v_resizable("request-response-splitter")
+                                                .child(
+                                                    resizable_panel()
+                                                        .size(px(REQUEST_INITIAL_HEIGHT))
+                                                        .size_range(px(REQUEST_MIN)..px(REQUEST_MAX))
+                                                        .child(
+                                                            crate::ui::card_panel(theme)
+                                                                .size_full()
+                                                                .child(self.request_editor.clone()),
+                                                        ),
+                                                )
                                                 .child(
                                                     crate::ui::card_panel(theme)
-                                                        .size_full()
-                                                        .child(self.request_editor.clone()),
+                                                        .flex_1()
+                                                        .min_h(px(200.))
+                                                        .child(self.response_viewer.clone())
+                                                        .into_any_element(),
                                                 ),
-                                        )
-                                        .child(
-                                            crate::ui::card_panel(theme)
-                                                .flex_1()
-                                                .min_h(px(200.))
-                                                .child(self.response_viewer.clone())
-                                                .into_any_element(),
                                         ),
-                                ),
-                            )
-                            .into_any_element(),
+                                    )
+                                    .into_any_element(),
+                            ),
                     ),
-            ),
             )
             // gpui-component dialogs/modals are stored on Root but must be rendered
             // by the app's root view; embed the dialog overlay here.
