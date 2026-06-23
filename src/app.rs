@@ -448,20 +448,27 @@ impl Render for PoopmanApp {
             .size_full()
             .bg(theme.muted)
             .child(
-                // Custom warm title bar (replaces the white native title bar)
-                TitleBar::new()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child("Poopman"),
-                    )
-                    .child(crate::menu_bar::edit_menu(
-                        cx.entity(),
-                        self.environments.clone(),
-                        self.active_environment_id,
-                    )),
+                // Custom warm title bar (replaces the white native title bar).
+                // Brand + Edit menu are grouped in one child so the TitleBar's
+                // justify_between row keeps them together at the left (otherwise
+                // two children get pushed to opposite ends).
+                TitleBar::new().child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .child("Poopman"),
+                        )
+                        .child(crate::menu_bar::edit_menu(
+                            cx.entity(),
+                            self.environments.clone(),
+                            self.active_environment_id,
+                        )),
+                ),
             )
             .child(
                 div()
@@ -469,7 +476,6 @@ impl Render for PoopmanApp {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
                     .p_3()
                     .child(
                         h_resizable("history-main-splitter")
@@ -486,12 +492,17 @@ impl Render for PoopmanApp {
                                     ),
                             )
                             .child(
-                                // Right: Tab bar + Request editor and response viewer
+                                // Right: Tab bar + Request editor and response viewer.
+                                // gap = space between the tab-bar card and the
+                                // request/response area; ml = gap from the sidebar
+                                // card (the resizable handle itself is only 1px).
                                 div()
                                     .flex_1()
                                     .h_full()
                                     .flex()
                                     .flex_col()
+                                    .gap(px(10.))
+                                    .ml(px(10.))
                                     .overflow_hidden() // Prevent content overflow
                                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
                                     .child(
@@ -517,9 +528,12 @@ impl Render for PoopmanApp {
                                                         ),
                                                 )
                                                 .child(
+                                                    // mt = gap from the request card
+                                                    // (the v_resizable handle is only 1px).
                                                     crate::ui::card_panel(theme)
                                                         .flex_1()
                                                         .min_h(px(200.))
+                                                        .mt(px(10.))
                                                         .child(self.response_viewer.clone())
                                                         .into_any_element(),
                                                 ),
