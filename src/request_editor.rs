@@ -990,7 +990,7 @@ impl Render for RequestEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        div().id("request-editor-root").flex().flex_col().w_full().h_full().bg(theme.background).on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())).child(
+        div().id("request-editor-root").flex().flex_col().w_full().h_full().on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())).child(
             // Request section with header
             div()
                 .flex()
