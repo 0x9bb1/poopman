@@ -61,8 +61,8 @@ pub fn method_color(method: HttpMethod, theme: &Theme) -> Hsla {
 pub fn apply_theme(cx: &mut App) {
     let theme = Theme::global_mut(cx);
     theme.mode = ThemeMode::Light;
-    theme.radius = px(6.);
-    theme.radius_lg = px(8.);
+    theme.radius = px(8.);
+    theme.radius_lg = px(12.);
 
     // Surfaces & text
     theme.background = c(BACKGROUND);
