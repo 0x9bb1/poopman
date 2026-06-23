@@ -206,8 +206,28 @@ impl PoopmanApp {
     /// Open the environment management dialog.
     pub(crate) fn open_env_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let manager = self.env_manager.clone();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            dialog.title("Environments").w(px(720.)).child(manager.clone())
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            dialog
+                .title(
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(theme.foreground)
+                                .child("Environments"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Define variables like {{base_url}} per environment"),
+                        ),
+                )
+                .w(px(680.))
+                .child(manager.clone())
         });
     }
 

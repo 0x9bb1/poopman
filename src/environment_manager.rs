@@ -230,9 +230,12 @@ impl Render for EnvironmentManager {
                             .py_1p5()
                             .gap_2()
                             .items_center()
-                            .rounded(theme.radius)
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_dashed()
+                            .border_color(theme.primary)
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.list_hover))
+                            .hover(|s| s.bg(theme.list_active))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_environment(window, cx);
                             }))
@@ -282,20 +285,33 @@ impl Render for EnvironmentManager {
                                         this.select(id, window, cx);
                                     }))
                                     .child(
-                                        // indicator column (centered dot), matches the
-                                        // "+" column on the add row so they align.
+                                        // Dot = activation toggle (stops row-select propagation)
                                         div()
-                                            .w(px(14.))
+                                            .id(("env-active-dot", id as u64))
+                                            .w(px(16.))
                                             .flex_shrink_0()
                                             .flex()
                                             .items_center()
                                             .justify_center()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                cx.stop_propagation();
+                                                let new = if this.active_id == Some(id) {
+                                                    None
+                                                } else {
+                                                    Some(id)
+                                                };
+                                                this.set_active(new, cx);
+                                            }))
                                             .child(
                                                 div()
-                                                    .w(px(6.))
-                                                    .h(px(6.))
+                                                    .w(px(7.))
+                                                    .h(px(7.))
                                                     .rounded_full()
-                                                    .when(is_active, |d| d.bg(theme.primary)),
+                                                    .when(is_active, |d| d.bg(theme.primary))
+                                                    .when(!is_active, |d| {
+                                                        d.border_1().border_color(theme.muted_foreground)
+                                                    }),
                                             ),
                                     )
                                     .child(
@@ -309,6 +325,19 @@ impl Render for EnvironmentManager {
                                             .text_color(theme.foreground)
                                             .child(env.name.clone()),
                                     )
+                                    .when(is_active, |row| {
+                                        row.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px_1p5()
+                                                .rounded(theme.radius)
+                                                .text_xs()
+                                                .font_weight(FontWeight::BOLD)
+                                                .bg(theme.primary.opacity(0.12))
+                                                .text_color(theme.primary)
+                                                .child("ACTIVE"),
+                                        )
+                                    })
                             })),
                     ),
             )
@@ -325,16 +354,6 @@ impl Render for EnvironmentManager {
                             .gap_2()
                             .items_center()
                             .child(div().flex_1().min_w_0().child(Input::new(&self.name_input)))
-                            .when(active_id != Some(sel_id), |this| {
-                                this.child(
-                                    Button::new("env-set-active")
-                                        .small()
-                                        .label("Set active")
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.set_active(Some(sel_id), cx);
-                                        })),
-                                )
-                            })
                             .child(
                                 Button::new("env-delete")
                                     .small()
@@ -346,68 +365,86 @@ impl Render for EnvironmentManager {
                             ),
                     )
                     .child(
-                        // column headers
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(div().w(px(20.)).flex_shrink_0())
-                            .child(div().flex_1().child("Key"))
-                            .child(div().flex_1().child("Value"))
-                            .child(div().w(px(24.)).flex_shrink_0()),
-                    )
-                    .child(
                         v_flex()
-                            .id("env-vars")
                             .flex_1()
-                            .gap_1()
-                            .overflow_scroll()
-                            .children(self.var_rows.iter().enumerate().map(|(index, row)| {
+                            .min_h_0()
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .overflow_hidden()
+                            .child(
+                                // header strip
                                 h_flex()
                                     .w_full()
                                     .gap_2()
                                     .items_center()
-                                    .child(
-                                        div().w(px(20.)).flex_shrink_0().flex().justify_center().child(
-                                            Checkbox::new(("var-check", index))
-                                                .checked(row.enabled)
-                                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                                    this.toggle_var(index, cx);
-                                                })),
-                                        ),
-                                    )
-                                    .child(div().flex_1().min_w_0().child(Input::new(&row.key_input)))
-                                    .child(div().flex_1().min_w_0().child(Input::new(&row.value_input)))
-                                    .child(
-                                        div().w(px(24.)).flex_shrink_0().flex().justify_center().child(
-                                            Button::new(("var-del", index))
-                                                .ghost()
-                                                .xsmall()
-                                                .label("×")
-                                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                                    this.remove_var_row(index, cx);
-                                                })),
-                                        ),
-                                    )
+                                    .px_3()
+                                    .py_1p5()
+                                    .bg(theme.muted)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(div().w(px(20.)).flex_shrink_0())
+                                    .child(div().flex_1().child("KEY"))
+                                    .child(div().flex_1().child("VALUE"))
+                                    .child(div().w(px(24.)).flex_shrink_0()),
+                            )
+                            .child(
+                                v_flex()
+                                    .id("env-vars")
+                                    .flex_1()
+                                    .overflow_scroll()
+                                    .children(self.var_rows.iter().enumerate().map(|(index, row)| {
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .items_center()
+                                            .px_3()
+                                            .py_1p5()
+                                            .when(index % 2 == 1, |r| r.bg(theme.muted.opacity(0.4)))
+                                            .border_t_1()
+                                            .border_color(theme.border)
+                                            .child(
+                                                div().w(px(20.)).flex_shrink_0().flex().justify_center().child(
+                                                    Checkbox::new(("var-check", index))
+                                                        .checked(row.enabled)
+                                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                                            this.toggle_var(index, cx);
+                                                        })),
+                                                ),
+                                            )
+                                            .child(div().flex_1().min_w_0().child(Input::new(&row.key_input)))
+                                            .child(div().flex_1().min_w_0().child(Input::new(&row.value_input)))
+                                            .child(
+                                                div().w(px(24.)).flex_shrink_0().flex().justify_center().child(
+                                                    Button::new(("var-del", index))
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .label("×")
+                                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                                            this.remove_var_row(index, cx);
+                                                        })),
+                                                ),
+                                            )
+                                    })),
+                            ),
+                    )
+                    .child(
+                        Button::new("env-add-var")
+                            .small()
+                            .ghost()
+                            .label("+ Add variable")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_var_row(window, cx);
                             })),
                     )
                     .child(
+                        // Footer: only a right-aligned Save (no hint text).
                         h_flex()
                             .w_full()
-                            .gap_2()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                Button::new("env-add-var")
-                                    .small()
-                                    .ghost()
-                                    .label("+ Add variable")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_var_row(window, cx);
-                                    })),
-                            )
+                            .justify_end()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(theme.border)
                             .child(
                                 Button::new("env-save")
                                     .small()
