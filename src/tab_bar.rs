@@ -1,5 +1,6 @@
 use gpui::*;
 use gpui::px;
+use gpui::prelude::FluentBuilder as _;
 use gpui_component::{h_flex, ActiveTheme as _};
 
 use crate::request_tab::RequestTab;
@@ -69,11 +70,9 @@ impl Render for TabBar {
         h_flex()
             .gap_1()
             .items_center()
-            .px_2()
+            .px_1p5()
             .py_1()
             .bg(theme.background)
-            .border_b_1()
-            .border_color(theme.border)
             .child(
                 // Render all tabs
                 h_flex()
@@ -88,14 +87,13 @@ impl Render for TabBar {
 
                         h_flex()
                             .id(("tab", tab.id))
-                            .gap_2()
+                            .gap_1p5()
                             .items_center()
                             .px_3()
-                            .py_1p5()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(if is_active { theme.border } else { gpui::transparent_black() })
-                            .bg(if is_active { theme.tab_active } else { theme.background })
+                            .py_1()
+                            .rounded(theme.radius)
+                            .bg(if is_active { theme.muted } else { gpui::transparent_black() })
+                            .when(!is_active, |s| s.hover(|s| s.bg(theme.list_hover)))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, event, window, cx| {
                                 this.on_tab_click(tab_index, event, window, cx);
@@ -139,7 +137,7 @@ impl Render for TabBar {
                     .id("new-tab-button")
                     .px_2()
                     .py_1()
-                    .rounded_sm()
+                    .rounded(theme.radius)
                     .text_color(theme.muted_foreground)
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.list_hover).text_color(theme.foreground))
