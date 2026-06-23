@@ -242,7 +242,7 @@ impl Render for EnvironmentManager {
                             .child(
                                 // indicator column (centered "+"), same width as env rows
                                 div()
-                                    .w(px(14.))
+                                    .w(px(16.))
                                     .flex_shrink_0()
                                     .flex()
                                     .items_center()
@@ -365,6 +365,7 @@ impl Render for EnvironmentManager {
                             ),
                     )
                     .child(
+                        // Inline card (no shadow/bg) — it sits inside the dialog surface, so card_panel's elevation would be wrong here.
                         v_flex()
                             .flex_1()
                             .min_h_0()
@@ -401,8 +402,7 @@ impl Render for EnvironmentManager {
                                             .px_3()
                                             .py_1p5()
                                             .when(index % 2 == 1, |r| r.bg(theme.muted.opacity(0.4)))
-                                            .border_t_1()
-                                            .border_color(theme.border)
+                                            .when(index > 0, |r| r.border_t_1().border_color(theme.border))
                                             .child(
                                                 div().w(px(20.)).flex_shrink_0().flex().justify_center().child(
                                                     Checkbox::new(("var-check", index))
