@@ -53,7 +53,7 @@ impl EnvironmentManager {
         this
     }
 
-    fn reload(&mut self) {
+    pub(crate) fn reload(&mut self) {
         self.environments = self.db.load_environments().unwrap_or_default();
         self.active_id = self.db.get_active_environment_id().unwrap_or(None);
     }
