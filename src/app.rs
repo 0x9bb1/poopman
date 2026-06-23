@@ -422,7 +422,7 @@ impl Render for PoopmanApp {
 
         v_flex()
             .size_full()
-            .bg(theme.background)
+            .bg(theme.muted)
             .child(
                 // Custom warm title bar (replaces the white native title bar)
                 TitleBar::new()
@@ -440,7 +440,14 @@ impl Render for PoopmanApp {
                     )),
             )
             .child(
-                div().flex_1().min_h_0().child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .p_3()
+                    .child(
                 h_resizable("history-main-splitter")
                     .child(
                         // Left: History panel with resizable width
@@ -448,9 +455,9 @@ impl Render for PoopmanApp {
                             .size(px(SIDEBAR_WIDTH))
                             .size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
                             .child(
-                                div()
+                                crate::ui::card_panel(theme)
                                     .size_full()
-                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                                     .child(self.history_panel.clone()),
                             ),
                     )
@@ -465,10 +472,12 @@ impl Render for PoopmanApp {
                             .bg(theme.background) // Capture mouse events, prevent passthrough
                             .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
                             .child(
-                                // Tab bar row (env selector moved to the Edit menu)
-                                h_flex()
-                                    .w_full()
-                                    .child(div().flex_1().min_w_0().child(self.tab_bar.clone())),
+                                // Tab bar card (its own floating row)
+                                crate::ui::card_panel(theme).child(
+                                    h_flex()
+                                        .w_full()
+                                        .child(div().flex_1().min_w_0().child(self.tab_bar.clone())),
+                                ),
                             )
                             .child(
                                 // Request editor and response viewer with resizable splitter
@@ -478,15 +487,16 @@ impl Render for PoopmanApp {
                                             resizable_panel()
                                                 .size(px(REQUEST_INITIAL_HEIGHT))
                                                 .size_range(px(REQUEST_MIN)..px(REQUEST_MAX))
-                                                .child(self.request_editor.clone()),
+                                                .child(
+                                                    crate::ui::card_panel(theme)
+                                                        .size_full()
+                                                        .child(self.request_editor.clone()),
+                                                ),
                                         )
                                         .child(
-                                            div()
+                                            crate::ui::card_panel(theme)
                                                 .flex_1()
-                                                .min_h(px(200.)) // Minimum height to prevent collapse
-                                                .overflow_hidden() // Prevent content overflow
-                                                .border_t_1()
-                                                .border_color(theme.border)
+                                                .min_h(px(200.))
                                                 .child(self.response_viewer.clone())
                                                 .into_any_element(),
                                         ),
