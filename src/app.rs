@@ -1,6 +1,6 @@
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex, v_flex, ActiveTheme as _, Root, Sizable as _, TitleBar, WindowExt,
+    h_flex, v_flex, ActiveTheme as _, Root, TitleBar, WindowExt,
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
@@ -204,11 +204,21 @@ impl PoopmanApp {
     }
 
     /// Open the environment management dialog.
-    fn open_env_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_env_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let manager = self.env_manager.clone();
         window.open_dialog(cx, move |dialog, _window, _cx| {
             dialog.title("Environments").w(px(720.)).child(manager.clone())
         });
+    }
+
+    /// Switch the active environment (or clear it) from the Edit menu, then
+    /// reload + refresh the request editor's variable map.
+    pub(crate) fn set_active_environment(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
+        if let Err(e) = self.db.set_active_environment_id(id) {
+            log::error!("Failed to set active environment: {}", e);
+            return;
+        }
+        self.reload_environments(cx);
     }
 
     /// Save current editor state to active tab
@@ -410,26 +420,24 @@ impl Render for PoopmanApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        let env_label = format!(
-            "Env: {}",
-            self.active_environment_id
-                .and_then(|id| self.environments.iter().find(|e| e.id == id))
-                .map(|e| e.name.clone())
-                .unwrap_or_else(|| "No Environment".to_string())
-        );
-
         v_flex()
             .size_full()
             .bg(theme.background)
             .child(
                 // Custom warm title bar (replaces the white native title bar)
-                TitleBar::new().child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.foreground)
-                        .child("Poopman"),
-                ),
+                TitleBar::new()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("Poopman"),
+                    )
+                    .child(crate::menu_bar::edit_menu(
+                        cx.entity(),
+                        self.environments.clone(),
+                        self.active_environment_id,
+                    )),
             )
             .child(
                 div().flex_1().min_h_0().child(
@@ -457,31 +465,10 @@ impl Render for PoopmanApp {
                             .bg(theme.background) // Capture mouse events, prevent passthrough
                             .on_scroll_wheel(|_, _, cx| cx.stop_propagation()) // Isolate scroll events
                             .child(
-                                // Tab bar row with the environment selector at the right end
+                                // Tab bar row (env selector moved to the Edit menu)
                                 h_flex()
                                     .w_full()
-                                    .child(div().flex_1().min_w_0().child(self.tab_bar.clone()))
-                                    .child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .px_2()
-                                            .bg(theme.background)
-                                            .border_b_1()
-                                            .border_color(theme.border)
-                                            .child(
-                                                Button::new("env-selector")
-                                                    .ghost()
-                                                    .small()
-                                                    .label(env_label)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.open_env_manager(window, cx);
-                                                        },
-                                                    )),
-                                            ),
-                                    ),
+                                    .child(div().flex_1().min_w_0().child(self.tab_bar.clone())),
                             )
                             .child(
                                 // Request editor and response viewer with resizable splitter
