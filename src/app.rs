@@ -152,6 +152,13 @@ impl PoopmanApp {
             },
         );
 
+        // Push the initial tab into the tab bar so the first request shows as a
+        // tab immediately (the TabBar entity starts empty; without this the bar
+        // would show only the "+" until the first tab action).
+        tab_bar.update(cx, |bar, cx| {
+            bar.update_tabs(request_tabs.clone(), active_tab_index, cx);
+        });
+
         Self {
             db,
             history_panel,
