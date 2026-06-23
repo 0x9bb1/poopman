@@ -1045,28 +1045,12 @@ impl Render for RequestEditor {
                         .flex_1()
                         .min_h_0()  // Critical for scrolling to work
                         .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_5()
-                                .border_b_1()
-                                .border_color(theme.border)
+                            crate::ui::segmented_bar(theme)
                                 .child(
-                                    div()
+                                    crate::ui::segment_pill(theme, self.active_tab == 0)
                                         .id("tab-headers")
-                                        .px_0p5()
-                                        .pb_2()
-                                        .text_sm()
-                                        .cursor_pointer()
-                                        .border_b_2()
-                                        .when(self.active_tab == 0, |this| {
-                                            this.border_color(theme.primary)
-                                                .text_color(theme.primary)
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                        })
-                                        .when(self.active_tab != 0, |this| {
-                                            this.border_color(gpui::transparent_black())
-                                                .text_color(theme.muted_foreground)
+                                        .when(self.active_tab != 0, |s| {
+                                            s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
@@ -1077,21 +1061,10 @@ impl Render for RequestEditor {
                                         .child("Headers"),
                                 )
                                 .child(
-                                    div()
+                                    crate::ui::segment_pill(theme, self.active_tab == 1)
                                         .id("tab-params")
-                                        .px_0p5()
-                                        .pb_2()
-                                        .text_sm()
-                                        .cursor_pointer()
-                                        .border_b_2()
-                                        .when(self.active_tab == 1, |this| {
-                                            this.border_color(theme.primary)
-                                                .text_color(theme.primary)
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                        })
-                                        .when(self.active_tab != 1, |this| {
-                                            this.border_color(gpui::transparent_black())
-                                                .text_color(theme.muted_foreground)
+                                        .when(self.active_tab != 1, |s| {
+                                            s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
@@ -1102,21 +1075,10 @@ impl Render for RequestEditor {
                                         .child("Params"),
                                 )
                                 .child(
-                                    div()
+                                    crate::ui::segment_pill(theme, self.active_tab == 2)
                                         .id("tab-body")
-                                        .px_0p5()
-                                        .pb_2()
-                                        .text_sm()
-                                        .cursor_pointer()
-                                        .border_b_2()
-                                        .when(self.active_tab == 2, |this| {
-                                            this.border_color(theme.primary)
-                                                .text_color(theme.primary)
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                        })
-                                        .when(self.active_tab != 2, |this| {
-                                            this.border_color(gpui::transparent_black())
-                                                .text_color(theme.muted_foreground)
+                                        .when(self.active_tab != 2, |s| {
+                                            s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
