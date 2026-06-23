@@ -90,7 +90,6 @@ impl Render for HistoryPanel {
 
         v_flex()
             .size_full()
-            .bg(theme.background)
             .child(
                 // Header
                 h_flex()
