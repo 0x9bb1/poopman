@@ -239,6 +239,10 @@ impl PoopmanApp {
             return;
         }
         self.reload_environments(cx);
+        self.env_manager.update(cx, |mgr, cx| {
+            mgr.reload();
+            cx.notify();
+        });
     }
 
     /// Save current editor state to active tab
