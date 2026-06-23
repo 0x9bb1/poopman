@@ -170,12 +170,13 @@ impl ResponseViewer {
                 .border_color(cx.theme().border)
                 .child(
                     div()
-                        .px_2()
-                        .py_1()
+                        .px_2p5()
+                        .py_0p5()
                         .rounded(cx.theme().radius)
-                        .bg(status_color)
-                        .text_color(gpui::white())
-                        .text_sm()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .bg(status_color.opacity(0.12))
+                        .text_color(status_color)
                         .child(status_text),
                 )
                 .child(
@@ -276,28 +277,12 @@ impl Render for ResponseViewer {
                         .p_4()
                         .w_full()
                         .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap_5()
-                                .border_b_1()
-                                .border_color(theme.border)
+                            crate::ui::segmented_bar(theme)
                                 .child(
-                                    div()
+                                    crate::ui::segment_pill(theme, self.active_tab == 0)
                                         .id("resp-tab-body")
-                                        .px_0p5()
-                                        .pb_2()
-                                        .text_sm()
-                                        .cursor_pointer()
-                                        .border_b_2()
-                                        .when(self.active_tab == 0, |this| {
-                                            this.border_color(theme.primary)
-                                                .text_color(theme.primary)
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                        })
-                                        .when(self.active_tab != 0, |this| {
-                                            this.border_color(gpui::transparent_black())
-                                                .text_color(theme.muted_foreground)
+                                        .when(self.active_tab != 0, |s| {
+                                            s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
@@ -308,21 +293,10 @@ impl Render for ResponseViewer {
                                         .child("Body"),
                                 )
                                 .child(
-                                    div()
+                                    crate::ui::segment_pill(theme, self.active_tab == 1)
                                         .id("resp-tab-headers")
-                                        .px_0p5()
-                                        .pb_2()
-                                        .text_sm()
-                                        .cursor_pointer()
-                                        .border_b_2()
-                                        .when(self.active_tab == 1, |this| {
-                                            this.border_color(theme.primary)
-                                                .text_color(theme.primary)
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                        })
-                                        .when(self.active_tab != 1, |this| {
-                                            this.border_color(gpui::transparent_black())
-                                                .text_color(theme.muted_foreground)
+                                        .when(self.active_tab != 1, |s| {
+                                            s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
