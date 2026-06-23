@@ -13,6 +13,7 @@ mod response_viewer;
 mod tab_bar;
 mod theme;
 mod types;
+mod ui;
 mod variables;
 mod url_params;
 
