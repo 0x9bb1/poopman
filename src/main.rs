@@ -7,6 +7,7 @@ mod db;
 mod environment_manager;
 mod history_panel;
 mod http_client;
+mod menu_bar;
 mod request_editor;
 mod request_tab;
 mod response_viewer;
