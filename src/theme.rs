@@ -40,6 +40,8 @@ pub const REQUEST_MAX: f32 = 700.;
 pub const METHOD_SELECT_WIDTH: f32 = 92.;
 #[allow(dead_code)]
 pub const RAW_SUBTYPE_WIDTH: f32 = 120.;
+#[allow(dead_code)]
+pub const CODE_PANEL_WIDTH: f32 = 440.;
 
 /// Convert a 0xRRGGBB literal into an Hsla theme color.
 fn c(hex: u32) -> Hsla {
