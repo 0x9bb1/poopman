@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder as _;
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme as _, Root, TitleBar, WindowExt,
+    button::*, h_flex, v_flex, ActiveTheme as _, Icon, Root, TitleBar, WindowExt,
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
@@ -11,13 +11,13 @@ use crate::code_snippet_panel::{CloseCodeSnippet, CodeSnippetPanel};
 use crate::db::Database;
 use crate::environment_manager::{EnvironmentManager, EnvironmentsChanged};
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
-use crate::request_editor::{OpenCodeSnippet, RequestCompleted, RequestEditor};
+use crate::request_editor::{RequestCompleted, RequestEditor};
 use crate::request_tab::RequestTab;
 use crate::response_viewer::ResponseViewer;
 use crate::tab_bar::{NewTabClicked, TabBar, TabClicked, TabCloseClicked};
 use crate::theme::{
-    CODE_PANEL_WIDTH, REQUEST_INITIAL_HEIGHT, REQUEST_MAX, REQUEST_MIN, SIDEBAR_MAX, SIDEBAR_MIN,
-    SIDEBAR_WIDTH,
+    CODE_PANEL_WIDTH, CODE_RAIL_WIDTH, REQUEST_INITIAL_HEIGHT, REQUEST_MAX, REQUEST_MIN, SIDEBAR_MAX,
+    SIDEBAR_MIN, SIDEBAR_WIDTH,
 };
 
 /// Main application view
@@ -158,21 +158,6 @@ impl PoopmanApp {
             },
         );
 
-        // Open the code-snippet panel when the request editor asks for it; feed it
-        // the current request with environment variables resolved.
-        let open_code_sub = cx.subscribe_in(
-            &request_editor,
-            window,
-            move |this, editor, _e: &OpenCodeSnippet, window, cx| {
-                let req = editor.read(cx).resolved_request_data(cx);
-                this.code_panel.update(cx, |panel, cx| {
-                    panel.set_request(req, window, cx);
-                });
-                this.code_panel_open = true;
-                cx.notify();
-            },
-        );
-
         // Close the code-snippet panel on its Close button.
         let close_code_sub = cx.subscribe_in(
             &code_panel,
@@ -211,7 +196,6 @@ impl PoopmanApp {
                 new_tab_sub,
                 close_tab_sub,
                 env_changed_sub,
-                open_code_sub,
                 close_code_sub,
             ],
         }
@@ -242,6 +226,19 @@ impl PoopmanApp {
         self.active_environment_id = self.db.get_active_environment_id().unwrap_or(None);
         let vars = Self::active_env_vars(&self.environments, self.active_environment_id);
         self.request_editor.update(cx, |editor, _| editor.set_env_vars(vars));
+        cx.notify();
+    }
+
+    /// Toggle the code-snippet panel from the right rail. When opening, refresh it
+    /// with the current request (env vars resolved).
+    fn toggle_code_panel(&mut self, _e: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.code_panel_open {
+            self.code_panel_open = false;
+        } else {
+            let req = self.request_editor.read(cx).resolved_request_data(cx);
+            self.code_panel.update(cx, |panel, cx| panel.set_request(req, window, cx));
+            self.code_panel_open = true;
+        }
         cx.notify();
     }
 
@@ -520,6 +517,16 @@ impl Render for PoopmanApp {
                     .flex_col()
                     .p_3()
                     .child(
+                        // Main row: resizable area (history + content) | code panel (slide-out)
+                        // | permanent right rail. Plain flex row so children stretch full height.
+                        div()
+                            .flex()
+                            .flex_row()
+                            .size_full()
+                            .min_h_0()
+                            .gap(px(10.))
+                            .child(
+                                div().flex_1().min_w_0().h_full().overflow_hidden().child(
                         h_resizable("history-main-splitter")
                             .child(
                                 // Left: History panel with resizable width
@@ -556,49 +563,59 @@ impl Render for PoopmanApp {
                                         ),
                                     )
                                     .child(
-                                        // Request/response splitter + optional code panel (right)
-                                        h_flex()
-                                            .flex_1()
-                                            .min_h_0()
-                                            .w_full()
-                                            .gap(px(10.))
-                                            .child(
-                                                div().flex_1().overflow_hidden().child(
-                                                    v_resizable("request-response-splitter")
+                                        // Request editor and response viewer with resizable splitter
+                                        div().flex_1().overflow_hidden().child(
+                                            v_resizable("request-response-splitter")
+                                                .child(
+                                                    resizable_panel()
+                                                        .size(px(REQUEST_INITIAL_HEIGHT))
+                                                        .size_range(px(REQUEST_MIN)..px(REQUEST_MAX))
                                                         .child(
-                                                            resizable_panel()
-                                                                .size(px(REQUEST_INITIAL_HEIGHT))
-                                                                .size_range(px(REQUEST_MIN)..px(REQUEST_MAX))
-                                                                .child(
-                                                                    crate::ui::card_panel(theme)
-                                                                        .size_full()
-                                                                        .child(self.request_editor.clone()),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            // mt = gap from the request card
-                                                            // (the v_resizable handle is only 1px).
                                                             crate::ui::card_panel(theme)
-                                                                .flex_1()
-                                                                .min_h(px(200.))
-                                                                .mt(px(10.))
-                                                                .child(self.response_viewer.clone())
-                                                                .into_any_element(),
+                                                                .size_full()
+                                                                .child(self.request_editor.clone()),
                                                         ),
-                                                ),
-                                            )
-                                            .when(self.code_panel_open, |row| {
-                                                row.child(
-                                                    crate::ui::card_panel(theme)
-                                                        .w(px(CODE_PANEL_WIDTH))
-                                                        .h_full()
-                                                        .flex_shrink_0()
-                                                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                                        .child(self.code_panel.clone()),
                                                 )
-                                            }),
+                                                .child(
+                                                    // mt = gap from the request card
+                                                    // (the v_resizable handle is only 1px).
+                                                    crate::ui::card_panel(theme)
+                                                        .flex_1()
+                                                        .min_h(px(200.))
+                                                        .mt(px(10.))
+                                                        .child(self.response_viewer.clone())
+                                                        .into_any_element(),
+                                                ),
+                                        ),
                                     )
                                     .into_any_element(),
+                            ),
+                                )
+                            )
+                            .when(self.code_panel_open, |row| {
+                                row.child(
+                                    crate::ui::card_panel(theme)
+                                        .w(px(CODE_PANEL_WIDTH))
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                        .child(self.code_panel.clone()),
+                                )
+                            })
+                            .child(
+                                // Permanent right rail (Postman-style): </> toggles the panel.
+                                crate::ui::card_panel(theme)
+                                    .flex_shrink_0()
+                                    .w(px(CODE_RAIL_WIDTH))
+                                    .h_full()
+                                    .child(
+                                        v_flex().items_center().pt_2().child(
+                                            Button::new("code-rail-btn")
+                                                .ghost()
+                                                .icon(Icon::empty().path("icons/code.svg"))
+                                                .on_click(cx.listener(Self::toggle_code_panel)),
+                                        ),
+                                    ),
                             ),
                     ),
             )
