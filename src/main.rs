@@ -3,6 +3,7 @@
 mod app;
 mod body_editor;
 mod code_formatter;
+mod code_gen;
 mod db;
 mod environment_manager;
 mod history_panel;
