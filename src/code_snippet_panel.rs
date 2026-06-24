@@ -1,18 +1,19 @@
-//! The "Code snippet" slide-out panel (Postman's Code feature). Shows generated
-//! client code for the current request in a selectable language, with Copy and
-//! Close actions. Owned by `PoopmanApp`, rendered as a right-docked card when open.
+//! The "Code snippet" dialog body (Postman's Code feature). Shows generated
+//! client code for the current request in a selectable language, with a Copy
+//! action. Owned by `PoopmanApp` and shown inside a dialog opened from the
+//! request editor's `</>` button.
 
 use gpui::*;
 use gpui_component::{
-    button::*, input::*, select::*, h_flex, v_flex, ActiveTheme as _, Icon, IconName, IndexPath,
-    Sizable as _,
+    button::*, input::*, select::*, h_flex, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
 };
 
 use crate::code_gen::{generate, CodeTarget};
 use crate::types::RequestData;
 
-/// Emitted when the user closes the code-snippet panel.
-pub struct CloseCodeSnippet;
+/// Height of the code view inside the dialog (dialog height is content-driven,
+/// so the editor needs a definite height to render).
+const CODE_VIEW_HEIGHT: f32 = 460.;
 
 pub struct CodeSnippetPanel {
     request: Option<RequestData>,
@@ -22,8 +23,6 @@ pub struct CodeSnippetPanel {
     code_display: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
-
-impl EventEmitter<CloseCodeSnippet> for CodeSnippetPanel {}
 
 impl CodeSnippetPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -91,10 +90,6 @@ impl CodeSnippetPanel {
     fn copy(&mut self, _e: &gpui::ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(self.code.clone()));
     }
-
-    fn close(&mut self, _e: &gpui::ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(CloseCodeSnippet);
-    }
 }
 
 impl Render for CodeSnippetPanel {
@@ -103,48 +98,27 @@ impl Render for CodeSnippetPanel {
 
         v_flex()
             .id("code-snippet-panel")
-            .size_full()
+            .w_full()
             .gap_3()
-            .p_4()
-            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(
-                // Header: title + Copy + Close
+                // Toolbar: language selector (left) + Copy (right)
                 h_flex()
                     .items_center()
                     .justify_between()
+                    .gap_2()
+                    .child(div().w(px(220.)).child(Select::new(&self.language_select)))
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child("Code snippet"),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                Button::new("code-copy")
-                                    .small()
-                                    .label("Copy")
-                                    .on_click(cx.listener(Self::copy)),
-                            )
-                            .child(
-                                Button::new("code-close")
-                                    .small()
-                                    .ghost()
-                                    .icon(Icon::new(IconName::Close))
-                                    .on_click(cx.listener(Self::close)),
-                            ),
+                        Button::new("code-copy")
+                            .small()
+                            .label("Copy")
+                            .on_click(cx.listener(Self::copy)),
                     ),
             )
-            .child(Select::new(&self.language_select))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_h_0()
+                    .h(px(CODE_VIEW_HEIGHT))
                     .w_full()
                     .rounded(theme.radius_lg)
                     .border_1()
