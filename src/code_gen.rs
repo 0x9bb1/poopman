@@ -112,6 +112,37 @@ fn dq(s: &str) -> String {
     out
 }
 
+/// Rust raw string literal (`r#"..."#`) — keeps a multi-line body readable with
+/// no escaping. Bumps the `#` count if the body contains the closing delimiter.
+fn rust_raw(s: &str) -> String {
+    let mut n = 1;
+    while s.contains(&format!("\"{}", "#".repeat(n))) {
+        n += 1;
+    }
+    let h = "#".repeat(n);
+    format!("r{h}\"{s}\"{h}")
+}
+
+/// Python triple-quoted string — preserves newlines. Falls back to an escaped
+/// double-quoted string when the body would break the triple-quote.
+fn py_string(s: &str) -> String {
+    if s.contains("\"\"\"") || s.ends_with('"') {
+        format!("\"{}\"", dq(s))
+    } else {
+        format!("\"\"\"{}\"\"\"", s)
+    }
+}
+
+/// JS template literal (backticks) — preserves newlines. Falls back to an escaped
+/// double-quoted string when the body contains a backtick or `${`.
+fn js_string(s: &str) -> String {
+    if s.contains('`') || s.contains("${") {
+        format!("\"{}\"", dq(s))
+    } else {
+        format!("`{}`", s)
+    }
+}
+
 /// Top-level dispatch: generate source code for `target` from `req`.
 pub fn generate(target: CodeTarget, req: &RequestData) -> String {
     match target {
@@ -167,7 +198,7 @@ fn gen_rust(req: &RequestData) -> String {
         dq(&req.url)
     ));
     if let Some(body) = raw_body(req) {
-        s.push_str(&format!("        .body(\"{}\")\n", dq(&body)));
+        s.push_str(&format!("        .body({})\n", rust_raw(&body)));
     }
     s.push_str("        .send()?;\n\n");
     s.push_str("    println!(\"{}\", response.text()?);\n");
@@ -195,7 +226,7 @@ fn gen_python(req: &RequestData) -> String {
     }
     let body = raw_body(req);
     if let Some(b) = &body {
-        s.push_str(&format!("payload = \"{}\"\n", dq(b)));
+        s.push_str(&format!("payload = {}\n", py_string(b)));
     }
     s.push('\n');
     if body.is_some() {
@@ -226,7 +257,7 @@ fn gen_fetch(req: &RequestData) -> String {
     s.push_str(&format!("  method: \"{}\",\n", req.method.as_str()));
     s.push_str("  headers: myHeaders,\n");
     if let Some(b) = raw_body(req) {
-        s.push_str(&format!("  body: \"{}\",\n", dq(&b)));
+        s.push_str(&format!("  body: {},\n", js_string(&b)));
     }
     s.push_str("  redirect: \"follow\",\n");
     s.push_str("};\n\n");
@@ -257,7 +288,7 @@ fn gen_axios(req: &RequestData) -> String {
         s.push_str("  },\n");
     }
     if let Some(b) = raw_body(req) {
-        s.push_str(&format!("  data: \"{}\",\n", dq(&b)));
+        s.push_str(&format!("  data: {},\n", js_string(&b)));
     }
     s.push_str("};\n\n");
     s.push_str("axios(config)\n");
@@ -384,8 +415,8 @@ mod tests {
         assert!(out.contains("use reqwest::blocking::Client;"));
         assert!(out.contains("reqwest::Method::POST"));
         assert!(out.contains("HeaderValue::from_str(\"application/json\")?"));
-        // body double-quotes are escaped
-        assert!(out.contains(".body(\"{\\\"name\\\": \\\"ada\\\"}\")"));
+        // body uses a raw string literal (no escaping)
+        assert!(out.contains(".body(r#\"{\"name\": \"ada\"}\"#)"));
     }
 
     #[test]
@@ -399,7 +430,7 @@ mod tests {
     #[test]
     fn python_includes_payload_when_body() {
         let out = generate(CodeTarget::PythonRequests, &post_json_req());
-        assert!(out.contains("payload = \"{\\\"name\\\": \\\"ada\\\"}\""));
+        assert!(out.contains("payload = \"\"\"{\"name\": \"ada\"}\"\"\""));
         assert!(out.contains("data=payload"));
     }
 
@@ -408,7 +439,7 @@ mod tests {
         let out = generate(CodeTarget::JavaScriptFetch, &post_json_req());
         assert!(out.contains("myHeaders.append(\"Content-Type\", \"application/json\");"));
         assert!(out.contains("method: \"POST\","));
-        assert!(out.contains("body: \"{\\\"name\\\": \\\"ada\\\"}\","));
+        assert!(out.contains("body: `{\"name\": \"ada\"}`,"));
         assert!(out.contains("fetch(\"https://api.example.com/users\", requestOptions)"));
     }
 
@@ -416,7 +447,32 @@ mod tests {
     fn axios_lowercases_method() {
         let out = generate(CodeTarget::NodeAxios, &post_json_req());
         assert!(out.contains("method: \"post\","));
-        assert!(out.contains("data: \"{\\\"name\\\": \\\"ada\\\"}\","));
+        assert!(out.contains("data: `{\"name\": \"ada\"}`,"));
+    }
+
+    #[test]
+    fn multiline_body_stays_readable_not_escaped() {
+        // A pretty-printed JSON body must keep real newlines in each language's
+        // idiomatic raw/multi-line string — never literal "\n".
+        let mut req = post_json_req();
+        let pretty = "{\n    \"userId\": 2204668,\n    \"salesFlag\": true\n}";
+        req.body = BodyType::Raw {
+            content: pretty.to_string(),
+            subtype: RawSubtype::Json,
+        };
+
+        let rust = generate(CodeTarget::RustReqwest, &req);
+        assert!(rust.contains(&format!(".body(r#\"{}\"#)", pretty)));
+        assert!(!rust.contains("\\n"));
+
+        let py = generate(CodeTarget::PythonRequests, &req);
+        assert!(py.contains(&format!("payload = \"\"\"{}\"\"\"", pretty)));
+
+        let fetch = generate(CodeTarget::JavaScriptFetch, &req);
+        assert!(fetch.contains(&format!("body: `{}`,", pretty)));
+
+        let go = generate(CodeTarget::GoNetHttp, &req);
+        assert!(go.contains(&format!("strings.NewReader(`{}`)", pretty)));
     }
 
     #[test]
