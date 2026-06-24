@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::types::{BodyType, FormDataRow, FormDataValue, RequestData};
+
 /// Replace `{{key}}` / `{{ key }}` (key trimmed) with values from `vars`.
 ///
 /// - Unknown variables are left literal (so a typo / missing var is visible).
@@ -34,6 +36,44 @@ pub fn substitute(input: &str, vars: &HashMap<String, String>) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Substitute `{{vars}}` throughout a request — URL, header keys+values, and
+/// raw/form body text — so generated code & previews use resolved values.
+/// File form-data paths are left untouched.
+pub fn substitute_request(req: &RequestData, vars: &HashMap<String, String>) -> RequestData {
+    let headers = req
+        .headers
+        .iter()
+        .map(|(k, v)| (substitute(k, vars), substitute(v, vars)))
+        .collect();
+
+    let body = match &req.body {
+        BodyType::None => BodyType::None,
+        BodyType::Raw { content, subtype } => BodyType::Raw {
+            content: substitute(content, vars),
+            subtype: *subtype,
+        },
+        BodyType::FormData(rows) => BodyType::FormData(
+            rows.iter()
+                .map(|r| FormDataRow {
+                    enabled: r.enabled,
+                    key: substitute(&r.key, vars),
+                    value: match &r.value {
+                        FormDataValue::Text(t) => FormDataValue::Text(substitute(t, vars)),
+                        FormDataValue::File { path } => FormDataValue::File { path: path.clone() },
+                    },
+                })
+                .collect(),
+        ),
+    };
+
+    RequestData {
+        method: req.method,
+        url: substitute(&req.url, vars),
+        headers,
+        body,
+    }
 }
 
 #[cfg(test)]
@@ -84,5 +124,27 @@ mod tests {
     #[test]
     fn unclosed_brace_is_literal() {
         assert_eq!(substitute("{{ unclosed", &vars(&[])), "{{ unclosed");
+    }
+
+    #[test]
+    fn substitute_request_resolves_url_headers_and_raw_body() {
+        use crate::types::{BodyType, HttpMethod, RawSubtype, RequestData};
+        let req = RequestData {
+            method: HttpMethod::POST,
+            url: "{{base_url}}/users".to_string(),
+            headers: vec![("Authorization".to_string(), "Bearer {{token}}".to_string())],
+            body: BodyType::Raw {
+                content: "{\"env\": \"{{env}}\"}".to_string(),
+                subtype: RawSubtype::Json,
+            },
+        };
+        let v = vars(&[("base_url", "https://api.test"), ("token", "abc"), ("env", "prod")]);
+        let out = super::substitute_request(&req, &v);
+        assert_eq!(out.url, "https://api.test/users");
+        assert_eq!(out.headers[0].1, "Bearer abc");
+        match out.body {
+            BodyType::Raw { content, .. } => assert_eq!(content, "{\"env\": \"prod\"}"),
+            _ => panic!("expected raw body"),
+        }
     }
 }
