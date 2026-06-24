@@ -3,7 +3,7 @@ use gpui::*;
 use gpui::px;
 use gpui_component::{
     button::*, checkbox::Checkbox, input::*,
-    select::*, v_flex, ActiveTheme as _, Disableable as _, IndexPath, Sizable as _,
+    select::*, v_flex, ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _,
 };
 use gpui_component::input::InputEvent;
 
@@ -18,6 +18,10 @@ pub struct RequestCompleted {
     pub request: RequestData,
     pub response: ResponseData,
 }
+
+/// Event emitted when the user asks to view the request as a code snippet.
+#[derive(Clone)]
+pub struct OpenCodeSnippet;
 
 /// Header row with key-value inputs and enabled checkbox
 struct HeaderRow {
@@ -276,6 +280,12 @@ impl RequestEditor {
             headers,
             body,
         }
+    }
+
+    /// Current request with `{{vars}}` resolved against the active environment,
+    /// for code generation / previews.
+    pub fn resolved_request_data(&self, cx: &App) -> RequestData {
+        crate::variables::substitute_request(&self.get_current_request_data(cx), &self.env_vars)
     }
 
     /// Extract complete params state including disabled params
@@ -985,6 +995,7 @@ impl RequestEditor {
 }
 
 impl EventEmitter<RequestCompleted> for RequestEditor {}
+impl EventEmitter<OpenCodeSnippet> for RequestEditor {}
 
 impl Render for RequestEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1022,6 +1033,17 @@ impl Render for RequestEditor {
                                 .flex_1()
                                 .overflow_hidden()
                                 .child(Input::new(&self.url_input)),
+                        )
+                        .child(
+                            // Code snippet button - opens the code panel
+                            div().flex_shrink_0().child(
+                                Button::new("code-snippet-btn")
+                                    .ghost()
+                                    .icon(Icon::empty().path("icons/code.svg"))
+                                    .on_click(cx.listener(|_this, _ev, _window, cx| {
+                                        cx.emit(OpenCodeSnippet);
+                                    })),
+                            ),
                         )
                         .child(
                             // Send button - prevent it from shrinking
