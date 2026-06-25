@@ -47,19 +47,6 @@ impl RequestTab {
         }
     }
 
-    /// Create a request tab from request data
-    pub fn from_request(id: usize, request: RequestData) -> Self {
-        Self {
-            id,
-            title: Self::generate_title(&request),
-            request,
-            response: None,
-            params_state: None,
-            headers_state: None,
-            history_id: None,
-        }
-    }
-
     /// Generate a display title from request data
     fn generate_title(request: &RequestData) -> String {
         if request.url.is_empty() {

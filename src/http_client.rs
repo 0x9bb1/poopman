@@ -5,6 +5,10 @@ use tokio::runtime::Runtime;
 use crate::types::{BodyType, FormDataValue, HttpMethod};
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// Shared reqwest client. A `Client` owns the connection pool and is internally
+/// reference-counted, so one instance is reused across all requests (keep-alive
+/// / pooling / TLS setup are amortized) and cloning is cheap.
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// A fully-read HTTP response. The body is collected on the tokio runtime
 /// (reqwest's body stream requires its reactor), so callers can use it freely.
@@ -22,9 +26,13 @@ pub struct HttpClient {
 
 impl HttpClient {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("Failed to initialize HTTP client");
+        let client = CLIENT
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .build()
+                    .expect("Failed to initialize HTTP client")
+            })
+            .clone();
 
         Self { client }
     }
