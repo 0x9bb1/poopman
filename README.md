@@ -1,103 +1,118 @@
-# Poopman - API Client
+# Poopman — API Client
 
-A Postman-like API client built with GPUI Component library.
+A Postman-like desktop API client built in Rust with the [GPUI](https://www.gpui.rs/)
+framework and the `gpui-component` library. Classic Postman layout: history on the
+left, request editor on the top-right, response viewer on the bottom-right.
 
 ## Features
 
-- ✅ **HTTP Requests**: Send GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS requests
-- ✅ **Request Configuration**:
-  - URL input with autocomplete
-  - HTTP method selection (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
-  - Query parameters editor with bidirectional URL synchronization
-  - Headers management (predefined + custom headers)
-  - Request body editor supporting multiple formats (JSON, XML, Text, JavaScript, Form-data)
-- ✅ **Response Viewer**:
-  - Status code, duration, and size display
-  - JSON response with syntax highlighting and formatting
-  - Response headers view
-- ✅ **History**:
-  - SQLite database storage
-  - Click to reload previous requests
-  - Clear history option
-- ✅ **Postman Classic Layout**:
-  - Left panel: History list
-  - Right panel: Request editor (top) + Response viewer (bottom)
-  - Resizable panels
+- **HTTP requests** — GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS.
+- **Request editor**
+  - Method selector + URL input.
+  - **Query params** with bidirectional URL ↔ params synchronization.
+  - **Headers** — predefined (toggleable) and custom (deletable); `Content-Type`
+    and `Content-Length` are kept in sync with the body automatically.
+  - **Body** — Raw (JSON / XML / Text / JavaScript, with syntax highlighting and a
+    Beautify action) and **multipart Form-data** (text and file fields).
+- **Response viewer** — status / duration / size, pretty-printed JSON, response
+  headers, and a **binary response** path that previews type/size and saves to disk.
+- **Environments & variables** — define `{{variable}}` sets per environment, pick the
+  active one from the Edit menu, and have them resolved at send time (and in code export).
+- **Code snippet export** — turn the current request into runnable code via the `</>`
+  button: **cURL, Rust (reqwest), Python (Requests), JavaScript (Fetch), NodeJS (Axios),
+  Go (net/http)**, with Copy.
+- **Tabs** — work on multiple requests at once.
+- **History** — every sent request is stored in SQLite; click to reload, or clear all.
 
 ## Requirements
 
-- Rust 1.70+ (2021 edition)
-- GPU-capable environment (GPUI requires GPU acceleration)
-- **Note**: Not supported in WSL2 environments
+- Rust (2024 edition).
+- A GPU-capable environment — GPUI requires GPU acceleration.
+- **Not supported under WSL2** (no GPU surface). Build/test there is fine; run the app
+  on native Linux / macOS / Windows.
 
-## Running
-
-```bash
-cargo run
-```
-
-Build release version:
+## Build & Run
 
 ```bash
-cargo build --release
+cargo run                 # debug
+cargo build --release     # optimized binary at target/release/poopman[.exe]
+cargo test                # unit tests (pure modules: code_gen, variables, url_params, db, …)
 ```
 
 ## Usage
 
-1. **Make a Request**:
-   - Select HTTP method (default: GET)
-   - Enter URL (e.g., `https://api.github.com/zen`)
-   - (Optional) Configure query parameters in Params tab (automatically syncs with URL)
-   - (Optional) Add headers in Headers tab
-   - (Optional) Configure request body in Body tab (supports JSON, XML, Text, JavaScript, Form-data)
-   - Click "Send" button or press Ctrl/Cmd+Enter
-
-2. **View Response**:
-   - See status code, duration, and size in the status bar
-   - View formatted JSON response in Body tab
-   - Check response headers in Headers tab
-
-3. **History**:
-   - All requests are automatically saved
-   - Click any history item to reload it in the editor
-   - Click "Clear" to delete all history
+1. **Send a request** — pick a method, enter a URL (e.g. `https://api.github.com/zen`),
+   optionally set Params / Headers / Body, then click **Send**.
+2. **View the response** — status, time, and size in the status bar; formatted body and
+   headers in their tabs; binary payloads can be saved to a file.
+3. **Environments** — open **Edit → Manage Environments…** to create environments and
+   variables, then select the active one from the Edit menu. Reference them anywhere as
+   `{{name}}`.
+4. **Export code** — click the `</>` button next to Send, choose a language, and Copy.
+5. **History** — sent requests are saved automatically; click one to reload it, or Clear.
 
 ## Data Storage
 
-History is stored in SQLite database at:
-- Linux/macOS: `~/.poopman/history.db`
+History and environments live in a SQLite database at:
+
+- Linux / macOS: `~/.poopman/history.db`
 - Windows: `%USERPROFILE%\.poopman\history.db`
 
 ## Architecture
 
+GPUI's entity-component system with a pub/sub event model. `PoopmanApp` composes the
+panels and wires events (`RequestCompleted`, `HistoryItemClicked`, `EnvironmentsChanged`,
+`OpenCodeSnippet`, tab events) between them.
+
 ```
 src/
-├── main.rs              # Application entry point
-├── app.rs               # Main layout and component composition
-├── types.rs             # Data structures (Request, Response, etc.)
-├── db.rs                # SQLite database manager
-├── request_editor.rs    # Request editing panel
-├── response_viewer.rs   # Response display panel
-└── history_panel.rs     # History list panel
+├── main.rs                # Entry point, embedded SVG assets, logging
+├── app.rs                 # Root layout, tabs, dialogs, event wiring
+├── types.rs               # Core data types (RequestData, ResponseData, BodyType, …)
+├── db.rs                  # SQLite access — CSP style (see note below)
+├── http_client.rs         # reqwest wrapper: shared client + shared tokio runtime
+├── request_editor.rs      # Method / URL / params / headers, send logic
+├── body_editor.rs         # Request body (Raw + multipart Form-data)
+├── response_viewer.rs     # Response display (text / binary / headers)
+├── history_panel.rs       # History list
+├── environment_manager.rs # Environment CRUD dialog
+├── variables.rs           # Pure {{variable}} substitution
+├── code_gen.rs            # Pure code-snippet generation (6 targets)
+├── code_snippet_panel.rs  # Code snippet dialog (language select + Copy)
+├── tab_bar.rs             # Request tab strip
+├── request_tab.rs         # Per-tab model
+├── menu_bar.rs            # Edit menu (environment switching)
+├── url_params.rs          # Pure URL / query-param helpers
+├── code_formatter.rs      # Pure JSON / XML formatting & validation
+├── ui.rs                  # Shared visual primitives (cards, segmented pills)
+└── theme.rs               # Warm-light theme + layout dimensions
 ```
 
-## Technologies
+### Concurrency notes
 
-- **GPUI 0.2.2**: GPU-accelerated UI framework (Zed editor's UI layer)
-- **gpui-component 0.4**: UI component library providing buttons, inputs, selects, tabs, etc.
-- **rusqlite 0.32**: SQLite database with bundled feature
-- **reqwest 0.12**: HTTP client with json, multipart, and stream features
-- **tokio**: Async runtime for HTTP operations
-- **Tree Sitter**: Syntax highlighting for JSON, XML, JavaScript
+- **Database (CSP):** the SQLite `Connection` is owned by a single background thread.
+  Callers don't share it behind a `Mutex`; they send jobs over a channel and receive
+  results back over a per-call reply channel — "share memory by communicating." One
+  owner means no data races and no lock to poison.
+- **HTTP:** a single `reqwest::Client` (connection pool) is shared across requests, and
+  all requests run on one shared multi-threaded tokio runtime, bridged to GPUI's async.
+- **Pure modules** (`code_gen`, `variables`, `url_params`, `code_formatter`, parts of
+  `types`) are side-effect-free and unit-tested directly.
 
-## Future Enhancements
+## Key Technologies
 
-- [ ] Environment variables support
-- [ ] Request collections/folders
-- [ ] Authentication presets (Bearer token, Basic auth, OAuth)
-- [ ] Request/response body format options (HTML, etc.)
-- [ ] Export/import collections (Postman format)
-- [ ] Dark/Light theme toggle
-- [ ] Search/filter in history
-- [ ] Request duplication
-- [ ] Response download/save to file
+- **GPUI 0.2** — GPU-accelerated UI framework (Zed's UI layer).
+- **gpui-component 0.5** — buttons, inputs, selects, tabs, dialogs, code editor.
+- **rusqlite** — bundled SQLite.
+- **reqwest** — HTTP client (json, multipart, stream).
+- **tokio** — async runtime for HTTP.
+- **tree-sitter** — syntax highlighting (JSON, Rust, Python, Go, JavaScript, …).
+- **rust-embed** — embeds SVG icons into the binary.
+
+## Possible Future Enhancements
+
+- [ ] Form-data export in code snippets (currently Raw/None bodies only).
+- [ ] Request collections / folders.
+- [ ] Authentication presets (Bearer, Basic, OAuth).
+- [ ] Export / import collections (Postman format).
+- [ ] Search / filter in history.

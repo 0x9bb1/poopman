@@ -104,8 +104,10 @@ impl EnvironmentManager {
     }
 
     fn select(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        // Persist current edits before switching away.
+        // Persist current edits before switching away, then reload so the list
+        // reflects a just-saved rename (otherwise the old name lingers).
         self.save(cx);
+        self.reload();
         self.selected_id = Some(id);
         self.load_selected_into_editor(window, cx);
         cx.notify();

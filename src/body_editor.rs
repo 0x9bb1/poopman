@@ -163,21 +163,23 @@ impl BodyEditor {
                 }
             }
             2 => {
-                // Form-data
-                // Update formdata_rows with current input values
-                let mut updated_formdata_rows = Vec::new();
-                for (index, row) in self.formdata_rows.iter().enumerate() {
-                    let (key_input, value_input, _type_select) = &self.formdata_input_states[index];
-                    let mut updated_row = row.clone();
-
-                    updated_row.key = key_input.read(cx).value().to_string();
-                    let value = value_input.read(cx).value().to_string();
-                    updated_row.value = match &row.value {
-                        FormDataValue::Text(_) => FormDataValue::Text(value),
-                        FormDataValue::File { .. } => FormDataValue::File { path: value },
-                    };
-                    updated_formdata_rows.push(updated_row);
-                }
+                // Form-data: read current input values. Zip rows with their input
+                // states so a length mismatch can never panic (it just stops early).
+                let updated_formdata_rows = self
+                    .formdata_rows
+                    .iter()
+                    .zip(self.formdata_input_states.iter())
+                    .map(|(row, (key_input, value_input, _type_select))| {
+                        let mut updated_row = row.clone();
+                        updated_row.key = key_input.read(cx).value().to_string();
+                        let value = value_input.read(cx).value().to_string();
+                        updated_row.value = match &row.value {
+                            FormDataValue::Text(_) => FormDataValue::Text(value),
+                            FormDataValue::File { .. } => FormDataValue::File { path: value },
+                        };
+                        updated_row
+                    })
+                    .collect();
                 BodyType::FormData(updated_formdata_rows)
             }
             _ => BodyType::None,
@@ -251,9 +253,11 @@ impl BodyEditor {
                         cx.subscribe(&value_input, Self::handle_input_event)
                     );
 
-                    // Subscribe to type selector changes
+                    // Subscribe to type selector changes (subscribe_in for `window`,
+                    // so the value field's placeholder updates on Text <-> File).
+                    let value_input_for_type = value_input.clone();
                     self._subscriptions.push(
-                        cx.subscribe(&type_select, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, cx| {
+                        cx.subscribe_in(&type_select, window, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
                             if let SelectEvent::Confirm(Some(selected_value)) = event {
                                 let should_be_file = *selected_value == "File";
                                 let current_is_file = matches!(
@@ -261,14 +265,19 @@ impl BodyEditor {
                                     Some(FormDataValue::File { .. })
                                 );
                                 if should_be_file != current_is_file {
-                                    // We need window here but subscribe doesn't provide it
-                                    // So we'll just update the data model, the UI will react
                                     if let Some(row) = this.formdata_rows.get_mut(row_index) {
                                         row.value = match &row.value {
                                             FormDataValue::Text(text) => FormDataValue::File { path: text.clone() },
                                             FormDataValue::File { path } => FormDataValue::Text(path.clone()),
                                         };
                                     }
+                                    value_input_for_type.update(cx, |input, cx| {
+                                        input.set_placeholder(
+                                            if should_be_file { "File Path" } else { "Value" },
+                                            window,
+                                            cx,
+                                        );
+                                    });
                                     cx.notify();
                                 }
                             }
@@ -391,9 +400,11 @@ impl BodyEditor {
         self._subscriptions
             .push(cx.subscribe(&value_input, Self::handle_input_event));
 
-        // Subscribe to type selector changes
+        // Subscribe to type selector changes (subscribe_in so we have `window` to
+        // refresh the value field's placeholder when toggling Text <-> File).
+        let value_input_for_type = value_input.clone();
         self._subscriptions.push(
-            cx.subscribe(&type_select, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, cx| {
+            cx.subscribe_in(&type_select, window, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
                 if let SelectEvent::Confirm(Some(selected_value)) = event {
                     let should_be_file = *selected_value == "File";
                     let current_is_file = matches!(
@@ -408,6 +419,13 @@ impl BodyEditor {
                                 FormDataValue::File { path } => FormDataValue::Text(path.clone()),
                             };
                         }
+                        value_input_for_type.update(cx, |input, cx| {
+                            input.set_placeholder(
+                                if should_be_file { "File Path" } else { "Value" },
+                                window,
+                                cx,
+                            );
+                        });
                         cx.notify();
                     }
                 }
@@ -431,25 +449,6 @@ impl BodyEditor {
     fn toggle_formdata_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(row) = self.formdata_rows.get_mut(index) {
             row.enabled = !row.enabled;
-            cx.notify();
-        }
-    }
-
-    fn toggle_formdata_type(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(row) = self.formdata_rows.get_mut(index) {
-            row.value = match &row.value {
-                FormDataValue::Text(text) => FormDataValue::File { path: text.clone() },
-                FormDataValue::File { path } => FormDataValue::Text(path.clone()),
-            };
-            let (_, value_input, _type_select) = &self.formdata_input_states[index];
-            let is_file = matches!(row.value, FormDataValue::File { .. });
-            value_input.update(cx, |input, cx| {
-                input.set_placeholder(
-                    if is_file { "File Path" } else { "Value" },
-                    window,
-                    cx,
-                );
-            });
             cx.notify();
         }
     }
@@ -515,7 +514,7 @@ impl BodyEditor {
             cx.spawn_in(window, async move |_, window| {
                 if let Ok(Ok(Some(paths))) = path.await {
                     if let Some(selected_path) = paths.iter().next() {
-                        // Store full path but display only filename
+                        // Store and display the full path (used directly when sending).
                         let path_str = selected_path.to_string_lossy().to_string();
                         let _ = window.update(|window, cx| {
                             value_input.update(cx, |input, cx| {
