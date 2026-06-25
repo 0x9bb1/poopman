@@ -8,6 +8,7 @@ use gpui::*;
 use gpui_component::{
     button::*, checkbox::Checkbox, h_flex, input::*, v_flex, ActiveTheme as _, Sizable as _,
 };
+use gpui_component::input::InputEvent;
 use std::sync::Arc;
 
 use crate::db::Database;
@@ -30,6 +31,11 @@ pub struct EnvironmentManager {
     selected_id: Option<i64>,
     name_input: Entity<InputState>,
     var_rows: Vec<VarRow>,
+    /// True while programmatically loading inputs, so their `Change` events don't
+    /// trigger an auto-save of values we just set.
+    suspend_autosave: bool,
+    /// Live input-change subscriptions (name + each var row), rewired on load.
+    _subs: Vec<Subscription>,
 }
 
 impl EventEmitter<EnvironmentsChanged> for EnvironmentManager {}
@@ -48,9 +54,37 @@ impl EnvironmentManager {
             selected_id,
             name_input,
             var_rows: vec![],
+            suspend_autosave: false,
+            _subs: vec![],
         };
         this.load_selected_into_editor(window, cx);
         this
+    }
+
+    /// (Re)subscribe to the name + variable inputs so any edit auto-saves.
+    fn wire_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.name_input.clone();
+        let inputs: Vec<Entity<InputState>> = self
+            .var_rows
+            .iter()
+            .flat_map(|r| [r.key_input.clone(), r.value_input.clone()])
+            .collect();
+
+        let mut subs = Vec::with_capacity(inputs.len() + 1);
+        subs.push(cx.subscribe_in(&name, window, |this, _, ev: &InputEvent, _w, cx| {
+            if matches!(ev, InputEvent::Change) && !this.suspend_autosave {
+                this.commit(cx);
+            }
+        }));
+        for input in &inputs {
+            subs.push(cx.subscribe_in(input, window, |this, _, ev: &InputEvent, _w, cx| {
+                if matches!(ev, InputEvent::Change) && !this.suspend_autosave {
+                    this.commit(cx);
+                }
+            }));
+        }
+        // Assigning drops the previous subscriptions (unsubscribing stale inputs).
+        self._subs = subs;
     }
 
     pub(crate) fn reload(&mut self) {
@@ -65,6 +99,10 @@ impl EnvironmentManager {
             .and_then(|id| self.environments.iter().find(|e| e.id == id))
             .cloned();
 
+        // Programmatic set_value below would otherwise auto-save the values we're
+        // loading; suspend autosave for the duration.
+        self.suspend_autosave = true;
+
         let name = selected.as_ref().map(|e| e.name.clone()).unwrap_or_default();
         self.name_input.update(cx, |input, cx| {
             input.set_value(&name, window, cx);
@@ -76,6 +114,9 @@ impl EnvironmentManager {
                 self.var_rows.push(self.make_var_row(v.enabled, &v.key, &v.value, window, cx));
             }
         }
+
+        self.wire_inputs(window, cx);
+        self.suspend_autosave = false;
     }
 
     fn make_var_row(
@@ -104,9 +145,7 @@ impl EnvironmentManager {
     }
 
     fn select(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        // Persist current edits before switching away, then reload so the list
-        // reflects a just-saved rename (otherwise the old name lingers).
-        self.save(cx);
+        // Edits auto-save as they happen, so switching just reloads + reselects.
         self.reload();
         self.selected_id = Some(id);
         self.load_selected_into_editor(window, cx);
@@ -114,7 +153,6 @@ impl EnvironmentManager {
     }
 
     fn add_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.save(cx);
         match self.db.create_environment("New Environment") {
             Ok(id) => {
                 self.reload();
@@ -173,7 +211,10 @@ impl EnvironmentManager {
         let _ = self.db.replace_variables(id, &vars);
     }
 
-    fn save_and_notify(&mut self, cx: &mut Context<Self>) {
+    /// Persist the selected environment + reload + broadcast so the rest of the
+    /// app (request editor's `{{var}}` map, the list) reflects the change. This is
+    /// the single auto-save entry point.
+    fn commit(&mut self, cx: &mut Context<Self>) {
         self.save(cx);
         self.reload();
         cx.emit(EnvironmentsChanged);
@@ -183,20 +224,23 @@ impl EnvironmentManager {
     fn add_var_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let row = self.make_var_row(true, "", "", window, cx);
         self.var_rows.push(row);
+        // The new row is empty (not yet persisted), but its inputs need change
+        // subscriptions so typing into them auto-saves.
+        self.wire_inputs(window, cx);
         cx.notify();
     }
 
     fn remove_var_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.var_rows.len() {
             self.var_rows.remove(index);
-            cx.notify();
+            self.commit(cx);
         }
     }
 
     fn toggle_var(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(row) = self.var_rows.get_mut(index) {
             row.enabled = !row.enabled;
-            cx.notify();
+            self.commit(cx);
         }
     }
 }
@@ -438,24 +482,6 @@ impl Render for EnvironmentManager {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_var_row(window, cx);
                             })),
-                    )
-                    .child(
-                        // Footer: only a right-aligned Save (no hint text).
-                        h_flex()
-                            .w_full()
-                            .justify_end()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .child(
-                                Button::new("env-save")
-                                    .small()
-                                    .primary()
-                                    .label("Save")
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.save_and_notify(cx);
-                                    })),
-                            ),
                     )
                     .into_any_element()
             } else {
