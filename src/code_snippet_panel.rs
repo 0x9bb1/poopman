@@ -3,6 +3,9 @@
 //! action. Owned by `PoopmanApp` and shown inside a dialog opened from the
 //! request editor's `</>` button.
 
+use std::time::Duration;
+
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
     button::*, input::*, select::*, h_flex, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
@@ -21,6 +24,8 @@ pub struct CodeSnippetPanel {
     code: String,
     language_select: Entity<SelectState<Vec<&'static str>>>,
     code_display: Entity<InputState>,
+    /// True briefly after a Copy click, to show "Copied ✓" feedback.
+    copied: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -54,6 +59,7 @@ impl CodeSnippetPanel {
             code: String::new(),
             language_select,
             code_display,
+            copied: false,
             _subscriptions: vec![sub],
         }
     }
@@ -83,12 +89,26 @@ impl CodeSnippetPanel {
             None => String::new(),
         };
         self.code = code.clone();
+        self.copied = false; // new code => clear any stale "Copied" state
         self.code_display.update(cx, |input, cx| input.set_value(&code, window, cx));
         cx.notify();
     }
 
-    fn copy(&mut self, _e: &gpui::ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, _e: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(self.code.clone()));
+        self.copied = true;
+        cx.notify();
+        // Revert the "Copied ✓" label after a short delay.
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.copied = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -110,7 +130,8 @@ impl Render for CodeSnippetPanel {
                     .child(
                         Button::new("code-copy")
                             .small()
-                            .label("Copy")
+                            .when(self.copied, |b| b.success())
+                            .label(if self.copied { "Copied ✓" } else { "Copy" })
                             .on_click(cx.listener(Self::copy)),
                     ),
             )
