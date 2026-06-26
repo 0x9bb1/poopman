@@ -11,6 +11,9 @@ use std::sync::Arc;
 use crate::db::Database;
 use crate::types::HistoryItem;
 
+/// Maximum number of history rows loaded/searched at a time.
+const HISTORY_LIMIT: usize = 100;
+
 /// Event emitted when a history item is clicked
 #[derive(Clone)]
 pub struct HistoryItemClicked {
@@ -29,7 +32,7 @@ pub struct HistoryPanel {
 impl HistoryPanel {
     pub fn new(db: Arc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Load initial history from database
-        let history = db.load_recent_history(100).unwrap_or_default();
+        let history = db.load_recent_history(HISTORY_LIMIT).unwrap_or_default();
 
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search history"));
         cx.subscribe(&search, Self::on_search_change).detach();
@@ -48,9 +51,9 @@ impl HistoryPanel {
     fn refresh_list(&mut self) {
         let q = self.query.trim();
         self.history = if q.is_empty() {
-            self.db.load_recent_history(100).unwrap_or_default()
+            self.db.load_recent_history(HISTORY_LIMIT).unwrap_or_default()
         } else {
-            self.db.search_history(q, 100).unwrap_or_default()
+            self.db.search_history(q, HISTORY_LIMIT).unwrap_or_default()
         };
     }
 
@@ -60,7 +63,7 @@ impl HistoryPanel {
         event: &InputEvent,
         cx: &mut Context<Self>,
     ) {
-        if let InputEvent::Change = event {
+        if matches!(event, InputEvent::Change) {
             self.query = self.search.read(cx).value().to_string();
             self.refresh_list();
             cx.notify();
@@ -101,7 +104,7 @@ impl HistoryPanel {
     fn clear_history(
         &mut self,
         _event: &gpui::ClickEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let Err(e) = self.db.clear_all_history() {
@@ -111,6 +114,9 @@ impl HistoryPanel {
 
         self.history.clear();
         self.selected_id = None;
+        self.query = String::new();
+        self.search
+            .update(cx, |state, cx| state.set_value("", window, cx));
         cx.notify();
     }
 }
