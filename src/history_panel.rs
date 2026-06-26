@@ -1,8 +1,10 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex, scroll::ScrollableElement as _, v_flex, ActiveTheme as _,
-    Sizable as _,
+    button::*, h_flex,
+    input::{Input, InputEvent, InputState},
+    scroll::ScrollableElement as _,
+    v_flex, ActiveTheme as _, Icon, Sizable as _,
 };
 use std::sync::Arc;
 
@@ -20,23 +22,54 @@ pub struct HistoryPanel {
     db: Arc<Database>,
     history: Vec<HistoryItem>,
     selected_id: Option<i64>,
+    search: Entity<InputState>,
+    query: String,
 }
 
 impl HistoryPanel {
-    pub fn new(db: Arc<Database>, _window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(db: Arc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Load initial history from database
         let history = db.load_recent_history(100).unwrap_or_default();
+
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search history"));
+        cx.subscribe(&search, Self::on_search_change).detach();
 
         Self {
             db,
             history,
             selected_id: None,
+            search,
+            query: String::new(),
         }
     }
 
-    /// Reload history from database
+    /// Re-query the list to honor the current query: recent when empty,
+    /// search otherwise. Shared by typing and by `reload`.
+    fn refresh_list(&mut self) {
+        let q = self.query.trim();
+        self.history = if q.is_empty() {
+            self.db.load_recent_history(100).unwrap_or_default()
+        } else {
+            self.db.search_history(q, 100).unwrap_or_default()
+        };
+    }
+
+    fn on_search_change(
+        &mut self,
+        _state: Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::Change = event {
+            self.query = self.search.read(cx).value().to_string();
+            self.refresh_list();
+            cx.notify();
+        }
+    }
+
+    /// Reload history from database, honoring the active search query.
     pub fn reload(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.history = self.db.load_recent_history(100).unwrap_or_default();
+        self.refresh_list();
         cx.notify();
     }
 
@@ -112,7 +145,26 @@ impl Render for HistoryPanel {
                             .on_click(cx.listener(Self::clear_history)),
                     ),
             )
+            .child(
+                // Search row (always visible, like Postman)
+                div()
+                    .px_2()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        Input::new(&self.search)
+                            .small()
+                            .cleanable(true)
+                            .prefix(Icon::empty().path("icons/search.svg")),
+                    ),
+            )
             .when(self.history.is_empty(), |this| {
+                let msg = if self.query.trim().is_empty() {
+                    "No history yet\n\nSend a request to get started".to_string()
+                } else {
+                    format!("No history matches \"{}\"", self.query.trim())
+                };
                 this.child(
                     div()
                         .flex_1()
@@ -122,7 +174,7 @@ impl Render for HistoryPanel {
                         .text_center()
                         .text_color(theme.muted_foreground)
                         .text_sm()
-                        .child("No history yet\n\nSend a request to get started"),
+                        .child(msg),
                 )
             })
             .when(!self.history.is_empty(), |this| {
