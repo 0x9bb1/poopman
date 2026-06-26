@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
-use crate::types::{Environment, EnvVar, HistoryItem, HttpMethod, RequestData};
+use crate::types::{BodyType, Environment, EnvVar, HistoryItem, HttpMethod, RequestData};
 
 /// A unit of work executed on the database's owning thread.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -31,8 +31,7 @@ fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
 
     let headers: Vec<(String, String)> =
         serde_json::from_str(&request_headers).unwrap_or_default();
-    let body: crate::types::BodyType =
-        serde_json::from_str(&request_body).unwrap_or_default();
+    let body: BodyType = serde_json::from_str(&request_body).unwrap_or_default();
 
     let request = RequestData {
         method: HttpMethod::from_str(&method).unwrap_or(HttpMethod::GET),
@@ -154,7 +153,7 @@ impl Database {
         method: &str,
         url: &str,
         request_headers: &str,
-        request_body: &crate::types::BodyType,
+        request_body: &BodyType,
     ) -> Result<i64> {
         let method = method.to_string();
         let url = url.to_string();
@@ -179,7 +178,7 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT id, timestamp, method, url, request_headers, request_body
                  FROM history
-                 ORDER BY timestamp DESC
+                 ORDER BY timestamp DESC, id DESC
                  LIMIT ?1",
             )?;
 
@@ -194,8 +193,8 @@ impl Database {
         })
     }
 
-    /// Search history by URL or method (case-insensitive substring), all rows,
-    /// newest first. An empty query matches everything.
+    /// Search history by URL or method (case-insensitive substring), newest
+    /// first, up to `limit` rows. An empty query matches everything.
     pub fn search_history(&self, query: &str, limit: usize) -> Result<Vec<HistoryItem>> {
         let pattern = format!("%{}%", escape_like(query));
         self.call(move |conn| {
@@ -443,6 +442,8 @@ mod tests {
         let db = mem_db();
         db.insert_history("GET", "https://api.test/a%b", "[]", &crate::types::BodyType::None)
             .unwrap();
+        db.insert_history("GET", "https://api.test/a_b", "[]", &crate::types::BodyType::None)
+            .unwrap();
         db.insert_history("GET", "https://api.test/axb", "[]", &crate::types::BodyType::None)
             .unwrap();
 
@@ -450,6 +451,12 @@ mod tests {
         let r = db.search_history("a%b", 10).unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].request.url, "https://api.test/a%b");
+
+        // '_' must be treated literally: matches only the URL with a literal '_',
+        // not the single-char wildcard that would also match "/axb" and "/a%b".
+        let r = db.search_history("a_b", 10).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].request.url, "https://api.test/a_b");
     }
 
     #[test]
