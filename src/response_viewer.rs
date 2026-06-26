@@ -323,10 +323,10 @@ impl Render for ResponseViewer {
                                         .border_1()
                                         .border_color(theme.border)
                                         .bg(theme.popover)
-                                        .overflow_hidden()
                                         .child(
                                             Input::new(&self.body_display)
                                                 .disabled(is_error)
+                                                .rounded(theme.radius_lg)
                                                 .w_full()
                                                 .h_full(),
                                         ),

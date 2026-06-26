@@ -642,9 +642,11 @@ impl Render for BodyEditor {
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.popover)
-                        .overflow_hidden()
                         .child(
-                            Input::new(&self.raw_body_editor).w_full().h_full()
+                            Input::new(&self.raw_body_editor)
+                                .rounded(theme.radius_lg)
+                                .w_full()
+                                .h_full()
                         )
                 )
             })
