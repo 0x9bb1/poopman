@@ -18,6 +18,40 @@ use crate::types::{Environment, EnvVar, HistoryItem, HttpMethod, RequestData};
 /// A unit of work executed on the database's owning thread.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
+/// Map a `history` row (id, timestamp, method, url, request_headers, request_body)
+/// into a `HistoryItem`. Shared by `load_recent_history` and `search_history` so
+/// the two queries can never drift in how they decode a row.
+fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
+    let id: i64 = row.get(0)?;
+    let timestamp: String = row.get(1)?;
+    let method: String = row.get(2)?;
+    let url: String = row.get(3)?;
+    let request_headers: String = row.get(4)?;
+    let request_body: String = row.get(5)?;
+
+    let headers: Vec<(String, String)> =
+        serde_json::from_str(&request_headers).unwrap_or_default();
+    let body: crate::types::BodyType =
+        serde_json::from_str(&request_body).unwrap_or_default();
+
+    let request = RequestData {
+        method: HttpMethod::from_str(&method).unwrap_or(HttpMethod::GET),
+        url,
+        headers,
+        body,
+    };
+    Ok(HistoryItem::new(id, timestamp, request, None))
+}
+
+/// Escape a user query so SQLite `LIKE` treats `%`, `_`, and `\` literally.
+/// Paired with `ESCAPE '\'` in the SQL. Backslash must be escaped first.
+fn escape_like(query: &str) -> String {
+    query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 /// Handle to the database thread. Cloneable senders make this cheap to share
 /// (wrapped in `Arc` by the app); dropping every handle stops the thread.
 pub struct Database {
@@ -150,31 +184,29 @@ impl Database {
             )?;
 
             // rusqlite 0.40 dropped the `ToSql` impl for `usize`; bind as i64.
-            let items = stmt.query_map([limit as i64], |row| {
-                let id: i64 = row.get(0)?;
-                let timestamp: String = row.get(1)?;
-                let method: String = row.get(2)?;
-                let url: String = row.get(3)?;
-                let request_headers: String = row.get(4)?;
-                let request_body: String = row.get(5)?;
+            let items = stmt.query_map([limit as i64], row_to_history_item)?;
 
-                let headers: Vec<(String, String)> =
-                    serde_json::from_str(&request_headers).unwrap_or_default();
+            let mut result = Vec::new();
+            for item in items {
+                result.push(item?);
+            }
+            Ok(result)
+        })
+    }
 
-                // Deserialize body type from JSON, fallback to default if fails
-                let body: crate::types::BodyType =
-                    serde_json::from_str(&request_body).unwrap_or_default();
-
-                let request = RequestData {
-                    method: HttpMethod::from_str(&method).unwrap_or(HttpMethod::GET),
-                    url,
-                    headers,
-                    body,
-                };
-
-                Ok(HistoryItem::new(id, timestamp, request, None))
-            })?;
-
+    /// Search history by URL or method (case-insensitive substring), all rows,
+    /// newest first. An empty query matches everything.
+    pub fn search_history(&self, query: &str, limit: usize) -> Result<Vec<HistoryItem>> {
+        let pattern = format!("%{}%", escape_like(query));
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, timestamp, method, url, request_headers, request_body
+                 FROM history
+                 WHERE url LIKE ?1 ESCAPE '\\' OR method LIKE ?1 ESCAPE '\\'
+                 ORDER BY timestamp DESC, id DESC
+                 LIMIT ?2",
+            )?;
+            let items = stmt.query_map(params![pattern, limit as i64], row_to_history_item)?;
             let mut result = Vec::new();
             for item in items {
                 result.push(item?);
@@ -378,5 +410,54 @@ mod tests {
         assert_eq!(items[0].request.url, "https://api.test/x");
         db.clear_all_history().unwrap();
         assert!(db.load_recent_history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_history_matches_url_and_method_newest_first() {
+        let db = mem_db();
+        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None)
+            .unwrap();
+        db.insert_history("POST", "https://api.test/login", "[]", &crate::types::BodyType::None)
+            .unwrap();
+        db.insert_history("DELETE", "https://api.test/orders/1", "[]", &crate::types::BodyType::None)
+            .unwrap();
+
+        // URL substring
+        let r = db.search_history("login", 10).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].request.url, "https://api.test/login");
+
+        // method match, case-insensitive
+        let r = db.search_history("post", 10).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].request.method, HttpMethod::POST);
+
+        // shared substring across all three, newest (last inserted) first
+        let r = db.search_history("api.test", 10).unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].request.url, "https://api.test/orders/1");
+    }
+
+    #[test]
+    fn search_history_escapes_wildcards() {
+        let db = mem_db();
+        db.insert_history("GET", "https://api.test/a%b", "[]", &crate::types::BodyType::None)
+            .unwrap();
+        db.insert_history("GET", "https://api.test/axb", "[]", &crate::types::BodyType::None)
+            .unwrap();
+
+        // '%' must be treated literally: matches only the URL with a literal '%'
+        let r = db.search_history("a%b", 10).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].request.url, "https://api.test/a%b");
+    }
+
+    #[test]
+    fn search_history_empty_query_matches_all() {
+        let db = mem_db();
+        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None)
+            .unwrap();
+        let r = db.search_history("", 10).unwrap();
+        assert_eq!(r.len(), 1);
     }
 }
