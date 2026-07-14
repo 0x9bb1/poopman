@@ -12,6 +12,7 @@ gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
 log = "0.4"
 env_logger = "0.11"
 
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 futures = "0.3"
