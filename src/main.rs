@@ -111,6 +111,17 @@ fn main() {
         gpui_component::init(cx);
         crate::theme::apply_theme(cx);
 
+        // Late binding on purpose: gpui gives later-added bindings precedence,
+        // so the "Input"-context ctrl-enter shadows gpui-component's own
+        // secondary-enter input binding (its PressEnter{secondary:true} event
+        // is unused in this app).
+        cx.bind_keys([
+            KeyBinding::new("ctrl-enter", crate::app::SendRequest, None),
+            KeyBinding::new("ctrl-enter", crate::app::SendRequest, Some("Input")),
+            KeyBinding::new("ctrl-t", crate::app::NewTab, None),
+            KeyBinding::new("ctrl-w", crate::app::CloseTab, None),
+        ]);
+
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 titlebar: Some(gpui_component::TitleBar::title_bar_options()),
