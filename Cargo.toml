@@ -3,7 +3,7 @@ edition = "2024"
 name = "poopman"
 description = "A Postman-like API client built with GPUI Component."
 publish = false
-version = "0.1.0"
+version = "0.3.0"
 
 [dependencies]
 anyhow = "1"
@@ -34,7 +34,7 @@ winresource = "0.1"
 name = "Poopman"
 identifier = "com.poopman.app"
 icon = ["assets/icons/logo.ico"]
-version = "0.1.0"
+version = "0.3.0"
 copyright = "Copyright (c) 2024"
 category = "Utility"
 short_description = "A Postman-like API client"
