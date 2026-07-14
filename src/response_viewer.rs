@@ -5,6 +5,13 @@ use std::sync::Arc;
 
 use crate::types::ResponseData;
 
+/// Map a raw Content-Type header value to a gpui-renderable image format.
+/// Strips `;`-parameters (e.g. charset), trims, and is case-insensitive.
+fn image_format_for_content_type(content_type: &str) -> Option<ImageFormat> {
+    let mime = content_type.split(';').next()?.trim().to_ascii_lowercase();
+    ImageFormat::from_mime_type(&mime)
+}
+
 /// Pick a sensible file extension for a (lowercased, param-stripped) Content-Type.
 ///
 /// Uses a curated map for common types because mime_guess's extension ordering is
@@ -48,6 +55,9 @@ pub struct ResponseViewer {
     /// True right after the user cancels a request; shows a notice instead of
     /// the usual empty state. Reset by the next set_response/clear_response.
     canceled: bool,
+    /// Pre-built preview for image responses (constructed once per response —
+    /// `Image::from_bytes` hashes the body for its asset id, too costly per frame).
+    preview_image: Option<Arc<gpui::Image>>,
     body_display: Entity<InputState>,
     active_tab: usize,
     headers_scroll_handle: ScrollHandle,
@@ -66,6 +76,7 @@ impl ResponseViewer {
         Self {
             response: None,
             canceled: false,
+            preview_image: None,
             body_display,
             active_tab: 0,
             headers_scroll_handle: ScrollHandle::new(),
@@ -80,6 +91,17 @@ impl ResponseViewer {
         cx: &mut Context<Self>,
     ) {
         self.canceled = false;
+        // Pre-build an inline preview for image responses (binary only).
+        self.preview_image = if response.is_text {
+            None
+        } else {
+            response
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                .and_then(|(_, v)| image_format_for_content_type(v))
+                .map(|format| Arc::new(gpui::Image::from_bytes(format, response.body.clone())))
+        };
         // Only feed the text editor for text responses; binary is shown in a
         // dedicated panel and never decoded to (lossy) text.
         let display = if response.is_text {
@@ -111,6 +133,7 @@ impl ResponseViewer {
     pub fn clear_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.canceled = false;
         self.response = None;
+        self.preview_image = None;
         self.body_display.update(cx, |input, cx| {
             input.set_value("", window, cx);
         });
@@ -360,19 +383,37 @@ impl Render for ResponseViewer {
                                         (ct, r.body.len())
                                     })
                                     .unwrap_or_else(|| ("application/octet-stream".to_string(), 0));
+                                let preview = self.preview_image.clone();
                                 this.child(
                                     v_flex()
                                         .flex_1()
                                         .w_full()
+                                        .min_h_0()
                                         .items_center()
                                         .justify_center()
                                         .gap_2()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme.foreground)
-                                                .child("Binary response"),
-                                        )
+                                        .when_some(preview, |this, image| {
+                                            // Inline preview, scaled to fit
+                                            // (img defaults to object-fit: contain).
+                                            this.child(
+                                                div()
+                                                    .flex_1()
+                                                    .w_full()
+                                                    .min_h_0()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .child(img(image).max_w_full().max_h_full()),
+                                            )
+                                        })
+                                        .when(self.preview_image.is_none(), |this| {
+                                            this.child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(theme.foreground)
+                                                    .child("Binary response"),
+                                            )
+                                        })
                                         .child(
                                             div()
                                                 .text_xs()
@@ -420,5 +461,42 @@ impl Render for ResponseViewer {
                         }),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // NOT `use super::*`: that would pull in `gpui::*`, whose `test` attribute
+    // macro shadows the standard `#[test]`.
+    use super::image_format_for_content_type;
+    use gpui::ImageFormat;
+
+    #[test]
+    fn maps_supported_image_content_types() {
+        assert_eq!(image_format_for_content_type("image/png"), Some(ImageFormat::Png));
+        assert_eq!(image_format_for_content_type("image/jpeg"), Some(ImageFormat::Jpeg));
+        assert_eq!(image_format_for_content_type("image/jpg"), Some(ImageFormat::Jpeg));
+        assert_eq!(image_format_for_content_type("image/webp"), Some(ImageFormat::Webp));
+        assert_eq!(image_format_for_content_type("image/gif"), Some(ImageFormat::Gif));
+        assert_eq!(image_format_for_content_type("image/svg+xml"), Some(ImageFormat::Svg));
+        assert_eq!(image_format_for_content_type("image/bmp"), Some(ImageFormat::Bmp));
+        assert_eq!(image_format_for_content_type("image/tiff"), Some(ImageFormat::Tiff));
+    }
+
+    #[test]
+    fn strips_parameters_whitespace_and_case() {
+        assert_eq!(
+            image_format_for_content_type("Image/PNG; charset=binary"),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(image_format_for_content_type("  image/gif ; foo=bar"), Some(ImageFormat::Gif));
+    }
+
+    #[test]
+    fn rejects_non_image_and_unknown_types() {
+        assert_eq!(image_format_for_content_type("application/pdf"), None);
+        assert_eq!(image_format_for_content_type("image/x-exotic"), None);
+        assert_eq!(image_format_for_content_type(""), None);
+        assert_eq!(image_format_for_content_type("text/html"), None);
     }
 }
