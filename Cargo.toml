@@ -2,6 +2,7 @@
 edition = "2024"
 name = "poopman"
 description = "A Postman-like API client built with GPUI Component."
+license = "Apache-2.0"
 publish = false
 version = "0.3.0"
 
