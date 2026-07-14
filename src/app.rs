@@ -18,6 +18,8 @@ use crate::theme::{
     REQUEST_INITIAL_HEIGHT, REQUEST_MAX, REQUEST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH,
 };
 
+actions!(poopman, [SendRequest, NewTab, CloseTab]);
+
 /// Main application view
 pub struct PoopmanApp {
     db: Arc<Database>,
@@ -497,6 +499,17 @@ impl Render for PoopmanApp {
         let theme = cx.theme();
 
         v_flex()
+            .key_context("Poopman")
+            .on_action(cx.listener(|this, _: &SendRequest, window, cx| {
+                this.request_editor.update(cx, |editor, cx| editor.send(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                this.create_new_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                let index = this.active_tab_index;
+                this.close_tab(index, window, cx);
+            }))
             .size_full()
             .bg(theme.muted)
             .child(
