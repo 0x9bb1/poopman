@@ -45,6 +45,9 @@ fn extension_for_content_type(ct: &str) -> Option<String> {
 pub struct ResponseViewer {
     /// Shared with the owning tab, so setting/reading never copies the body.
     response: Option<Arc<ResponseData>>,
+    /// True right after the user cancels a request; shows a notice instead of
+    /// the usual empty state. Reset by the next set_response/clear_response.
+    canceled: bool,
     body_display: Entity<InputState>,
     active_tab: usize,
     headers_scroll_handle: ScrollHandle,
@@ -62,6 +65,7 @@ impl ResponseViewer {
 
         Self {
             response: None,
+            canceled: false,
             body_display,
             active_tab: 0,
             headers_scroll_handle: ScrollHandle::new(),
@@ -75,6 +79,7 @@ impl ResponseViewer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.canceled = false;
         // Only feed the text editor for text responses; binary is shown in a
         // dedicated panel and never decoded to (lossy) text.
         let display = if response.is_text {
@@ -104,11 +109,19 @@ impl ResponseViewer {
 
     /// Clear response data
     pub fn clear_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.canceled = false;
         self.response = None;
         self.body_display.update(cx, |input, cx| {
             input.set_value("", window, cx);
         });
         self.active_tab = 0;
+        cx.notify();
+    }
+
+    /// Clear the panel and show a "Request canceled" notice.
+    pub fn show_canceled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_response(window, cx);
+        self.canceled = true;
         cx.notify();
     }
 
@@ -199,7 +212,7 @@ impl ResponseViewer {
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .text_color(cx.theme().muted_foreground)
-                .child("No response yet")
+                .child(if self.canceled { "Request canceled" } else { "No response yet" })
         }
     }
 
@@ -400,7 +413,11 @@ impl Render for ResponseViewer {
                         .items_center()
                         .justify_center()
                         .text_color(theme.muted_foreground)
-                        .child("Send a request to see the response here"),
+                        .child(if self.canceled {
+                            "Request canceled"
+                        } else {
+                            "Send a request to see the response here"
+                        }),
                 )
             })
     }
