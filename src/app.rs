@@ -219,12 +219,12 @@ impl PoopmanApp {
         active_id: Option<i64>,
     ) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
-        if let Some(id) = active_id {
-            if let Some(env) = environments.iter().find(|e| e.id == id) {
-                for v in &env.variables {
-                    if v.enabled && !v.key.is_empty() {
-                        map.insert(v.key.clone(), v.value.clone());
-                    }
+        if let Some(id) = active_id
+            && let Some(env) = environments.iter().find(|e| e.id == id)
+        {
+            for v in &env.variables {
+                if v.enabled && !v.key.is_empty() {
+                    map.insert(v.key.clone(), v.value.clone());
                 }
             }
         }
@@ -318,16 +318,16 @@ impl PoopmanApp {
                 editor.load_request(&tab.request, window, cx);
 
                 // If we have saved UI state, load it (overrides parsed state from URL)
-                if let Some(params_state) = &tab.params_state {
-                    if !params_state.is_empty() {
-                        editor.load_params_state(params_state, window, cx);
-                    }
+                if let Some(params_state) = &tab.params_state
+                    && !params_state.is_empty()
+                {
+                    editor.load_params_state(params_state, window, cx);
                 }
 
-                if let Some(headers_state) = &tab.headers_state {
-                    if !headers_state.is_empty() {
-                        editor.load_headers_state(headers_state, window, cx);
-                    }
+                if let Some(headers_state) = &tab.headers_state
+                    && !headers_state.is_empty()
+                {
+                    editor.load_headers_state(headers_state, window, cx);
                 }
             });
 

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::types::{BodyType, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, ResponseData};
 
 /// Represents a single request tab
@@ -6,8 +8,8 @@ pub struct RequestTab {
     pub id: usize,
     pub title: String,
     pub request: RequestData,
-    /// Response data for this tab
-    pub response: Option<ResponseData>,
+    /// Response data for this tab (shared, so tab switches never copy the body)
+    pub response: Option<Arc<ResponseData>>,
     // UI state (not persisted to database)
     pub params_state: Option<Vec<ParamState>>,
     pub headers_state: Option<Vec<HeaderState>>,

@@ -12,11 +12,12 @@ use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, Respon
 use crate::url_params::{self, QueryParam};
 use crate::theme::METHOD_SELECT_WIDTH;
 
-/// Event emitted when a request is sent and response is received
+/// Event emitted when a request is sent and response is received.
+/// The response is `Arc`-shared so subscribers can store it without copying the body.
 #[derive(Clone)]
 pub struct RequestCompleted {
     pub request: RequestData,
-    pub response: ResponseData,
+    pub response: std::sync::Arc<ResponseData>,
 }
 
 /// Event emitted when the user asks to view the request as a code snippet.
@@ -252,8 +253,7 @@ impl RequestEditor {
         let method_index = self
             .method_select
             .read(cx)
-            .selected_index(cx)
-            .and_then(|idx| Some(idx.row))
+            .selected_index(cx).map(|idx| idx.row)
             .unwrap_or(0);
         let method = HttpMethod::all().get(method_index).copied().unwrap_or(HttpMethod::GET);
 
@@ -497,20 +497,20 @@ impl RequestEditor {
         cx: &mut Context<Self>,
     ) {
         // Only allow deletion of custom headers
-        if let Some(header) = self.headers.get(index) {
-            if matches!(header.header_type, HeaderType::Custom) {
-                self.headers.remove(index);
+        if let Some(header) = self.headers.get(index)
+            && matches!(header.header_type, HeaderType::Custom)
+        {
+            self.headers.remove(index);
 
-                // Check if there are any custom headers left
-                let has_custom_headers = self.headers.iter().any(|h| matches!(h.header_type, HeaderType::Custom));
+            // Check if there are any custom headers left
+            let has_custom_headers = self.headers.iter().any(|h| matches!(h.header_type, HeaderType::Custom));
 
-                // If no custom headers remain, add an empty one
-                if !has_custom_headers {
-                    self.add_custom_header_row(window, cx);
-                }
-
-                cx.notify();
+            // If no custom headers remain, add an empty one
+            if !has_custom_headers {
+                self.add_custom_header_row(window, cx);
             }
+
+            cx.notify();
         }
     }
 
@@ -520,13 +520,13 @@ impl RequestEditor {
 
         // Find Content-Length header and update it
         for header in &mut self.headers {
-            if let Some(predefined) = header.predefined {
-                if matches!(predefined, PredefinedHeader::ContentLength) {
-                    header.value_input.update(cx, |input, cx| {
-                        input.set_value(&content_length, window, cx);
-                    });
-                    break;
-                }
+            if let Some(predefined) = header.predefined
+                && matches!(predefined, PredefinedHeader::ContentLength)
+            {
+                header.value_input.update(cx, |input, cx| {
+                    input.set_value(&content_length, window, cx);
+                });
+                break;
             }
         }
     }
@@ -536,17 +536,17 @@ impl RequestEditor {
         // Find Content-Type header and update it
         let new_value = content_type.clone().unwrap_or_default();
         for header in &mut self.headers {
-            if let Some(predefined) = header.predefined {
-                if matches!(predefined, PredefinedHeader::ContentType) {
-                    // Update Content-Type value
-                    let value_to_set = new_value.clone();
-                    header.value_input.update(cx, |input, cx| {
-                        input.set_value(&value_to_set, window, cx);
-                    });
+            if let Some(predefined) = header.predefined
+                && matches!(predefined, PredefinedHeader::ContentType)
+            {
+                // Update Content-Type value
+                let value_to_set = new_value.clone();
+                header.value_input.update(cx, |input, cx| {
+                    input.set_value(&value_to_set, window, cx);
+                });
 
-                    log::debug!("Auto-updated Content-Type header to: {}", new_value);
-                    break;
-                }
+                log::debug!("Auto-updated Content-Type header to: {}", new_value);
+                break;
             }
         }
     }
@@ -955,7 +955,7 @@ impl RequestEditor {
                         this.loading = false;
                         cx.emit(RequestCompleted {
                             request,
-                            response: error_response,
+                            response: std::sync::Arc::new(error_response),
                         });
                         cx.notify();
                     })?;
@@ -983,7 +983,7 @@ impl RequestEditor {
                 this.loading = false;
                 cx.emit(RequestCompleted {
                     request,
-                    response: response_data,
+                    response: std::sync::Arc::new(response_data),
                 });
                 cx.notify();
             })?;

@@ -26,13 +26,16 @@ fn get_placeholder_for_subtype(subtype: RawSubtype) -> &'static str {
     }
 }
 
+/// Per-row input entities for a form-data row: (key input, value input, type select).
+type FormDataRowInputs = (Entity<InputState>, Entity<InputState>, Entity<SelectState<Vec<&'static str>>>);
+
 pub struct BodyEditor {
     body_type_index: usize,
     raw_subtype_select: Entity<SelectState<Vec<&'static str>>>,
     raw_body_editor: Entity<InputState>,  // Single editor for all raw types
     current_raw_subtype: RawSubtype,      // Track current subtype
     formdata_rows: Vec<FormDataRow>,
-    formdata_input_states: Vec<(Entity<InputState>, Entity<InputState>, Entity<SelectState<Vec<&'static str>>>)>,
+    formdata_input_states: Vec<FormDataRowInputs>,
     formdata_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
     // Format/validation state
@@ -47,20 +50,19 @@ impl BodyEditor {
         event: &InputChangeEvent,
         cx: &mut Context<Self>,
     ) {
-        if let InputChangeEvent::Change = event {
-            if let Some((index, (key_input, _value_input, _type_select))) = self
+        if let InputChangeEvent::Change = event
+            && let Some((index, (key_input, _value_input, _type_select))) = self
                 .formdata_input_states
                 .iter()
                 .enumerate()
                 .find(|(_, (k, v, _))| k.entity_id() == state_entity.entity_id() || v.entity_id() == state_entity.entity_id())
-            {
-                let is_key = key_input.entity_id() == state_entity.entity_id();
-                let value = state_entity.read(cx).value().to_string();
-                if is_key {
-                    self.update_formdata_key(index, value, cx);
-                } else {
-                    self.update_formdata_value(index, value, cx);
-                }
+        {
+            let is_key = key_input.entity_id() == state_entity.entity_id();
+            let value = state_entity.read(cx).value().to_string();
+            if is_key {
+                self.update_formdata_key(index, value, cx);
+            } else {
+                self.update_formdata_value(index, value, cx);
             }
         }
     }
@@ -512,16 +514,16 @@ impl BodyEditor {
 
         if let Some((_key_input, value_input, _type_select)) = self.formdata_input_states.get(index).cloned() {
             cx.spawn_in(window, async move |_, window| {
-                if let Ok(Ok(Some(paths))) = path.await {
-                    if let Some(selected_path) = paths.iter().next() {
-                        // Store and display the full path (used directly when sending).
-                        let path_str = selected_path.to_string_lossy().to_string();
-                        let _ = window.update(|window, cx| {
-                            value_input.update(cx, |input, cx| {
-                                input.set_value(&path_str, window, cx);
-                            });
+                if let Ok(Ok(Some(paths))) = path.await
+                    && let Some(selected_path) = paths.first()
+                {
+                    // Store and display the full path (used directly when sending).
+                    let path_str = selected_path.to_string_lossy().to_string();
+                    let _ = window.update(|window, cx| {
+                        value_input.update(cx, |input, cx| {
+                            input.set_value(&path_str, window, cx);
                         });
-                    }
+                    });
                 }
             })
             .detach();
