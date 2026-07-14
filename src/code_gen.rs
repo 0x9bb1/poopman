@@ -218,16 +218,17 @@ fn gen_curl(req: &RequestData) -> String {
 }
 
 fn gen_rust(req: &RequestData) -> String {
+    let form = form_rows(req);
     let mut s = String::new();
-    if form_data_present(req) {
-        s.push_str("// NOTE: form-data body is not yet supported in code export\n");
-    }
     s.push_str("use reqwest::blocking::Client;\n");
+    if !form.is_empty() {
+        s.push_str("use reqwest::blocking::multipart;\n");
+    }
     s.push_str("use reqwest::header::{HeaderMap, HeaderValue};\n\n");
     s.push_str("fn main() -> Result<(), Box<dyn std::error::Error>> {\n");
     s.push_str("    let client = Client::new();\n\n");
     s.push_str("    let mut headers = HeaderMap::new();\n");
-    for (k, v) in headers(req) {
+    for (k, v) in export_headers(req) {
         s.push_str(&format!(
             "    headers.insert(\"{}\", HeaderValue::from_str(\"{}\")?);\n",
             dq(k),
@@ -235,12 +236,34 @@ fn gen_rust(req: &RequestData) -> String {
         ));
     }
     s.push('\n');
+    if !form.is_empty() {
+        let mut chain: Vec<String> = vec!["    let form = multipart::Form::new()".to_string()];
+        for row in &form {
+            match &row.value {
+                FormDataValue::Text(v) => chain.push(format!(
+                    "        .text(\"{}\", \"{}\")",
+                    dq(&row.key),
+                    dq(v)
+                )),
+                // .file() reads the file at send time; `?` bubbles its io::Result.
+                FormDataValue::File { path } => chain.push(format!(
+                    "        .file(\"{}\", \"{}\")?",
+                    dq(&row.key),
+                    dq(path)
+                )),
+            }
+        }
+        s.push_str(&chain.join("\n"));
+        s.push_str(";\n\n");
+    }
     s.push_str(&format!(
         "    let response = client\n        .request(reqwest::Method::{}, \"{}\")\n        .headers(headers)\n",
         req.method.as_str(),
         dq(&req.url)
     ));
-    if let Some(body) = raw_body(req) {
+    if !form.is_empty() {
+        s.push_str("        .multipart(form)\n");
+    } else if let Some(body) = raw_body(req) {
         s.push_str(&format!("        .body({})\n", rust_raw(&body)));
     }
     s.push_str("        .send()?;\n\n");
@@ -636,5 +659,18 @@ mod tests {
         req.headers.push(("".to_string(), "ignored".to_string()));
         let out = generate(CodeTarget::Curl, &req);
         assert!(!out.contains("ignored"));
+    }
+
+    #[test]
+    fn rust_form_data_builds_multipart() {
+        let out = generate(CodeTarget::RustReqwest, &form_req());
+        assert!(out.contains("use reqwest::blocking::multipart;"));
+        assert!(out.contains(".text(\"note\", \"hello world\")"));
+        assert!(out.contains(".file(\"avatar\", \"C:\\\\pics\\\\me.png\")?"));
+        assert!(out.contains(".multipart(form)"));
+        assert!(!out.contains(".body("));
+        assert!(!out.contains("skipme"));
+        assert!(!out.contains("Content-Type"));
+        assert!(!out.contains("not yet supported"));
     }
 }
