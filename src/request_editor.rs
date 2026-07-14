@@ -105,8 +105,21 @@ impl RequestEditor {
             env_vars: std::collections::HashMap::new(),
         };
 
-        // Subscribe to URL input changes to parse params
-        let url_sub = cx.subscribe_in(&url_input, window, |this, _, _event: &InputEvent, window, cx| {
+        // Subscribe to URL input changes: a pasted `curl …` command imports the
+        // whole request; anything else just re-parses query params.
+        let url_sub = cx.subscribe_in(&url_input, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::Change) {
+                let value = this.url_input.read(cx).value().to_string();
+                if value.trim_start().starts_with("curl ")
+                    && let Some(request) = crate::curl_import::parse_curl(&value)
+                {
+                    // load_request rewrites the URL input, which re-fires
+                    // Change — the new value no longer starts with "curl",
+                    // so there is no loop.
+                    this.load_request(&request, window, cx);
+                    return;
+                }
+            }
             this.parse_url_to_params(window, cx);
         });
         editor._subscriptions.push(url_sub);
