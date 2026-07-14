@@ -10,7 +10,7 @@ use crate::code_snippet_panel::CodeSnippetPanel;
 use crate::db::Database;
 use crate::environment_manager::{EnvironmentManager, EnvironmentsChanged};
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
-use crate::request_editor::{OpenCodeSnippet, RequestCompleted, RequestEditor};
+use crate::request_editor::{OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor};
 use crate::request_tab::RequestTab;
 use crate::response_viewer::ResponseViewer;
 use crate::tab_bar::{NewTabClicked, TabBar, TabClicked, TabCloseClicked};
@@ -181,6 +181,19 @@ impl PoopmanApp {
             },
         );
 
+        // Show the canceled notice when the user aborts an in-flight request.
+        // Canceled requests are never written to history (same as Postman).
+        let response_viewer_for_cancel = response_viewer.clone();
+        let cancel_sub = cx.subscribe_in(
+            &request_editor,
+            window,
+            move |_this, _, _e: &RequestCancelled, window, cx| {
+                response_viewer_for_cancel.update(cx, |viewer, cx| {
+                    viewer.show_canceled(window, cx);
+                });
+            },
+        );
+
         // Push the initial tab into the tab bar so the first request shows as a
         // tab immediately (the TabBar entity starts empty; without this the bar
         // would show only the "+" until the first tab action).
@@ -209,6 +222,7 @@ impl PoopmanApp {
                 close_tab_sub,
                 env_changed_sub,
                 open_code_sub,
+                cancel_sub,
             ],
         }
     }
