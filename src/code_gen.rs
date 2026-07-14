@@ -108,8 +108,9 @@ fn export_headers(req: &RequestData) -> Vec<(&str, &str)> {
     let skip_content_type = matches!(&req.body, BodyType::FormData(_));
     req.headers
         .iter()
-        .filter(|(k, _)| !k.trim().is_empty())
-        .filter(|(k, _)| !(skip_content_type && k.eq_ignore_ascii_case("content-type")))
+        .filter(|(k, _)| {
+            !k.trim().is_empty() && !(skip_content_type && k.eq_ignore_ascii_case("content-type"))
+        })
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect()
 }
@@ -117,6 +118,13 @@ fn export_headers(req: &RequestData) -> Vec<(&str, &str)> {
 /// Escape a string for a single-quoted shell context (the `'\''` trick).
 fn shell_single(s: &str) -> String {
     s.replace('\'', "'\\''")
+}
+
+/// Escape a path for curl's quoted-filename context (`@"…"`): inside the
+/// quotes curl treats backslash and double-quote as its own escape chars,
+/// so both must be doubled/escaped or UNC paths silently collapse.
+fn curl_quoted(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Escape a string for a double-quoted source string (Rust/Python/JS):
@@ -199,7 +207,7 @@ fn gen_curl(req: &RequestData) -> String {
             FormDataValue::File { path } => lines.push(format!(
                 "  --form '{}=@\"{}\"'",
                 shell_single(&row.key),
-                shell_single(path)
+                shell_single(&curl_quoted(path))
             )),
         }
     }
@@ -575,7 +583,7 @@ mod tests {
     fn curl_form_data_uses_form_flags() {
         let out = generate(CodeTarget::Curl, &form_req());
         assert!(out.contains("--form-string 'note=hello world'"));
-        assert!(out.contains("--form 'avatar=@\"C:\\pics\\me.png\"'"));
+        assert!(out.contains("--form 'avatar=@\"C:\\\\pics\\\\me.png\"'"));
         assert!(!out.contains("skipme"));
         assert!(!out.contains("not yet supported"));
         assert!(!out.contains("Content-Type"), "boundary header must not export");
@@ -594,6 +602,32 @@ mod tests {
         }]);
         let out = generate(CodeTarget::Curl, &req);
         assert!(out.contains("--form-string 'handle=@ada'"));
+    }
+
+    #[test]
+    fn blank_form_keys_are_skipped() {
+        let mut req = form_req();
+        req.body = BodyType::FormData(vec![FormDataRow {
+            enabled: true,
+            key: "  ".to_string(),
+            value: FormDataValue::Text("x".to_string()),
+        }]);
+        let out = generate(CodeTarget::Curl, &req);
+        assert!(!out.contains("--form"));
+    }
+
+    #[test]
+    fn curl_escapes_backslashes_and_quotes_in_file_paths() {
+        // UNC path with an embedded quote: curl's inner quoting layer needs
+        // \ -> \\ and " -> \" or the filename breaks/collapses.
+        let mut req = form_req();
+        req.body = BodyType::FormData(vec![FormDataRow {
+            enabled: true,
+            key: "doc".to_string(),
+            value: FormDataValue::File { path: "\\\\server\\share\\a\".png".to_string() },
+        }]);
+        let out = generate(CodeTarget::Curl, &req);
+        assert!(out.contains("--form 'doc=@\"\\\\\\\\server\\\\share\\\\a\\\".png\"'"));
     }
 
     #[test]
