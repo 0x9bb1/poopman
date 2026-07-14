@@ -274,13 +274,11 @@ fn gen_rust(req: &RequestData) -> String {
 }
 
 fn gen_python(req: &RequestData) -> String {
+    let form = form_rows(req);
     let mut s = String::new();
-    if form_data_present(req) {
-        s.push_str("# NOTE: form-data body is not yet supported in code export\n");
-    }
     s.push_str("import requests\n\n");
     s.push_str(&format!("url = \"{}\"\n\n", dq(&req.url)));
-    let hs = headers(req);
+    let hs = export_headers(req);
     if hs.is_empty() {
         s.push_str("headers = {}\n");
     } else {
@@ -294,8 +292,33 @@ fn gen_python(req: &RequestData) -> String {
     if let Some(b) = &body {
         s.push_str(&format!("payload = {}\n", py_string(b)));
     }
+    if !form.is_empty() {
+        // (None, value) tuples force multipart encoding even for text-only
+        // forms; a bare data= dict would send x-www-form-urlencoded instead.
+        s.push_str("files = {\n");
+        for row in &form {
+            match &row.value {
+                FormDataValue::Text(v) => s.push_str(&format!(
+                    "    \"{}\": (None, \"{}\"),\n",
+                    dq(&row.key),
+                    dq(v)
+                )),
+                FormDataValue::File { path } => s.push_str(&format!(
+                    "    \"{}\": open(\"{}\", \"rb\"),\n",
+                    dq(&row.key),
+                    dq(path)
+                )),
+            }
+        }
+        s.push_str("}\n");
+    }
     s.push('\n');
-    if body.is_some() {
+    if !form.is_empty() {
+        s.push_str(&format!(
+            "response = requests.request(\"{}\", url, headers=headers, files=files)\n",
+            req.method.as_str()
+        ));
+    } else if body.is_some() {
         s.push_str(&format!(
             "response = requests.request(\"{}\", url, headers=headers, data=payload)\n",
             req.method.as_str()
@@ -590,15 +613,31 @@ mod tests {
     }
 
     #[test]
-    fn form_data_adds_note_comment() {
-        let mut req = post_json_req();
+    fn python_form_data_uses_files_dict() {
+        let out = generate(CodeTarget::PythonRequests, &form_req());
+        assert!(out.contains("\"note\": (None, \"hello world\"),"));
+        assert!(out.contains("\"avatar\": open(\"C:\\\\pics\\\\me.png\", \"rb\"),"));
+        assert!(out.contains("files=files"));
+        assert!(!out.contains("data="));
+        assert!(!out.contains("skipme"));
+        assert!(!out.contains("Content-Type"));
+        assert!(!out.contains("not yet supported"));
+    }
+
+    #[test]
+    fn python_all_text_form_still_multipart() {
+        // Without files=, requests would send urlencoded — the (None, value)
+        // tuple form forces a real multipart body even for text-only forms.
+        let mut req = form_req();
         req.body = BodyType::FormData(vec![FormDataRow {
             enabled: true,
-            key: "file".to_string(),
-            value: FormDataValue::Text("x".to_string()),
+            key: "a".to_string(),
+            value: FormDataValue::Text("1".to_string()),
         }]);
         let out = generate(CodeTarget::PythonRequests, &req);
-        assert!(out.contains("form-data body is not yet supported"));
+        assert!(out.contains("files = {"));
+        assert!(out.contains("\"a\": (None, \"1\"),"));
+        assert!(out.contains("files=files"));
         assert!(!out.contains("payload"));
     }
 
