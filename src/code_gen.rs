@@ -5,7 +5,7 @@
 //! v1 supports `None` and `Raw` request bodies across all targets. `FormData`
 //! bodies are not exported yet — generators prepend a clarifying comment.
 
-use crate::types::{BodyType, RequestData};
+use crate::types::{BodyType, FormDataRow, FormDataValue, RequestData};
 
 /// A language/library target for code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +90,30 @@ fn headers(req: &RequestData) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// Enabled, non-blank-key form-data rows — the rows that export.
+fn form_rows(req: &RequestData) -> Vec<&FormDataRow> {
+    match &req.body {
+        BodyType::FormData(rows) => rows
+            .iter()
+            .filter(|r| r.enabled && !r.key.trim().is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Headers to export: non-blank keys, minus Content-Type for form-data
+/// bodies — the UI pins `multipart/form-data; boundary=<auto>` on such
+/// requests, and each target's library must generate its own boundary.
+fn export_headers(req: &RequestData) -> Vec<(&str, &str)> {
+    let skip_content_type = matches!(&req.body, BodyType::FormData(_));
+    req.headers
+        .iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .filter(|(k, _)| !(skip_content_type && k.eq_ignore_ascii_case("content-type")))
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
 /// Escape a string for a single-quoted shell context (the `'\''` trick).
 fn shell_single(s: &str) -> String {
     s.replace('\'', "'\\''")
@@ -157,16 +181,27 @@ pub fn generate(target: CodeTarget, req: &RequestData) -> String {
 
 fn gen_curl(req: &RequestData) -> String {
     let mut lines: Vec<String> = Vec::new();
-    if form_data_present(req) {
-        lines.push("# NOTE: form-data body is not yet supported in code export".to_string());
-    }
     lines.push(format!(
         "curl --location --request {} '{}'",
         req.method.as_str(),
         shell_single(&req.url)
     ));
-    for (k, v) in headers(req) {
+    for (k, v) in export_headers(req) {
         lines.push(format!("  --header '{}: {}'", shell_single(k), shell_single(v)));
+    }
+    for row in form_rows(req) {
+        match &row.value {
+            FormDataValue::Text(v) => lines.push(format!(
+                "  --form-string '{}={}'",
+                shell_single(&row.key),
+                shell_single(v)
+            )),
+            FormDataValue::File { path } => lines.push(format!(
+                "  --form '{}=@\"{}\"'",
+                shell_single(&row.key),
+                shell_single(path)
+            )),
+        }
     }
     if let Some(body) = raw_body(req) {
         lines.push(format!("  --data '{}'", shell_single(&body)));
@@ -374,6 +409,39 @@ mod tests {
         }
     }
 
+    /// POST with one text row, one file row, one disabled row, and the
+    /// UI-pinned multipart Content-Type header that must NOT be exported.
+    fn form_req() -> RequestData {
+        RequestData {
+            method: HttpMethod::POST,
+            url: "https://api.example.com/upload".to_string(),
+            headers: vec![
+                ("Accept".to_string(), "application/json".to_string()),
+                (
+                    "Content-Type".to_string(),
+                    "multipart/form-data; boundary=<auto>".to_string(),
+                ),
+            ],
+            body: BodyType::FormData(vec![
+                FormDataRow {
+                    enabled: true,
+                    key: "note".to_string(),
+                    value: FormDataValue::Text("hello world".to_string()),
+                },
+                FormDataRow {
+                    enabled: true,
+                    key: "avatar".to_string(),
+                    value: FormDataValue::File { path: "C:\\pics\\me.png".to_string() },
+                },
+                FormDataRow {
+                    enabled: false,
+                    key: "skipme".to_string(),
+                    value: FormDataValue::Text("nope".to_string()),
+                },
+            ]),
+        }
+    }
+
     #[test]
     fn targets_have_six_and_unique_labels() {
         let all = CodeTarget::all();
@@ -501,6 +569,31 @@ mod tests {
         let out = generate(CodeTarget::PythonRequests, &req);
         assert!(out.contains("form-data body is not yet supported"));
         assert!(!out.contains("payload"));
+    }
+
+    #[test]
+    fn curl_form_data_uses_form_flags() {
+        let out = generate(CodeTarget::Curl, &form_req());
+        assert!(out.contains("--form-string 'note=hello world'"));
+        assert!(out.contains("--form 'avatar=@\"C:\\pics\\me.png\"'"));
+        assert!(!out.contains("skipme"));
+        assert!(!out.contains("not yet supported"));
+        assert!(!out.contains("Content-Type"), "boundary header must not export");
+        assert!(out.contains("--header 'Accept: application/json'"));
+        assert!(!out.contains("--data"));
+    }
+
+    #[test]
+    fn curl_form_text_leading_at_stays_literal() {
+        // --form-string never does curl's @file / <file expansion.
+        let mut req = form_req();
+        req.body = BodyType::FormData(vec![FormDataRow {
+            enabled: true,
+            key: "handle".to_string(),
+            value: FormDataValue::Text("@ada".to_string()),
+        }]);
+        let out = generate(CodeTarget::Curl, &req);
+        assert!(out.contains("--form-string 'handle=@ada'"));
     }
 
     #[test]
