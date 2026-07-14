@@ -858,6 +858,16 @@ impl RequestEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.send(window, cx);
+    }
+
+    /// Send the current request. Public so the ctrl-enter action can trigger
+    /// it from PoopmanApp; no-op while a request is already in flight (the
+    /// button is swapped to Cancel then, but the keyboard path isn't).
+    pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
         let mut url = self.url_input.read(cx).value().to_string().trim().to_string();
         if url.is_empty() {
             log::warn!("Cannot send request: URL is empty");
