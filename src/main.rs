@@ -7,6 +7,7 @@ mod code_gen;
 mod code_snippet_panel;
 mod db;
 mod environment_manager;
+mod format;
 mod history_panel;
 mod http_client;
 mod menu_bar;

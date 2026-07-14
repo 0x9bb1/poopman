@@ -76,25 +76,6 @@ impl HistoryPanel {
         cx.notify();
     }
 
-    fn format_relative_time(timestamp: &str) -> String {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
-            let now = chrono::Utc::now();
-            let duration = now.signed_duration_since(dt);
-
-            if duration.num_seconds() < 60 {
-                "just now".to_string()
-            } else if duration.num_minutes() < 60 {
-                format!("{} min ago", duration.num_minutes())
-            } else if duration.num_hours() < 24 {
-                format!("{} hours ago", duration.num_hours())
-            } else {
-                format!("{} days ago", duration.num_days())
-            }
-        } else {
-            timestamp.to_string()
-        }
-    }
-
     fn on_item_click(&mut self, item: &HistoryItem, _window: &mut Window, cx: &mut Context<Self>) {
         self.selected_id = Some(item.id);
         cx.emit(HistoryItemClicked { item: item.clone() });
@@ -197,7 +178,10 @@ impl Render for HistoryPanel {
                             let verb = item.request.method.as_str();
                             let verb_color = crate::theme::method_color(item.request.method, theme);
                             let url = item.request.url.clone();
-                            let time = Self::format_relative_time(&item.timestamp);
+                            let time = crate::format::format_relative_time(
+                                &item.timestamp,
+                                chrono::Utc::now(),
+                            );
                             let item_clone = item.clone();
 
                             h_flex()

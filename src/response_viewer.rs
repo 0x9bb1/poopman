@@ -1,6 +1,7 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{button::*, h_flex, input::*, v_flex, ActiveTheme as _};
+use std::sync::Arc;
 
 use crate::types::ResponseData;
 
@@ -42,7 +43,8 @@ fn extension_for_content_type(ct: &str) -> Option<String> {
 
 /// Response viewer panel
 pub struct ResponseViewer {
-    response: Option<ResponseData>,
+    /// Shared with the owning tab, so setting/reading never copies the body.
+    response: Option<Arc<ResponseData>>,
     body_display: Entity<InputState>,
     active_tab: usize,
     headers_scroll_handle: ScrollHandle,
@@ -69,7 +71,7 @@ impl ResponseViewer {
     /// Set response data
     pub fn set_response(
         &mut self,
-        response: ResponseData,
+        response: Arc<ResponseData>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -96,7 +98,7 @@ impl ResponseViewer {
     }
 
     /// Get current response data
-    pub fn get_response(&self) -> Option<ResponseData> {
+    pub fn get_response(&self) -> Option<Arc<ResponseData>> {
         self.response.clone()
     }
 
@@ -112,10 +114,9 @@ impl ResponseViewer {
 
     /// Save the (binary) response body to a file chosen via the OS dialog.
     fn save_binary(&mut self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(response) = self.response.as_ref() else {
+        let Some(response) = self.response.clone() else {
             return;
         };
-        let bytes = response.body.clone();
         // Suggest a filename with the right extension based on Content-Type.
         let suggested = response
             .headers
@@ -130,10 +131,10 @@ impl ResponseViewer {
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
         cx.spawn_in(window, async move |_this, _cx| {
-            if let Ok(Ok(Some(path))) = rx.await {
-                if let Err(e) = std::fs::write(&path, &bytes) {
-                    log::error!("Failed to save response to {:?}: {}", path, e);
-                }
+            if let Ok(Ok(Some(path))) = rx.await
+                && let Err(e) = std::fs::write(&path, &response.body)
+            {
+                log::error!("Failed to save response to {:?}: {}", path, e);
             }
         })
         .detach();
@@ -182,13 +183,13 @@ impl ResponseViewer {
                 .child(
                     div()
                         .text_sm()
-                        .child(format!("Time: {} ms", response.duration_ms)),
+                        .child(format!("Time: {}", crate::format::format_duration_ms(response.duration_ms))),
                 )
                 .when(!response.is_network_error(), |this| {
                     this.child(
                         div()
                             .text_sm()
-                            .child(format!("Size: {} bytes", response.body.len())),
+                            .child(format!("Size: {}", crate::format::format_size(response.body.len()))),
                     )
                 })
         } else {
@@ -307,12 +308,12 @@ impl Render for ResponseViewer {
                                 ),
                         )
                         .when(self.active_tab == 0, |this| {
-                            let resp_is_text = self.response.as_ref().map_or(true, |r| r.is_text);
+                            let resp_is_text = self.response.as_ref().is_none_or(|r| r.is_text);
                             if resp_is_text {
                                 let is_error = self
                                     .response
                                     .as_ref()
-                                    .map_or(false, |r| r.is_network_error());
+                                    .is_some_and(|r| r.is_network_error());
                                 this.child(
                                     div()
                                         .flex()
@@ -363,7 +364,11 @@ impl Render for ResponseViewer {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
-                                                .child(format!("{} · {} bytes", content_type, len)),
+                                                .child(format!(
+                                                    "{} · {}",
+                                                    content_type,
+                                                    crate::format::format_size(len)
+                                                )),
                                         )
                                         .child(
                                             Button::new("save-binary")

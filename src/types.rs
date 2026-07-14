@@ -69,7 +69,12 @@ impl PredefinedHeader {
     }
 }
 
-/// HTTP methods supported by the API client
+/// HTTP methods supported by the API client.
+///
+/// Variant names are all-caps on purpose: they match the wire format and are
+/// serialized by name into the history database, so renaming them would break
+/// previously saved requests.
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HttpMethod {
     GET,
@@ -302,7 +307,7 @@ impl ResponseData {
 
     pub fn is_success(&self) -> bool {
         if let Some(status) = self.status {
-            status >= 200 && status < 300
+            (200..300).contains(&status)
         } else {
             false
         }
@@ -322,12 +327,15 @@ impl ResponseData {
 }
 
 /// History item stored in database
+///
+/// The response is shared via `Arc`: tabs and the viewer all hold the same
+/// allocation, so cloning an item never copies the (potentially large) body.
 #[derive(Debug, Clone)]
 pub struct HistoryItem {
     pub id: i64,
     pub timestamp: String,
     pub request: RequestData,
-    pub response: Option<ResponseData>,
+    pub response: Option<std::sync::Arc<ResponseData>>,
 }
 
 impl HistoryItem {
@@ -335,7 +343,7 @@ impl HistoryItem {
         id: i64,
         timestamp: String,
         request: RequestData,
-        response: Option<ResponseData>,
+        response: Option<std::sync::Arc<ResponseData>>,
     ) -> Self {
         Self {
             id,
