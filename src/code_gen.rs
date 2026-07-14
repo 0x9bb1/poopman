@@ -293,24 +293,25 @@ fn gen_python(req: &RequestData) -> String {
         s.push_str(&format!("payload = {}\n", py_string(b)));
     }
     if !form.is_empty() {
-        // (None, value) tuples force multipart encoding even for text-only
-        // forms; a bare data= dict would send x-www-form-urlencoded instead.
-        s.push_str("files = {\n");
+        // A LIST of (key, part) tuples — not a dict — so duplicate form keys
+        // are preserved. The (None, value) part forces multipart encoding even
+        // for text-only forms; a bare data= dict would send urlencoded instead.
+        s.push_str("files = [\n");
         for row in &form {
             match &row.value {
                 FormDataValue::Text(v) => s.push_str(&format!(
-                    "    \"{}\": (None, \"{}\"),\n",
+                    "    (\"{}\", (None, \"{}\")),\n",
                     dq(&row.key),
                     dq(v)
                 )),
                 FormDataValue::File { path } => s.push_str(&format!(
-                    "    \"{}\": open(\"{}\", \"rb\"),\n",
+                    "    (\"{}\", open(\"{}\", \"rb\")),\n",
                     dq(&row.key),
                     dq(path)
                 )),
             }
         }
-        s.push_str("}\n");
+        s.push_str("]\n");
     }
     s.push('\n');
     if !form.is_empty() {
@@ -615,8 +616,9 @@ mod tests {
     #[test]
     fn python_form_data_uses_files_dict() {
         let out = generate(CodeTarget::PythonRequests, &form_req());
-        assert!(out.contains("\"note\": (None, \"hello world\"),"));
-        assert!(out.contains("\"avatar\": open(\"C:\\\\pics\\\\me.png\", \"rb\"),"));
+        assert!(out.contains("files = ["));
+        assert!(out.contains("(\"note\", (None, \"hello world\")),"));
+        assert!(out.contains("(\"avatar\", open(\"C:\\\\pics\\\\me.png\", \"rb\")),"));
         assert!(out.contains("files=files"));
         assert!(!out.contains("data="));
         assert!(!out.contains("skipme"));
@@ -635,10 +637,31 @@ mod tests {
             value: FormDataValue::Text("1".to_string()),
         }]);
         let out = generate(CodeTarget::PythonRequests, &req);
-        assert!(out.contains("files = {"));
-        assert!(out.contains("\"a\": (None, \"1\"),"));
+        assert!(out.contains("files = ["));
+        assert!(out.contains("(\"a\", (None, \"1\")),"));
         assert!(out.contains("files=files"));
         assert!(!out.contains("payload"));
+    }
+
+    #[test]
+    fn python_duplicate_form_keys_preserved() {
+        // dict would silently collapse duplicate keys; the list form keeps both.
+        let mut req = form_req();
+        req.body = BodyType::FormData(vec![
+            FormDataRow {
+                enabled: true,
+                key: "tag".to_string(),
+                value: FormDataValue::Text("red".to_string()),
+            },
+            FormDataRow {
+                enabled: true,
+                key: "tag".to_string(),
+                value: FormDataValue::Text("blue".to_string()),
+            },
+        ]);
+        let out = generate(CodeTarget::PythonRequests, &req);
+        assert!(out.contains("(\"tag\", (None, \"red\")),"));
+        assert!(out.contains("(\"tag\", (None, \"blue\")),"));
     }
 
     #[test]
