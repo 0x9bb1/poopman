@@ -16,10 +16,12 @@ Go (net/http).
 - **Rows exported:** only rows with `enabled == true` and a non-blank key.
   A form-data body whose rows are all disabled/blank exports like `BodyType::None`.
 - **Content-Type header is skipped** (case-insensitive match) in ALL targets
-  when a non-empty form-data body is present. The UI pins a read-only
-  `multipart/form-data; boundary=<auto>` header on the request; exporting it
-  verbatim would break the request because each library must generate its own
-  boundary. Raw/None bodies keep the existing header pass-through.
+  whenever the body is `BodyType::FormData` — even if every row is disabled,
+  since a `multipart/form-data; boundary=<auto>` header without a matching
+  body is broken either way. The UI pins that read-only header on the
+  request; exporting it verbatim would break the request because each library
+  must generate its own boundary. Raw/None bodies keep the existing header
+  pass-through.
 - **Variables:** `generate()` receives an already-resolved `RequestData`
   (resolution happens upstream, unchanged).
 - **File fields embed the local path** the user typed in the Form-data UI.
