@@ -935,7 +935,7 @@ impl RequestEditor {
             log::debug!("Sending HTTP request...");
 
             // Send request
-            let response = match client.send(method, url.clone(), headers.clone(), body.clone()).await {
+            let response = match client.start_send(method, url.clone(), headers.clone(), body.clone()).wait().await {
                 Ok(r) => r,
                 Err(e) => {
                     // Handle request error (network error, file read error, etc.)
