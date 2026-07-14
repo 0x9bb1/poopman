@@ -24,6 +24,10 @@ pub struct RequestCompleted {
 #[derive(Clone)]
 pub struct OpenCodeSnippet;
 
+/// Event emitted when the user cancels an in-flight request.
+#[derive(Clone)]
+pub struct RequestCancelled;
+
 /// Header row with key-value inputs and enabled checkbox
 struct HeaderRow {
     enabled: bool,
@@ -51,6 +55,12 @@ pub struct RequestEditor {
     params_scroll_handle: ScrollHandle,
     active_tab: usize,
     loading: bool,
+    /// Abort handle for the in-flight request (Some only while loading).
+    abort_handle: Option<tokio::task::AbortHandle>,
+    /// Incremented on every send *and* cancel; spawned tasks capture their
+    /// generation and bail out if it no longer matches, so a stale task can
+    /// never clobber state owned by a newer send.
+    send_generation: u64,
     _subscriptions: Vec<Subscription>,       // Permanent: URL input + body editor subscriptions
     _row_subscriptions: Vec<Subscription>,   // Header/param row subscriptions; rebuilt on load
     /// Active environment variables, pushed by PoopmanApp; used at send time.
@@ -88,6 +98,8 @@ impl RequestEditor {
             params_scroll_handle: ScrollHandle::new(),
             active_tab: 0,
             loading: false,
+            abort_handle: None,
+            send_generation: 0,
             _subscriptions: vec![],
             _row_subscriptions: vec![],
             env_vars: std::collections::HashMap::new(),
@@ -810,6 +822,23 @@ impl RequestEditor {
         }
     }
 
+    /// Abort the in-flight request (the Send button shows Cancel while loading).
+    fn cancel_request(
+        &mut self,
+        _event: &gpui::ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.abort_handle.take() {
+            handle.abort();
+        }
+        // Invalidate the spawned task so its completion can't touch state.
+        self.send_generation = self.send_generation.wrapping_add(1);
+        self.loading = false;
+        cx.emit(RequestCancelled);
+        cx.notify();
+    }
+
     fn send_request(
         &mut self,
         _event: &gpui::ClickEvent,
@@ -921,23 +950,29 @@ impl RequestEditor {
             body: body.clone(),
         };
 
+        self.send_generation = self.send_generation.wrapping_add(1);
+        let generation = self.send_generation;
         self.loading = true;
-        cx.notify();
 
         log::debug!("Starting {} request to: {}", method.as_str(), url);
 
+        // Spawn the HTTP work onto the tokio runtime *now* so we can hold an
+        // abort handle; the gpui task below only awaits the outcome.
+        let start = std::time::Instant::now();
+        let client = crate::http_client::HttpClient::new();
+        let inflight = client.start_send(method, url, headers, body);
+        self.abort_handle = Some(inflight.abort_handle());
+        cx.notify();
+
         cx.spawn_in(window, async move |this, cx| {
-            let start = std::time::Instant::now();
-
-            // HttpClient builds the reqwest request natively (real multipart for form-data)
-            let client = crate::http_client::HttpClient::new();
-
-            log::debug!("Sending HTTP request...");
-
-            // Send request
-            let response = match client.start_send(method, url.clone(), headers.clone(), body.clone()).wait().await {
+            let response = match inflight.wait().await {
                 Ok(r) => r,
                 Err(e) => {
+                    if e.downcast_ref::<crate::http_client::RequestCanceled>().is_some() {
+                        // cancel_request() already reset the UI and bumped the
+                        // generation; nothing left to do.
+                        return Ok(());
+                    }
                     // Handle request error (network error, file read error, etc.)
                     let duration = start.elapsed();
                     let error_message = format!("Request failed: {}", e);
@@ -952,7 +987,11 @@ impl RequestEditor {
                     };
 
                     this.update(cx, |this, cx| {
+                        if this.send_generation != generation {
+                            return; // superseded by a newer send/cancel
+                        }
                         this.loading = false;
+                        this.abort_handle = None;
                         cx.emit(RequestCompleted {
                             request,
                             response: std::sync::Arc::new(error_response),
@@ -980,7 +1019,11 @@ impl RequestEditor {
             };
 
             this.update(cx, |this, cx| {
+                if this.send_generation != generation {
+                    return; // superseded by a newer send/cancel
+                }
                 this.loading = false;
+                this.abort_handle = None;
                 cx.emit(RequestCompleted {
                     request,
                     response: std::sync::Arc::new(response_data),
@@ -996,6 +1039,7 @@ impl RequestEditor {
 
 impl EventEmitter<RequestCompleted> for RequestEditor {}
 impl EventEmitter<OpenCodeSnippet> for RequestEditor {}
+impl EventEmitter<RequestCancelled> for RequestEditor {}
 
 impl Render for RequestEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1046,15 +1090,19 @@ impl Render for RequestEditor {
                             ),
                         )
                         .child(
-                            // Send button - prevent it from shrinking
-                            div().flex_shrink_0().child(
+                            // Send button - prevent it from shrinking.
+                            // While loading it becomes a Cancel button.
+                            div().flex_shrink_0().child(if self.loading {
+                                Button::new("cancel-btn")
+                                    .danger()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(Self::cancel_request))
+                            } else {
                                 Button::new("send-btn")
                                     .primary()
                                     .label("Send")
-                                    .disabled(self.loading)
-                                    .loading(self.loading)
-                                    .on_click(cx.listener(Self::send_request)),
-                            ),
+                                    .on_click(cx.listener(Self::send_request))
+                            }),
                         ),
                 )
                 .child(
