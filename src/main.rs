@@ -5,6 +5,7 @@ mod body_editor;
 mod code_formatter;
 mod code_gen;
 mod code_snippet_panel;
+mod curl_import;
 mod db;
 mod environment_manager;
 mod format;
