@@ -51,12 +51,12 @@ fn tokenize(input: &str) -> Vec<String> {
             '\\' => {
                 match chars.peek() {
                     // Line continuation / flattened continuation: token break.
-                    Some(&next) if next.is_whitespace() => {
-                        if has_token {
-                            tokens.push(std::mem::take(&mut current));
-                            has_token = false;
-                        }
+                    Some(&next) if next.is_whitespace() && has_token => {
+                        tokens.push(std::mem::take(&mut current));
+                        has_token = false;
                     }
+                    // Continuation with nothing pending: skip it.
+                    Some(&next) if next.is_whitespace() => {}
                     Some(&next) => {
                         current.push(next);
                         has_token = true;
