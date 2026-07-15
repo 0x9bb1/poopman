@@ -60,9 +60,18 @@ theme.scrollbar_show = ScrollbarShow::Hover;
 ```
 
 Every `Scrollbar` reads `cx.theme().scrollbar_show`, so this is the single lever.
-Verified safe: `Theme::sync_scrollbar_appearance` (`theme/mod.rs:141`) would overwrite
-this, but neither poopman nor `gpui_component::init` (`lib.rs:97-109`) calls it.
-`Hover` is also what gpui-component itself picks for systems not set to auto-hide.
+
+**This assignment survives by ordering, not by absence** — an earlier draft of this spec
+claimed `Theme::sync_scrollbar_appearance` (`theme/mod.rs:141`) is never called, having
+only skimmed `gpui_component::init`'s body (`lib.rs:97-109`) without following into
+`theme::init`. It *is* called: `init` → `theme::init` (`theme/mod.rs:21-26`) →
+`sync_scrollbar_appearance` at `:24`. The assignment wins because `src/main.rs:111` runs
+`gpui_component::init(cx)` before `:112` runs `apply_theme(cx)`. **Reordering those two
+lines would silently revert the policy.** The code comment must say this, so nobody
+"tidies" the ordering later.
+
+`sync_scrollbar_appearance` picks `Hover` itself on systems not set to auto-hide, so on
+those machines this is a no-op; on auto-hide systems it overrides `Scrolling`.
 
 **Rule 2 — One idiom: wrapper / scroller / scrollbar.** Every scrollable surface is
 three parts, with the scrollbar a *sibling* of the scroller:
@@ -149,6 +158,16 @@ h_flex()                                  // existing outer row
     .child(…existing "+" button, unchanged…)   // outside the viewport → pinned
 ```
 
+- **Each tab's `h_flex` needs `.flex_shrink_0()`.** Without it the strip does not scroll
+  at all: gpui defaults `flex_shrink` to `1.0` (`gpui-0.2.2/src/style.rs`,
+  `Style::default()`), so a strip with a definite width squishes its tabs to fit rather
+  than overflowing, and `overflow_x_scroll` never engages. The tab title div carries
+  `.overflow_hidden()`, which drops its automatic minimum width to 0, so tabs collapse to
+  method + close button with the title gone long before any scrolling starts.
+  gpui-component's own `Tab` sets `.flex_shrink_0()` for exactly this reason
+  (`tab/tab.rs:591`), and this codebase already uses the idiom at
+  `environment_manager.rs:267`. This was missed in the first draft of this spec and caught
+  in final review — the scroll would have silently never happened.
 - The "+" button already *is* a sibling of the tab strip in today's outer `h_flex`, so it
   needs no change; giving the viewport `flex_1` is what pins the button. Today "+" is
   pushed off-screen along with the tabs — that is the "点满了" half of the defect.
