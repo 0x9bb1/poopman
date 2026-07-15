@@ -103,21 +103,31 @@ Implementation:
 
 1. `self.url_input.update(cx, |input, cx| input.focus(window, cx))` —
    `InputState::focus` is `pub` in gpui-component 0.5.1 (`input/state.rs:825`).
-2. Dispatch select-all **one frame later** via the codebase's existing
-   `cx.spawn_in(window, async move |...| { ... }).detach()` deferral pattern.
-   The dispatch itself is `window.dispatch_action(Box::new(input::SelectAll),
-   cx)` (`gpui-0.2.2 window.rs:1476`), reached from inside the async block
-   through the async window context's `update(...)` — `window` is not directly
-   in scope there.
+2. `window.request_animation_frame()` — force a redraw even when the input was
+   already focused (see below).
+3. `window.on_next_frame(|window, cx| window.dispatch_action(
+   Box::new(gpui_component::input::SelectAll), cx))` (`gpui-0.2.2`
+   `window.rs:1644` / `:1476`).
 
 **Why dispatch instead of a direct call:** `InputState::select_all` is
 `pub(super)` (`input/state.rs:856`) and unreachable from this crate. The
 `SelectAll` *action* is public — `input/mod.rs:29` re-exports it via
 `pub use state::*`. Dispatching routes it to the focused input's own handler.
+No new import is needed: `request_editor.rs` already globs `input::*`. (gpui's
+own `SelectAll` is an `OsAction` enum variant, not a top-level item, so
+`gpui::*` does not collide; the plan still spells it fully-qualified.)
 
-**Why deferred a frame:** gpui computes the action dispatch path from the
-last rendered frame's focus, so dispatching in the same tick as `focus()`
-can route to the previously focused element instead of the URL input.
+**Why deferred a frame:** `Window::dispatch_action` resolves the target via
+`focus_node_id_in_rendered_frame` (`window.rs:1477-1484`) — the *last rendered*
+frame. Dispatching in the same tick as `focus()` would route to the previously
+focused element, not the URL input.
+
+**Why the explicit `request_animation_frame`:** `Window::focus`
+(`window.rs:1386`) early-returns *without* calling `refresh()` when the handle
+is already focused. Without a forced frame, pressing Ctrl+L while the URL input
+already has focus would schedule an `on_next_frame` callback that no redraw ever
+runs. `request_animation_frame` guarantees the frame, so repeated Ctrl+L
+re-selects reliably.
 
 ## Error handling
 
@@ -146,6 +156,8 @@ an empty URL selects nothing rather than erroring.
 - [ ] Ctrl+Tab with only one tab open does nothing (no flicker, no reload)
 - [ ] Ctrl+L from the body editor focuses the URL input and selects the whole URL
 - [ ] Typing right after Ctrl+L replaces the URL rather than appending
+- [ ] Ctrl+L pressed twice in a row (URL input already focused) still re-selects
+      — this is the `request_animation_frame` case
 - [ ] Ctrl+L with an empty URL does not crash
 - [ ] Tab-switching still saves/restores per-tab state (no regression in
       `switch_to_tab`'s save-then-load path)
