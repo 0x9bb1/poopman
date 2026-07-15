@@ -510,6 +510,17 @@ impl Render for PoopmanApp {
                 let index = this.active_tab_index;
                 this.close_tab(index, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| {
+                let next = cycle_index(this.active_tab_index, this.request_tabs.len(), true);
+                this.switch_to_tab(next, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
+                let prev = cycle_index(this.active_tab_index, this.request_tabs.len(), false);
+                this.switch_to_tab(prev, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusUrl, window, cx| {
+                this.request_editor.update(cx, |editor, cx| editor.focus_url(window, cx));
+            }))
             .size_full()
             .bg(theme.muted)
             .child(
