@@ -861,6 +861,26 @@ impl RequestEditor {
         self.send(window, cx);
     }
 
+    /// Focus the URL input and select all of its text. Public so the ctrl-l
+    /// action can trigger it from PoopmanApp.
+    ///
+    /// Select-all goes through action dispatch because `InputState::select_all`
+    /// is `pub(super)` in gpui-component and unreachable from this crate; the
+    /// `SelectAll` action itself is public. The dispatch must wait for the next
+    /// frame: `Window::dispatch_action` resolves its target from the *last
+    /// rendered* frame's focus, so dispatching in this same tick would route to
+    /// whatever was focused before. `request_animation_frame` guarantees that
+    /// frame happens even when the URL input already had focus — `Window::focus`
+    /// early-returns without scheduling a redraw in that case, which would
+    /// otherwise strand the callback and make a second Ctrl+L do nothing.
+    pub fn focus_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.url_input.update(cx, |input, cx| input.focus(window, cx));
+        window.request_animation_frame();
+        window.on_next_frame(|window, cx| {
+            window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
+        });
+    }
+
     /// Send the current request. Public so the ctrl-enter action can trigger
     /// it from PoopmanApp; no-op while a request is already in flight (the
     /// button is swapped to Cancel then, but the keyboard path isn't).
