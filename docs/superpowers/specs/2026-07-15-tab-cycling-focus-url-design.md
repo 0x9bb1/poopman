@@ -99,15 +99,12 @@ exactly this reason — see its doc comment at `src/request_editor.rs:864`):
 pub fn focus_url(&mut self, window: &mut Window, cx: &mut Context<Self>)
 ```
 
-Implementation:
+Implementation — two lines, no deferral:
 
 1. `self.url_input.update(cx, |input, cx| input.focus(window, cx))` —
    `InputState::focus` is `pub` in gpui-component 0.5.1 (`input/state.rs:825`).
-2. `window.request_animation_frame()` — force a redraw even when the input was
-   already focused (see below).
-3. `window.on_next_frame(|window, cx| window.dispatch_action(
-   Box::new(gpui_component::input::SelectAll), cx))` (`gpui-0.2.2`
-   `window.rs:1644` / `:1476`).
+2. `window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx)`
+   (`gpui-0.2.2 window.rs:1476`).
 
 **Why dispatch instead of a direct call:** `InputState::select_all` is
 `pub(super)` (`input/state.rs:856`) and unreachable from this crate. The
@@ -115,19 +112,32 @@ Implementation:
 `pub use state::*`. Dispatching routes it to the focused input's own handler.
 No new import is needed: `request_editor.rs` already globs `input::*`. (gpui's
 own `SelectAll` is an `OsAction` enum variant, not a top-level item, so
-`gpui::*` does not collide; the plan still spells it fully-qualified.)
+`gpui::*` does not collide; the code still spells it fully-qualified.)
 
-**Why deferred a frame:** `Window::dispatch_action` resolves the target via
-`focus_node_id_in_rendered_frame` (`window.rs:1477-1484`) — the *last rendered*
-frame. Dispatching in the same tick as `focus()` would route to the previously
-focused element, not the URL input.
+**Why no frame deferral is needed** — this reverses an earlier draft of this
+spec, which was wrong on both of its premises and specified a fix that provably
+panicked. Corrected after reading the gpui 0.2.2 source:
 
-**Why the explicit `request_animation_frame`:** `Window::focus`
-(`window.rs:1386`) early-returns *without* calling `refresh()` when the handle
-is already focused. Without a forced frame, pressing Ctrl+L while the URL input
-already has focus would schedule an `on_next_frame` callback that no redraw ever
-runs. `request_animation_frame` guarantees the frame, so repeated Ctrl+L
-re-selects reliably.
+- `Window::dispatch_action` (`window.rs:1477`) opens with
+  `let focus_id = self.focused(cx)` — the **current** focus, already updated by
+  the `input.focus(...)` call on the preceding line. The earlier claim that it
+  resolves focus from the *last rendered frame* was a misreading:
+  `focus_node_id_in_rendered_frame` (`window.rs:3982`) uses the rendered frame
+  only to map an already-chosen `focus_id` onto a dispatch-tree node, and the
+  URL input renders every frame, so its focusable node is always present.
+  `dispatch_action` additionally defers internally via `cx.defer`. A same-tick
+  dispatch is correct.
+- Consequently the "`Window::focus` early-returns without `refresh()` when
+  already focused, stranding the callback" concern is moot — with no
+  `on_next_frame` callback in play, no frame is needed for anything. Repeated
+  Ctrl+L works without special handling.
+- **Never call `window.request_animation_frame()` from an action listener.** It
+  calls `current_view()` (`window.rs:1654` → `:3362`), which asserts the draw
+  phase is Paint/Prepaint and then `.unwrap()`s `rendered_entity_stack.last()`.
+  Outside `draw()` that stack is empty (`debug_assert!(...is_empty())` at
+  `window.rs:1917` and `:1973`), so it panics in debug via the assertion and in
+  release via the unwrap. Every gpui/gpui-component call site for it sits inside
+  element paint.
 
 ## Error handling
 
@@ -157,7 +167,6 @@ an empty URL selects nothing rather than erroring.
 - [ ] Ctrl+L from the body editor focuses the URL input and selects the whole URL
 - [ ] Typing right after Ctrl+L replaces the URL rather than appending
 - [ ] Ctrl+L pressed twice in a row (URL input already focused) still re-selects
-      — this is the `request_animation_frame` case
 - [ ] Ctrl+L with an empty URL does not crash
 - [ ] Tab-switching still saves/restores per-tab state (no regression in
       `switch_to_tab`'s save-then-load path)
