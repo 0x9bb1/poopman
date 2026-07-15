@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui::px;
 use gpui::prelude::FluentBuilder as _;
-use gpui_component::{h_flex, ActiveTheme as _};
+use gpui_component::{h_flex, scroll::ScrollableElement as _, ActiveTheme as _};
 
 use crate::request_tab::RequestTab;
 use crate::theme::method_color;
@@ -26,6 +26,7 @@ pub struct TabCloseClicked {
 pub struct TabBar {
     tabs: Vec<RequestTab>,
     active_tab_index: usize,
+    scroll_handle: ScrollHandle,
 }
 
 impl TabBar {
@@ -33,13 +34,22 @@ impl TabBar {
         Self {
             tabs: vec![],
             active_tab_index: 0,
+            scroll_handle: ScrollHandle::new(),
         }
     }
 
     /// Update tabs and active index
     pub fn update_tabs(&mut self, tabs: Vec<RequestTab>, active_index: usize, _cx: &mut Context<Self>) {
+        let active_changed = self.active_tab_index != active_index;
         self.tabs = tabs;
         self.active_tab_index = active_index;
+
+        // Ctrl+Tab can select a tab that is scrolled out of view. Indices line up
+        // because the tabs are the scroller's direct children and "+" is not —
+        // `scroll_to_item` indexes `child_bounds`.
+        if active_changed {
+            self.scroll_handle.scroll_to_item(active_index);
+        }
     }
 
     fn on_tab_click(&mut self, tab_index: usize, _event: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -73,62 +83,74 @@ impl Render for TabBar {
             .px_1p5()
             .py_1()
             .child(
-                // Render all tabs
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .children(self.tabs.iter().enumerate().map(|(index, tab)| {
-                        let is_active = index == active_index;
-                        let tab_index = index;
-                        let method = tab.request.method.as_str();
-
-                        let verb_color = method_color(tab.request.method, theme);
-
+                // Viewport for the scrolling tab strip. The "+" button is deliberately
+                // outside it (it stays a child of the outer row below), so a full row
+                // can never push it off-screen.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
                         h_flex()
-                            .id(("tab", tab.id))
-                            .gap_1p5()
+                            .id("tab-strip")
+                            .gap_1()
                             .items_center()
-                            .px_3()
-                            .py_1()
-                            .rounded(theme.radius)
-                            .bg(if is_active { theme.muted } else { gpui::transparent_black() })
-                            .when(!is_active, |s| s.hover(|s| s.bg(theme.list_hover)))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, event, window, cx| {
-                                this.on_tab_click(tab_index, event, window, cx);
-                            }))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(verb_color)
-                                    .child(method)
-                            )
-                            .child(
-                                // Tab title
-                                div()
-                                    .text_sm()
-                                    .text_color(if is_active { theme.foreground } else { theme.muted_foreground })
-                                    .max_w(px(150.))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(tab.title.clone())
-                            )
-                            .child(
-                                // Close button
-                                div()
-                                    .id(("close-tab", tab.id))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
+                            .size_full()
+                            .track_scroll(&self.scroll_handle)
+                            .overflow_x_scroll()
+                            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
+                                let is_active = index == active_index;
+                                let tab_index = index;
+                                let method = tab.request.method.as_str();
+
+                                let verb_color = method_color(tab.request.method, theme);
+
+                                h_flex()
+                                    .id(("tab", tab.id))
+                                    .gap_1p5()
+                                    .items_center()
+                                    .px_3()
+                                    .py_1()
+                                    .rounded(theme.radius)
+                                    .bg(if is_active { theme.muted } else { gpui::transparent_black() })
+                                    .when(!is_active, |s| s.hover(|s| s.bg(theme.list_hover)))
                                     .cursor_pointer()
-                                    .hover(|style| style.text_color(theme.foreground))
                                     .on_click(cx.listener(move |this, event, window, cx| {
-                                        cx.stop_propagation();
-                                        this.on_close_tab_click(tab_index, event, window, cx);
+                                        this.on_tab_click(tab_index, event, window, cx);
                                     }))
-                                    .child("×")
-                            )
-                    }))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(verb_color)
+                                            .child(method)
+                                    )
+                                    .child(
+                                        // Tab title
+                                        div()
+                                            .text_sm()
+                                            .text_color(if is_active { theme.foreground } else { theme.muted_foreground })
+                                            .max_w(px(150.))
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(tab.title.clone())
+                                    )
+                                    .child(
+                                        // Close button
+                                        div()
+                                            .id(("close-tab", tab.id))
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .cursor_pointer()
+                                            .hover(|style| style.text_color(theme.foreground))
+                                            .on_click(cx.listener(move |this, event, window, cx| {
+                                                cx.stop_propagation();
+                                                this.on_close_tab_click(tab_index, event, window, cx);
+                                            }))
+                                            .child("×")
+                                    )
+                            })),
+                    )
+                    .horizontal_scrollbar(&self.scroll_handle),
             )
             .child(
                 // New tab button
