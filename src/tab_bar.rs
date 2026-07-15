@@ -133,6 +133,7 @@ impl Render for TabBar {
                                             .max_w(px(150.))
                                             .overflow_hidden()
                                             .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .child(tab.title.clone())
                                     )
                                     .child(
