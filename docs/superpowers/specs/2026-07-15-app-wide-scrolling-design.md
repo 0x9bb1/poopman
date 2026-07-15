@@ -64,17 +64,57 @@ Verified safe: `Theme::sync_scrollbar_appearance` (`theme/mod.rs:141`) would ove
 this, but neither poopman nor `gpui_component::init` (`lib.rs:97-109`) calls it.
 `Hover` is also what gpui-component itself picks for systems not set to auto-hide.
 
-**Rule 2 — Pick the API by whether you need programmatic scroll control.**
+**Rule 2 — One idiom: wrapper / scroller / scrollbar.** Every scrollable surface is
+three parts, with the scrollbar a *sibling* of the scroller:
 
-- Need to drive the scroll position (scroll-to-bottom on row add, scroll-into-view):
-  own a `ScrollHandle`, then `.track_scroll(&h).overflow_scroll()` plus
-  `.vertical_scrollbar(&h)` / `.horizontal_scrollbar(&h)`.
-- Don't need it: `.overflow_y_scrollbar()` / `.overflow_x_scrollbar()`, which wrap the
-  element in `Scrollable` and manage their own scroll state via
-  `ElementId::CodeLocation`.
+```rust
+div()                              // viewport: owns the size constraint
+    .flex_1()
+    .min_h_0()
+    .child(
+        v_flex()                   // scroller: owns content layout and scrolling
+            .id("some-scroll-container")
+            .size_full()
+            .track_scroll(&self.some_handle)
+            .overflow_scroll()
+            .children(…),
+    )
+    .vertical_scrollbar(&self.some_handle)   // sibling of the scroller, sharing its handle
+```
 
-Both come from `gpui_component::scroll::ScrollableElement`, already imported in
-`history_panel.rs:6`.
+`.vertical_scrollbar(&h)` / `.horizontal_scrollbar(&h)` come from
+`gpui_component::scroll::ScrollableElement` (already imported at `history_panel.rs:6`).
+
+**The scrollbar must go on the scroller's parent, never on the scroller itself.**
+`ScrollableElement::scrollbar` is `self.child(ScrollbarLayer{…})`, and that layer renders
+as `div().absolute().top_0().left_0().right_0().bottom_0()`
+(`scroll/scrollable.rs`, `render_scrollbar`). Put it inside the scroller and it becomes
+part of the scrolling content and scrolls away with it. gpui-component's own three call
+sites all place it on the parent: `menu/popup_menu.rs:1309`, `setting/page.rs:189`,
+`tree.rs:439`. `Scrollable` does the same internally — wrapper(relative) > [scroll-area,
+scrollbar].
+
+No explicit `.relative()` is needed on the wrapper: gpui defaults `position` to
+`Position::Relative`, unlike CSS (`gpui-0.2.2/src/style.rs:1193`, and `Style::default()`
+at `:743`).
+
+**Do not use `.overflow_y_scrollbar()` / `.overflow_scrollbar()` on an element whose own
+styles lay out its content.** `Scrollable::render` (`scroll/scrollable.rs:115-125`) does:
+
+```rust
+let style = self.element.style().clone();
+*self.element.style() = StyleRefinement::default();
+div().refine_style(&style).relative().child(…self.element.flex_1()…)
+```
+
+— it *moves* the element's style to an outer wrapper and resets the element to a bare
+div. Since `Style::default()` is `display: Block` (`style.rs:734`), the content still
+stacks vertically, which is why `history_panel.rs:244` works. But any `gap`, `padding`,
+or `flex_col` on the element lands on the wrapper instead of applying between its
+children. `env-list` carries `.gap_0p5()`, so converting it would silently drop the
+spacing between environment rows. `history_panel.rs` keeps its existing
+`.overflow_y_scrollbar()` — it works today and is not worth churning — but new code uses
+the three-part idiom above.
 
 **Rule 3 — `min_h_0` on every flex ancestor.** From the scroll container up to the
 nearest fixed-height boundary, every intervening flex ancestor needs `min_h_0()`
@@ -86,14 +126,32 @@ the child, and the child's `overflow_scroll` never engages.
 
 ### Tab bar (`src/tab_bar.rs`)
 
-Split the single `h_flex` into a scrolling strip plus a pinned button:
+Apply Rule 2's three-part idiom, with the "+" button outside the viewport entirely:
 
-- The tab strip becomes the scroll container: `.id("tab-strip")`,
-  `.track_scroll(&self.scroll_handle)`, `.overflow_x_scroll()`,
-  `.horizontal_scrollbar(&self.scroll_handle)`, `.min_w_0()`.
-- The "+" button moves **out** of the strip and becomes its sibling, so it can never be
-  pushed off-screen. This is the actual fix for "点满了" — today "+" scrolls away with
-  the tabs.
+```rust
+h_flex()                                  // existing outer row
+    .gap_1().items_center().px_1p5().py_1()
+    .child(
+        div()                             // viewport
+            .flex_1()
+            .min_w_0()
+            .child(
+                h_flex()                  // scroller: the tab strip
+                    .id("tab-strip")
+                    .gap_1()
+                    .items_center()
+                    .track_scroll(&self.scroll_handle)
+                    .overflow_x_scroll()
+                    .children(…tabs unchanged…),
+            )
+            .horizontal_scrollbar(&self.scroll_handle),
+    )
+    .child(…existing "+" button, unchanged…)   // outside the viewport → pinned
+```
+
+- The "+" button already *is* a sibling of the tab strip in today's outer `h_flex`, so it
+  needs no change; giving the viewport `flex_1` is what pins the button. Today "+" is
+  pushed off-screen along with the tabs — that is the "点满了" half of the defect.
 - `TabBar` gains a `scroll_handle: ScrollHandle` field.
 - `update_tabs` calls `self.scroll_handle.scroll_to_item(active_index)` when
   `active_index` changes, so Ctrl+Tab to an off-screen tab brings it into view.
@@ -126,28 +184,44 @@ No change needed in `src/app.rs`: `:589` already wraps the tab bar in
 
   A single unbreakable token longer than the pane still has nowhere to wrap; the
   checklist covers observing what actually happens rather than guessing.
-- `render_headers` gains `.vertical_scrollbar(&self.headers_scroll_handle)`. It already
-  owns the handle (`:63`), so Rule 2's first branch applies.
+- The scrollbar goes on that same parent (`:437-444`), not inside `render_headers` —
+  `render_headers` returns the scroller. Per Rule 2 the parent is already the viewport,
+  so it takes `.vertical_scrollbar(&self.headers_scroll_handle)`. `ResponseViewer` owns
+  the handle (`:63`) and both sites can reach it.
 
 ### Request headers and params (`src/request_editor.rs`)
 
-Both scroll containers (`:1203-1206`, `:1278`) gain `.min_h_0()` and a
-`.vertical_scrollbar(&…_scroll_handle)`. Both already own handles for the existing
-scroll-to-bottom-on-add behavior, which must keep working.
+Both scroll containers (`:1199-1206`, `:1272-1279`) are `this.child(v_flex()…)` with no
+viewport of their own, so each gets one interposed per Rule 2: a `div().flex_1()
+.min_h_0()` wrapping the existing `v_flex`, carrying
+`.vertical_scrollbar(&…_scroll_handle)`. The `v_flex` keeps its id, padding, gap,
+`track_scroll`, and `overflow_scroll`, and takes `.size_full()` in place of its current
+`.flex_1()` (the wrapper owns the flex sizing now).
+
+Interposing a wrapper rather than hanging the scrollbar on the enclosing builder is
+deliberate: the enclosing `this` is the whole tab-content area, so the scrollbar would
+span more than the list.
+
+Both already own handles for the existing scroll-to-bottom-on-add behavior
+(`request_editor.rs:468-495`), which must keep working.
 
 ### Form-data (`src/body_editor.rs`) and environment manager (`src/environment_manager.rs`)
 
-Form-data (`:659-667`) already scrolls correctly; it gains only
-`.vertical_scrollbar(&self.formdata_scroll_handle)`.
+Form-data (`:659-667`) already scrolls correctly — it has `min_h_0` — so it needs only a
+viewport wrapper carrying `.vertical_scrollbar(&self.formdata_scroll_handle)`, with the
+existing `v_flex` keeping its handle for scroll-to-new-row (`body_editor.rs:364-390`).
 
-Environment manager (`:314`, `:442`) has no handle and needs no programmatic control, so
-it takes Rule 2's second branch: `.overflow_scroll()` → `.overflow_y_scrollbar()`.
+Environment manager (`:310-315` `env-list`, `:439-442` `env-vars`) has no handles today.
+Both take the same three-part idiom, which means **each gains a `ScrollHandle` field** on
+`EnvironmentManager` — `.overflow_y_scrollbar()` is not an option here: `env-list`
+carries `.gap_0p5()`, which `Scrollable` would relocate to its wrapper, silently
+collapsing the spacing between environment rows (see Rule 2).
 
 Rule 3 also applies to both containers, but the exact ancestors are **not enumerated
 here** — unlike the other surfaces, this file's chains were not traced during design.
-The implementer must read outward from each of `:314` and `:442` to the nearest
-fixed-height boundary and add `min_h_0()` to each intervening flex ancestor that lacks
-it. Enumerating them here from memory would be guessing.
+The implementer must read outward from each container to the nearest fixed-height
+boundary and add `min_h_0()` to each intervening flex ancestor that lacks it.
+Enumerating them here from memory would be guessing.
 
 ### History (`src/history_panel.rs`)
 
