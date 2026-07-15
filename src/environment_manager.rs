@@ -6,7 +6,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::*, checkbox::Checkbox, h_flex, input::*, v_flex, ActiveTheme as _, Sizable as _,
+    button::*, checkbox::Checkbox, h_flex, input::*, scroll::ScrollableElement as _, v_flex,
+    ActiveTheme as _, Sizable as _,
 };
 use gpui_component::input::InputEvent;
 use std::sync::Arc;
@@ -31,6 +32,8 @@ pub struct EnvironmentManager {
     selected_id: Option<i64>,
     name_input: Entity<InputState>,
     var_rows: Vec<VarRow>,
+    env_list_scroll_handle: ScrollHandle,
+    var_list_scroll_handle: ScrollHandle,
     /// True while programmatically loading inputs, so their `Change` events don't
     /// trigger an auto-save of values we just set.
     suspend_autosave: bool,
@@ -54,6 +57,8 @@ impl EnvironmentManager {
             selected_id,
             name_input,
             var_rows: vec![],
+            env_list_scroll_handle: ScrollHandle::new(),
+            var_list_scroll_handle: ScrollHandle::new(),
             suspend_autosave: false,
             _subs: vec![],
         };
@@ -307,12 +312,17 @@ impl Render for EnvironmentManager {
                             ),
                     )
                     .child(
-                        v_flex()
-                            .id("env-list")
+                        div()
                             .flex_1()
-                            .gap_0p5()
-                            .overflow_scroll()
-                            .children(self.environments.iter().map(|env| {
+                            .min_h_0()
+                            .child(
+                                v_flex()
+                                    .id("env-list")
+                                    .size_full()
+                                    .gap_0p5()
+                                    .track_scroll(&self.env_list_scroll_handle)
+                                    .overflow_scroll()
+                                    .children(self.environments.iter().map(|env| {
                                 let id = env.id;
                                 let is_selected = selected_id == Some(id);
                                 let is_active = active_id == Some(id);
@@ -385,6 +395,8 @@ impl Render for EnvironmentManager {
                                         )
                                     })
                             })),
+                        )
+                        .vertical_scrollbar(&self.env_list_scroll_handle),
                     ),
             )
             // ---- Right: selected environment editor ----
@@ -392,6 +404,7 @@ impl Render for EnvironmentManager {
                 v_flex()
                     .flex_1()
                     .h_full()
+                    .min_h_0()
                     .min_w_0()
                     .gap_3()
                     .child(
@@ -436,11 +449,16 @@ impl Render for EnvironmentManager {
                                     .child(div().w(px(24.)).flex_shrink_0()),
                             )
                             .child(
-                                v_flex()
-                                    .id("env-vars")
+                                div()
                                     .flex_1()
-                                    .overflow_scroll()
-                                    .children(self.var_rows.iter().enumerate().map(|(index, row)| {
+                                    .min_h_0()
+                                    .child(
+                                        v_flex()
+                                            .id("env-vars")
+                                            .size_full()
+                                            .track_scroll(&self.var_list_scroll_handle)
+                                            .overflow_scroll()
+                                            .children(self.var_rows.iter().enumerate().map(|(index, row)| {
                                         h_flex()
                                             .w_full()
                                             .gap_2()
@@ -472,6 +490,8 @@ impl Render for EnvironmentManager {
                                                 ),
                                             )
                                     })),
+                                    )
+                                    .vertical_scrollbar(&self.var_list_scroll_handle),
                             ),
                     )
                     .child(
