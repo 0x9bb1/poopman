@@ -120,6 +120,9 @@ fn main() {
             KeyBinding::new("ctrl-enter", crate::app::SendRequest, Some("Input")),
             KeyBinding::new("ctrl-t", crate::app::NewTab, None),
             KeyBinding::new("ctrl-w", crate::app::CloseTab, None),
+            KeyBinding::new("ctrl-tab", crate::app::NextTab, None),
+            KeyBinding::new("ctrl-shift-tab", crate::app::PrevTab, None),
+            KeyBinding::new("ctrl-l", crate::app::FocusUrl, None),
         ]);
 
         cx.spawn(async move |cx| {
