@@ -467,7 +467,6 @@ fn gen_go(req: &RequestData) -> String {
     s.push_str("\t\"net/http\"\n");
     if has_file {
         s.push_str("\t\"os\"\n");
-        s.push_str("\t\"path/filepath\"\n");
     }
     if form.is_empty() && body.is_some() {
         s.push_str("\t\"strings\"\n");
@@ -493,11 +492,14 @@ fn gen_go(req: &RequestData) -> String {
                         i = file_idx,
                         p = dq(path)
                     ));
+                    // Basename is resolved here at generation time (like gen_fetch):
+                    // Go's runtime filepath.Base would mis-split a Windows path when
+                    // the exported snippet is compiled on a POSIX machine.
                     s.push_str(&format!(
-                        "\tpart{i}, err := writer.CreateFormFile(\"{k}\", filepath.Base(\"{p}\"))\n\tif err != nil {{\n\t\tfmt.Println(err)\n\t\treturn\n\t}}\n",
+                        "\tpart{i}, err := writer.CreateFormFile(\"{k}\", \"{n}\")\n\tif err != nil {{\n\t\tfmt.Println(err)\n\t\treturn\n\t}}\n",
                         i = file_idx,
                         k = dq(&row.key),
-                        p = dq(path)
+                        n = dq(file_basename(path))
                     ));
                     s.push_str(&format!(
                         "\t_, err = io.Copy(part{i}, file{i})\n\tfile{i}.Close()\n\tif err != nil {{\n\t\tfmt.Println(err)\n\t\treturn\n\t}}\n",
@@ -883,13 +885,13 @@ mod tests {
         assert!(out.contains("\"bytes\""));
         assert!(out.contains("\"mime/multipart\""));
         assert!(out.contains("\"os\""));
-        assert!(out.contains("\"path/filepath\""));
+        // Basename must be baked in at generation time — runtime filepath.Base
+        // would keep the full Windows path when the snippet runs on POSIX.
+        assert!(!out.contains("path/filepath"));
         assert!(out.contains("writer := multipart.NewWriter(payload)"));
         assert!(out.contains("_ = writer.WriteField(\"note\", \"hello world\")"));
         assert!(out.contains("file0, err := os.Open(\"C:\\\\pics\\\\me.png\")"));
-        assert!(out.contains(
-            "part0, err := writer.CreateFormFile(\"avatar\", filepath.Base(\"C:\\\\pics\\\\me.png\"))"
-        ));
+        assert!(out.contains("part0, err := writer.CreateFormFile(\"avatar\", \"me.png\")"));
         assert!(out.contains("req.Header.Set(\"Content-Type\", writer.FormDataContentType())"));
         assert!(out.contains("http.NewRequest(method, url, payload)"));
         assert!(!out.contains("skipme"));
