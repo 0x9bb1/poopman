@@ -448,24 +448,69 @@ fn gen_axios(req: &RequestData) -> String {
 }
 
 fn gen_go(req: &RequestData) -> String {
-    let mut s = String::new();
-    if form_data_present(req) {
-        s.push_str("// NOTE: form-data body is not yet supported in code export\n");
-    }
+    let form = form_rows(req);
+    let has_file = form
+        .iter()
+        .any(|r| matches!(r.value, FormDataValue::File { .. }));
     let body = raw_body(req);
+    let mut s = String::new();
     s.push_str("package main\n\n");
     s.push_str("import (\n");
+    if !form.is_empty() {
+        s.push_str("\t\"bytes\"\n");
+    }
     s.push_str("\t\"fmt\"\n");
     s.push_str("\t\"io\"\n");
+    if !form.is_empty() {
+        s.push_str("\t\"mime/multipart\"\n");
+    }
     s.push_str("\t\"net/http\"\n");
-    if body.is_some() {
+    if has_file {
+        s.push_str("\t\"os\"\n");
+        s.push_str("\t\"path/filepath\"\n");
+    }
+    if form.is_empty() && body.is_some() {
         s.push_str("\t\"strings\"\n");
     }
     s.push_str(")\n\n");
     s.push_str("func main() {\n");
     s.push_str(&format!("\turl := \"{}\"\n", dq(&req.url)));
     s.push_str(&format!("\tmethod := \"{}\"\n\n", req.method.as_str()));
-    if let Some(b) = &body {
+    if !form.is_empty() {
+        s.push_str("\tpayload := &bytes.Buffer{}\n");
+        s.push_str("\twriter := multipart.NewWriter(payload)\n");
+        let mut file_idx = 0usize;
+        for row in &form {
+            match &row.value {
+                FormDataValue::Text(v) => s.push_str(&format!(
+                    "\t_ = writer.WriteField(\"{}\", \"{}\")\n",
+                    dq(&row.key),
+                    dq(v)
+                )),
+                FormDataValue::File { path } => {
+                    s.push_str(&format!(
+                        "\tfile{i}, err := os.Open(\"{p}\")\n\tif err != nil {{\n\t\tfmt.Println(err)\n\t\treturn\n\t}}\n",
+                        i = file_idx,
+                        p = dq(path)
+                    ));
+                    s.push_str(&format!(
+                        "\tpart{i}, err := writer.CreateFormFile(\"{k}\", filepath.Base(\"{p}\"))\n\tif err != nil {{\n\t\tfmt.Println(err)\n\t\treturn\n\t}}\n",
+                        i = file_idx,
+                        k = dq(&row.key),
+                        p = dq(path)
+                    ));
+                    s.push_str(&format!(
+                        "\t_, err = io.Copy(part{i}, file{i})\n\tfile{i}.Close()\n\tif err != nil {{\n\t\tfmt.Println(err)\n\t\treturn\n\t}}\n",
+                        i = file_idx
+                    ));
+                    file_idx += 1;
+                }
+            }
+        }
+        s.push_str("\tif err := writer.Close(); err != nil {\n\t\tfmt.Println(err)\n\t\treturn\n\t}\n\n");
+        s.push_str("\tclient := &http.Client{}\n");
+        s.push_str("\treq, err := http.NewRequest(method, url, payload)\n");
+    } else if let Some(b) = &body {
         // Go raw string literal in backticks; backticks can't be escaped, so fall
         // back to a quoted Go string if the body itself contains a backtick.
         if b.contains('`') {
@@ -480,8 +525,11 @@ fn gen_go(req: &RequestData) -> String {
         s.push_str("\treq, err := http.NewRequest(method, url, nil)\n");
     }
     s.push_str("\tif err != nil {\n\t\tfmt.Println(err)\n\t\treturn\n\t}\n");
-    for (k, v) in headers(req) {
+    for (k, v) in export_headers(req) {
         s.push_str(&format!("\treq.Header.Add(\"{}\", \"{}\")\n", dq(k), dq(v)));
+    }
+    if !form.is_empty() {
+        s.push_str("\treq.Header.Set(\"Content-Type\", writer.FormDataContentType())\n");
     }
     s.push('\n');
     s.push_str("\tres, err := client.Do(req)\n");
@@ -827,5 +875,26 @@ mod tests {
         assert!(!out.contains("skipme"));
         assert!(!out.contains("\"Content-Type\""));
         assert!(!out.contains("not yet supported"));
+    }
+
+    #[test]
+    fn go_form_data_uses_multipart_writer() {
+        let out = generate(CodeTarget::GoNetHttp, &form_req());
+        assert!(out.contains("\"bytes\""));
+        assert!(out.contains("\"mime/multipart\""));
+        assert!(out.contains("\"os\""));
+        assert!(out.contains("\"path/filepath\""));
+        assert!(out.contains("writer := multipart.NewWriter(payload)"));
+        assert!(out.contains("_ = writer.WriteField(\"note\", \"hello world\")"));
+        assert!(out.contains("file0, err := os.Open(\"C:\\\\pics\\\\me.png\")"));
+        assert!(out.contains(
+            "part0, err := writer.CreateFormFile(\"avatar\", filepath.Base(\"C:\\\\pics\\\\me.png\"))"
+        ));
+        assert!(out.contains("req.Header.Set(\"Content-Type\", writer.FormDataContentType())"));
+        assert!(out.contains("http.NewRequest(method, url, payload)"));
+        assert!(!out.contains("skipme"));
+        assert!(!out.contains("req.Header.Add(\"Content-Type\""));
+        assert!(!out.contains("not yet supported"));
+        assert!(!out.contains("\"strings\""));
     }
 }
