@@ -666,7 +666,6 @@ impl Render for BodyEditor {
                                 .p_2()
                                 .pb_4()  // Bottom padding to prevent last row from being obscured
                                 .size_full()
-                                .w_full()
                                 .track_scroll(&self.formdata_scroll_handle)
                                 .overflow_scroll()
                                 .children(self.formdata_rows.iter().enumerate().zip(self.formdata_input_states.iter()).map(|((index, row), (key_input_entity, value_input_entity, type_select_entity))| {

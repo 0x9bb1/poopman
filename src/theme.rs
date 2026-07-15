@@ -114,11 +114,12 @@ pub fn apply_theme(cx: &mut App) {
     theme.warning = c(WARNING);
     theme.warning_foreground = c(SURFACE);
 
-    // Scrollbar. `Hover` rather than the `Scrolling` default: a scrollbar that only
-    // appears once you are already scrolling cannot tell you scrolling is possible,
-    // which is exactly how a cut-off list reads as broken.
-    // Safe to set here — `Theme::sync_scrollbar_appearance` would overwrite it, but
-    // neither this app nor `gpui_component::init` calls it.
+    // Scrollbar. `Hover` rather than gpui-component's platform-dependent default: a
+    // scrollbar that only appears once you are already scrolling cannot tell you
+    // scrolling is possible, which is exactly how a cut-off list reads as broken.
+    // This assignment sticks because `main.rs` runs `gpui_component::init` — whose
+    // `theme::init` calls `Theme::sync_scrollbar_appearance` — before `apply_theme`.
+    // Reordering those two calls would silently revert this.
     theme.scrollbar_show = ScrollbarShow::Hover;
     theme.scrollbar_thumb = c(SCROLLBAR);
     theme.scrollbar_thumb_hover = c(MUTED_FG);
