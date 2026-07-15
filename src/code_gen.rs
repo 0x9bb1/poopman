@@ -382,16 +382,47 @@ fn gen_fetch(req: &RequestData) -> String {
 }
 
 fn gen_axios(req: &RequestData) -> String {
+    let form = form_rows(req);
+    let has_file = form
+        .iter()
+        .any(|r| matches!(r.value, FormDataValue::File { .. }));
     let mut s = String::new();
-    if form_data_present(req) {
-        s.push_str("// NOTE: form-data body is not yet supported in code export\n");
+    s.push_str("const axios = require(\"axios\");\n");
+    if !form.is_empty() {
+        s.push_str("const FormData = require(\"form-data\");\n");
+        if has_file {
+            s.push_str("const fs = require(\"fs\");\n");
+        }
+        s.push_str("\nconst formdata = new FormData();\n");
+        for row in &form {
+            match &row.value {
+                FormDataValue::Text(v) => s.push_str(&format!(
+                    "formdata.append(\"{}\", \"{}\");\n",
+                    dq(&row.key),
+                    dq(v)
+                )),
+                FormDataValue::File { path } => s.push_str(&format!(
+                    "formdata.append(\"{}\", fs.createReadStream(\"{}\"));\n",
+                    dq(&row.key),
+                    dq(path)
+                )),
+            }
+        }
     }
-    s.push_str("const axios = require(\"axios\");\n\n");
+    s.push('\n');
     s.push_str("const config = {\n");
     s.push_str(&format!("  method: \"{}\",\n", req.method.as_str().to_lowercase()));
     s.push_str(&format!("  url: \"{}\",\n", dq(&req.url)));
-    let hs = headers(req);
-    if hs.is_empty() {
+    let hs = export_headers(req);
+    if !form.is_empty() {
+        // form-data's getHeaders() provides the multipart Content-Type with
+        // the generated boundary; exported headers merge after it.
+        s.push_str("  headers: {\n    ...formdata.getHeaders(),\n");
+        for (k, v) in hs {
+            s.push_str(&format!("    \"{}\": \"{}\",\n", dq(k), dq(v)));
+        }
+        s.push_str("  },\n");
+    } else if hs.is_empty() {
         s.push_str("  headers: {},\n");
     } else {
         s.push_str("  headers: {\n");
@@ -400,7 +431,9 @@ fn gen_axios(req: &RequestData) -> String {
         }
         s.push_str("  },\n");
     }
-    if let Some(b) = raw_body(req) {
+    if !form.is_empty() {
+        s.push_str("  data: formdata,\n");
+    } else if let Some(b) = raw_body(req) {
         s.push_str(&format!("  data: {},\n", js_string(&b)));
     }
     s.push_str("};\n\n");
@@ -778,5 +811,21 @@ mod tests {
         assert_eq!(file_basename("C:\\pics\\me.png"), "me.png");
         assert_eq!(file_basename("/home/u/me.png"), "me.png");
         assert_eq!(file_basename("me.png"), "me.png");
+    }
+
+    #[test]
+    fn axios_form_data_uses_form_data_package() {
+        let out = generate(CodeTarget::NodeAxios, &form_req());
+        assert!(out.contains("const FormData = require(\"form-data\");"));
+        assert!(out.contains("const fs = require(\"fs\");"));
+        assert!(out.contains("formdata.append(\"note\", \"hello world\");"));
+        assert!(out.contains(
+            "formdata.append(\"avatar\", fs.createReadStream(\"C:\\\\pics\\\\me.png\"));"
+        ));
+        assert!(out.contains("...formdata.getHeaders(),"));
+        assert!(out.contains("data: formdata,"));
+        assert!(!out.contains("skipme"));
+        assert!(!out.contains("\"Content-Type\""));
+        assert!(!out.contains("not yet supported"));
     }
 }
