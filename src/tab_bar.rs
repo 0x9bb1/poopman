@@ -108,6 +108,7 @@ impl Render for TabBar {
                                     .id(("tab", tab.id))
                                     .gap_1p5()
                                     .items_center()
+                                    .flex_shrink_0()
                                     .px_3()
                                     .py_1()
                                     .rounded(theme.radius)
