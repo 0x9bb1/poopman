@@ -18,7 +18,7 @@ use crate::theme::{
     REQUEST_INITIAL_HEIGHT, REQUEST_MAX, REQUEST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH,
 };
 
-actions!(poopman, [SendRequest, NewTab, CloseTab]);
+actions!(poopman, [SendRequest, NewTab, CloseTab, NextTab, PrevTab, FocusUrl]);
 
 /// Main application view
 pub struct PoopmanApp {
