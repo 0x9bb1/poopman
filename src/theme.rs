@@ -2,7 +2,7 @@
 //! global theme application applied once at startup.
 
 use gpui::{px, App, Hsla};
-use gpui_component::{Theme, ThemeMode};
+use gpui_component::{scroll::ScrollbarShow, Theme, ThemeMode};
 
 use crate::types::HttpMethod;
 
@@ -114,7 +114,12 @@ pub fn apply_theme(cx: &mut App) {
     theme.warning = c(WARNING);
     theme.warning_foreground = c(SURFACE);
 
-    // Scrollbar
+    // Scrollbar. `Hover` rather than the `Scrolling` default: a scrollbar that only
+    // appears once you are already scrolling cannot tell you scrolling is possible,
+    // which is exactly how a cut-off list reads as broken.
+    // Safe to set here — `Theme::sync_scrollbar_appearance` would overwrite it, but
+    // neither this app nor `gpui_component::init` calls it.
+    theme.scrollbar_show = ScrollbarShow::Hover;
     theme.scrollbar_thumb = c(SCROLLBAR);
     theme.scrollbar_thumb_hover = c(MUTED_FG);
 
