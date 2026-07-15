@@ -175,6 +175,12 @@ fn js_string(s: &str) -> String {
     }
 }
 
+/// Final path component of a local file path, tolerating / and \ separators
+/// (paths come from the form-data UI and may be Windows- or POSIX-style).
+fn file_basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
 /// Top-level dispatch: generate source code for `target` from `req`.
 pub fn generate(target: CodeTarget, req: &RequestData) -> String {
     match target {
@@ -335,18 +341,35 @@ fn gen_python(req: &RequestData) -> String {
 }
 
 fn gen_fetch(req: &RequestData) -> String {
+    let form = form_rows(req);
     let mut s = String::new();
-    if form_data_present(req) {
-        s.push_str("// NOTE: form-data body is not yet supported in code export\n");
-    }
     s.push_str("const myHeaders = new Headers();\n");
-    for (k, v) in headers(req) {
+    for (k, v) in export_headers(req) {
         s.push_str(&format!("myHeaders.append(\"{}\", \"{}\");\n", dq(k), dq(v)));
+    }
+    if !form.is_empty() {
+        s.push_str("\nconst formdata = new FormData();\n");
+        for row in &form {
+            match &row.value {
+                FormDataValue::Text(v) => s.push_str(&format!(
+                    "formdata.append(\"{}\", \"{}\");\n",
+                    dq(&row.key),
+                    dq(v)
+                )),
+                FormDataValue::File { path } => s.push_str(&format!(
+                    "// Browsers can't read local paths — wire this to an <input type=\"file\">:\n// formdata.append(\"{}\", fileInput.files[0], \"{}\");\n",
+                    dq(&row.key),
+                    dq(file_basename(path))
+                )),
+            }
+        }
     }
     s.push_str("\nconst requestOptions = {\n");
     s.push_str(&format!("  method: \"{}\",\n", req.method.as_str()));
     s.push_str("  headers: myHeaders,\n");
-    if let Some(b) = raw_body(req) {
+    if !form.is_empty() {
+        s.push_str("  body: formdata,\n");
+    } else if let Some(b) = raw_body(req) {
         s.push_str(&format!("  body: {},\n", js_string(&b)));
     }
     s.push_str("  redirect: \"follow\",\n");
@@ -734,5 +757,26 @@ mod tests {
         assert!(!out.contains("skipme"));
         assert!(!out.contains("Content-Type"));
         assert!(!out.contains("not yet supported"));
+    }
+
+    #[test]
+    fn fetch_form_data_appends_fields() {
+        let out = generate(CodeTarget::JavaScriptFetch, &form_req());
+        assert!(out.contains("const formdata = new FormData();"));
+        assert!(out.contains("formdata.append(\"note\", \"hello world\");"));
+        // Browsers can't open local paths — the file row is a commented hint
+        // that carries the field name and the file's basename.
+        assert!(out.contains("// formdata.append(\"avatar\", fileInput.files[0], \"me.png\");"));
+        assert!(out.contains("body: formdata,"));
+        assert!(!out.contains("skipme"));
+        assert!(!out.contains("Content-Type"));
+        assert!(!out.contains("not yet supported"));
+    }
+
+    #[test]
+    fn file_basename_handles_both_separators() {
+        assert_eq!(file_basename("C:\\pics\\me.png"), "me.png");
+        assert_eq!(file_basename("/home/u/me.png"), "me.png");
+        assert_eq!(file_basename("me.png"), "me.png");
     }
 }
