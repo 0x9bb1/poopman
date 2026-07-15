@@ -3,6 +3,7 @@ use gpui::*;
 use gpui::px;
 use gpui_component::{
     button::*, checkbox::Checkbox, h_flex, input::{Input, InputState, InputEvent as InputChangeEvent, TabSize},
+    scroll::ScrollableElement as _,
     select::*, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
 };
 
@@ -655,17 +656,20 @@ impl Render for BodyEditor {
             .when(self.body_type_index == 2, |this| {
                 // Form-data - show table (like headers layout)
                 this.child(
-                    v_flex()
-                        .id("formdata-scroll-container")
-                        .gap_2()
-                        .p_2()
-                        .pb_4()  // Bottom padding to prevent last row from being obscured
+                    div()
                         .flex_1()
                         .min_h_0()  // Allow scrolling to work
-                        .w_full()
-                        .track_scroll(&self.formdata_scroll_handle)
-                        .overflow_scroll()
-                        .children(self.formdata_rows.iter().enumerate().zip(self.formdata_input_states.iter()).map(|((index, row), (key_input_entity, value_input_entity, type_select_entity))| {
+                        .child(
+                            v_flex()
+                                .id("formdata-scroll-container")
+                                .gap_2()
+                                .p_2()
+                                .pb_4()  // Bottom padding to prevent last row from being obscured
+                                .size_full()
+                                .w_full()
+                                .track_scroll(&self.formdata_scroll_handle)
+                                .overflow_scroll()
+                                .children(self.formdata_rows.iter().enumerate().zip(self.formdata_input_states.iter()).map(|((index, row), (key_input_entity, value_input_entity, type_select_entity))| {
                                     let is_file = matches!(row.value, FormDataValue::File { .. });
 
                                     h_flex()
@@ -731,6 +735,8 @@ impl Render for BodyEditor {
                                                 )
                                         )
                                 }))
+                        )
+                        .vertical_scrollbar(&self.formdata_scroll_handle),
                 )
             })
     }
