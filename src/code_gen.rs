@@ -2,8 +2,9 @@
 //! into runnable client code for several languages/libraries. All functions are
 //! stateless and unit-testable; no GPUI types here.
 //!
-//! v1 supports `None` and `Raw` request bodies across all targets. `FormData`
-//! bodies are not exported yet — generators prepend a clarifying comment.
+//! Supports `None`, `Raw`, and multipart `FormData` bodies across all targets.
+//! Form-data exports skip the UI-pinned Content-Type header — each target's
+//! HTTP library generates its own multipart boundary.
 
 use crate::types::{BodyType, FormDataRow, FormDataValue, RequestData};
 
@@ -74,20 +75,6 @@ fn raw_body(req: &RequestData) -> Option<String> {
         }
         BodyType::FormData(_) => None,
     }
-}
-
-/// Whether the request has a (currently unsupported) non-empty form-data body.
-fn form_data_present(req: &RequestData) -> bool {
-    matches!(&req.body, BodyType::FormData(rows) if !rows.is_empty())
-}
-
-/// Non-empty headers (skip blank keys left by placeholder rows).
-fn headers(req: &RequestData) -> Vec<(&str, &str)> {
-    req.headers
-        .iter()
-        .filter(|(k, _)| !k.trim().is_empty())
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect()
 }
 
 /// Enabled, non-blank-key form-data rows — the rows that export.
@@ -898,5 +885,30 @@ mod tests {
         assert!(!out.contains("req.Header.Add(\"Content-Type\""));
         assert!(!out.contains("not yet supported"));
         assert!(!out.contains("\"strings\""));
+    }
+
+    #[test]
+    fn disabled_only_form_data_exports_like_no_body() {
+        let mut req = form_req();
+        req.body = BodyType::FormData(vec![FormDataRow {
+            enabled: false,
+            key: "x".to_string(),
+            value: FormDataValue::Text("y".to_string()),
+        }]);
+        let curl = generate(CodeTarget::Curl, &req);
+        assert!(!curl.contains("--form"));
+        assert!(!curl.contains("--data"));
+        // The pinned multipart Content-Type is skipped for ANY form-data body —
+        // exporting it without a matching body would produce a broken request.
+        assert!(!curl.contains("Content-Type"));
+        let go = generate(CodeTarget::GoNetHttp, &req);
+        assert!(go.contains("http.NewRequest(method, url, nil)"));
+    }
+
+    #[test]
+    fn raw_body_still_exports_content_type() {
+        // Control: the Content-Type skip must not leak to raw bodies.
+        let out = generate(CodeTarget::Curl, &post_json_req());
+        assert!(out.contains("--header 'Content-Type: application/json'"));
     }
 }

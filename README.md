@@ -20,7 +20,7 @@ left, request editor on the top-right, response viewer on the bottom-right.
   active one from the Edit menu, and have them resolved at send time (and in code export).
 - **Code snippet export** — turn the current request into runnable code via the `</>`
   button: **cURL, Rust (reqwest), Python (Requests), JavaScript (Fetch), NodeJS (Axios),
-  Go (net/http)**, with Copy.
+  Go (net/http)**, with Copy. Raw and multipart form-data bodies both export.
 - **Tabs** — work on multiple requests at once.
 - **History** — every sent request is stored in SQLite; click to reload, or clear all.
 
@@ -111,7 +111,6 @@ src/
 
 ## Possible Future Enhancements
 
-- [ ] Form-data export in code snippets (currently Raw/None bodies only).
 - [ ] Request collections / folders.
 - [ ] Authentication presets (Bearer, Basic, OAuth).
 - [ ] Export / import collections (Postman format).
