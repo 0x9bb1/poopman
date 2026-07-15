@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{button::*, h_flex, input::*, v_flex, ActiveTheme as _};
+use gpui_component::{button::*, h_flex, input::*, scroll::ScrollableElement as _, v_flex, ActiveTheme as _};
 use std::sync::Arc;
 
 use crate::types::ResponseData;
@@ -256,6 +256,7 @@ impl ResponseViewer {
                             h_flex()
                                 .gap_2()
                                 .w_full()
+                                .items_start()
                                 .child(
                                     div()
                                         .font_weight(FontWeight::SEMIBOLD)
@@ -264,12 +265,16 @@ impl ResponseViewer {
                                         .child(format!("{}:", key)),
                                 )
                                 .child(
+                                    // Wraps rather than ellipsizing — reading the whole
+                                    // value is the point of looking at headers. min_w_0
+                                    // is load-bearing: a value with no break
+                                    // opportunities (a JWT, a long set-cookie) otherwise
+                                    // has an automatic minimum width of the entire
+                                    // string and blows the row out horizontally.
                                     div()
                                         .text_sm()
                                         .flex_1()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
+                                        .min_w_0()
                                         .child(value.clone()),
                                 )
                         })),
@@ -439,9 +444,11 @@ impl Render for ResponseViewer {
                                     .flex()
                                     .flex_col()
                                     .flex_1()
+                                    .min_h_0() // Let the list shrink so its overflow_scroll engages
                                     .w_full()
                                     .overflow_hidden()
-                                    .child(self.render_headers(cx)),
+                                    .child(self.render_headers(cx))
+                                    .vertical_scrollbar(&self.headers_scroll_handle),
                             )
                         }),
                 )
