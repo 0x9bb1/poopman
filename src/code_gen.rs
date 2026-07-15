@@ -95,9 +95,8 @@ fn export_headers(req: &RequestData) -> Vec<(&str, &str)> {
     let skip_content_type = matches!(&req.body, BodyType::FormData(_));
     req.headers
         .iter()
-        .filter(|(k, _)| {
-            !k.trim().is_empty() && !(skip_content_type && k.eq_ignore_ascii_case("content-type"))
-        })
+        .filter(|(k, _)| !k.trim().is_empty())
+        .filter(|(k, _)| !(skip_content_type && k.eq_ignore_ascii_case("content-type")))
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect()
 }
@@ -707,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn python_form_data_uses_files_dict() {
+    fn python_form_data_uses_files_list() {
         let out = generate(CodeTarget::PythonRequests, &form_req());
         assert!(out.contains("files = ["));
         assert!(out.contains("(\"note\", (None, \"hello world\")),"));
