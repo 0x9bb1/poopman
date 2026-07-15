@@ -3,6 +3,7 @@ use gpui::*;
 use gpui::px;
 use gpui_component::{
     button::*, checkbox::Checkbox, input::*,
+    scroll::ScrollableElement as _,
     select::*, v_flex, ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _,
 };
 use gpui_component::input::InputEvent;
@@ -1195,16 +1196,25 @@ impl Render for RequestEditor {
                         )
                         .when(self.active_tab == 0, |this| {
                             this.child(
-                                // Scrollable headers list
-                                v_flex()
-                                    .id("headers-scroll-container")
-                                    .gap_2()
-                                    .p_2()
-                                    .pb_4()  // Bottom padding to prevent last row from being obscured
+                                // Viewport: owns the size constraint so the list can
+                                // shrink and actually scroll; also hosts the scrollbar,
+                                // which must be the scroller's sibling rather than its
+                                // child (an absolute layer inside the scroller scrolls
+                                // away with the content).
+                                div()
                                     .flex_1()
-                                    .track_scroll(&self.headers_scroll_handle)
-                                    .overflow_scroll()
-                                    .children(self.headers.iter().enumerate().map(
+                                    .min_h_0()
+                                    .child(
+                                        // Scrollable headers list
+                                        v_flex()
+                                            .id("headers-scroll-container")
+                                            .gap_2()
+                                            .p_2()
+                                            .pb_4()  // Bottom padding to prevent last row from being obscured
+                                            .size_full()
+                                            .track_scroll(&self.headers_scroll_handle)
+                                            .overflow_scroll()
+                                            .children(self.headers.iter().enumerate().map(
                                         |(index, header)| {
                                             let enabled = header.enabled;
                                             let is_mandatory = matches!(header.header_type, HeaderType::Mandatory);
@@ -1264,19 +1274,30 @@ impl Render for RequestEditor {
                                                 )
                                         },
                                     ))
+                                    )
+                                    .vertical_scrollbar(&self.headers_scroll_handle),
                             )
                         })
                         .when(self.active_tab == 1, |this| {
                             this.child(
-                                // Scrollable params list
-                                v_flex()
-                                    .id("params-scroll-container")
-                                    .gap_2()
-                                    .p_2()
-                                    .pb_4()
+                                // Viewport: owns the size constraint so the list can
+                                // shrink and actually scroll; also hosts the scrollbar,
+                                // which must be the scroller's sibling rather than its
+                                // child (an absolute layer inside the scroller scrolls
+                                // away with the content).
+                                div()
                                     .flex_1()
-                                    .track_scroll(&self.params_scroll_handle)
-                                    .overflow_scroll()
+                                    .min_h_0()
+                                    .child(
+                                        // Scrollable params list
+                                        v_flex()
+                                            .id("params-scroll-container")
+                                            .gap_2()
+                                            .p_2()
+                                            .pb_4()
+                                            .size_full()
+                                            .track_scroll(&self.params_scroll_handle)
+                                            .overflow_scroll()
                                     .children(self.params.iter().enumerate().map(
                                         |(index, param)| {
                                             let enabled = param.enabled;
@@ -1326,6 +1347,8 @@ impl Render for RequestEditor {
                                                 )
                                         },
                                     ))
+                                    )
+                                    .vertical_scrollbar(&self.params_scroll_handle),
                             )
                         })
                         .when(self.active_tab == 2, |this| {
