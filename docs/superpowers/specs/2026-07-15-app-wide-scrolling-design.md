@@ -43,9 +43,8 @@ in form-data`.
   shrink-to-fit was rejected (titles become unreadable fast, and the flex-shrink logic
   is fussier); an overflow dropdown was rejected as scope creep.
 - **Scrollbars appear on hover**, set once globally rather than per-call-site.
-- **Long header values wrap** rather than scrolling horizontally or hiding behind a
-  tooltip. Reading the value is the whole point of looking at headers; a tooltip can't
-  be selected or copied.
+- ~~**Long header values wrap**~~ — **attempted and reverted.** See "Wrapping:
+  attempted and reverted" below. Values stay on one line, ellipsized, as before.
 - **All surfaces change in one batch, verified in one manual pass** (user's call). See
   "Risk" below for why this is safe here.
 - Out of scope: response body and code snippet panel (Input-internal scrolling);
@@ -246,6 +245,80 @@ Enumerating them here from memory would be guessing.
 
 No change. Already conforms.
 
+## Wrapping: attempted and reverted
+
+Wrapping long header values shipped in `e843417`, broke the layout, and was reverted.
+Recorded here in full because the underlying fragility is still live and someone will
+hit it again.
+
+**Symptom.** With wrapping on, opening a response and switching to its Headers tab
+collapsed the **request** card above to ~280px — its URL input vanished entirely and its
+header inputs squashed to squares. The response card stayed full width. Nothing else
+changed.
+
+**What was proven, by bisecting five real GUI builds on Windows:**
+
+| Build | request card |
+|---|---|
+| `5829b0f` baseline, before any code change | wide |
+| baseline + all seven code commits | narrow |
+| all commits, `request_editor.rs` reverted | narrow |
+| baseline + `response_viewer.rs` changes only | narrow |
+| baseline + `response_viewer.rs` with only the **wrap** reverted | wide |
+
+So: dropping `whitespace_nowrap` from the header value div is the sole trigger. The
+`min_h_0()` and `.vertical_scrollbar()` added alongside it are innocent — they are
+present in the "wide" build.
+
+**Where it breaks, measured** — `canvas` probes logging each element's width:
+
+```
+n575-right-column   1238        (unchanged when the response loads)
+n594-splitter-host  1238        (unchanged)
+resp-card           1236        (unchanged)
+req-panel-inner     1238 -> 281 (collapses)
+req-card            1236 -> 279
+request-editor-root 1236 -> 279
+```
+
+The break is exactly at the request `ResizablePanel`'s own div, inside `v_resizable`.
+Its sibling response panel, in the same `v_flex`, is unaffected.
+
+**Ruled out** (each by experiment or by reading the vendored source, not by argument):
+
+- `request_editor.rs`'s viewports — reverting them changes nothing.
+- `min_h_0()` and `.vertical_scrollbar()` — present in a working build.
+- The resizable state machine — `update_panel_size` and `adjust_to_container_size`
+  (`resizable/mod.rs:124,268`) only ever touch `bounds.size.along(axis)`, i.e. height
+  for a vertical group. They cannot set a width.
+- `initial_size` → `flex_basis`. Removing `.size()`/`.size_range()` makes the request
+  panel structurally identical to the response panel; it still collapses to 281.
+- A constant coincidentally equal to 281 — `REQUEST_MIN` is 150, `REQUEST_MAX` 700,
+  `PANEL_MIN_SIZE` 100. 281 is a computed content width.
+
+**What is known about the mechanism:** `ResizablePanel::render` sizes itself with
+`size_full()`, i.e. `width: 100%`. Per taffy, a percentage cross-size also **disables
+stretch** — `flexbox.rs:1601` tests the *raw* style's `is_auto()`, and `relative(1.)` is
+`Percent`, not `Auto`. So the panel's width depends entirely on that percentage
+resolving; there is no stretch fallback. When it fails to resolve, the panel falls back
+to content sizing — which is exactly the observed 281. A faithful reconstruction of the
+tree in raw taffy 0.9 reproduces the symptom *only* when the panels' inner main size is
+forced indefinite, and in that regime the request card is 281 regardless of wrapping.
+
+**What was never explained:** why removing `nowrap` in the *response* subtree changes
+the *request* panel's width at all. They are siblings under a container sized from
+above. The taffy reconstruction says it is impossible; five GUI builds say it happens.
+The real tree therefore contains something neither the source reading nor the model
+captured. Chasing it further was not worth more of the user's time, so wrapping stays
+off until someone finds it.
+
+**If you pick this up:** start from the probe result above — the break is at the request
+panel's div and nowhere higher. The next measurement worth taking is the width of
+`v_resizable`'s own `v_flex`, which no probe reached because
+`ResizablePanelGroup::child` only accepts `Into<ResizablePanel>`. If that reads 1238 the
+break is inside `ResizablePanel`; if it reads 281 the break is above it and the model is
+missing a node.
+
 ## Risk: the `min_h_0` diagnosis is a hypothesis
 
 The only established facts are that the user reports these surfaces don't scroll, and
@@ -294,10 +367,9 @@ Tab bar:
 
 Response headers:
 - [ ] A response with many headers scrolls vertically
-- [ ] A long value with spaces (e.g. `content-security-policy`) wraps and is fully readable
-- [ ] A long value with **no** break opportunities (e.g. a JWT in `authorization`, a long
-      `set-cookie`) does not blow the row out horizontally — this is the `min_w_0()` case;
-      note what it actually does, since a single unbreakable token has nowhere to wrap
+- [ ] Long values stay on one line, ellipsized (wrapping was reverted — see above)
+- [ ] The request card above is still full width with a response loaded and the Headers
+      tab open — the regression this revert addresses
 - [ ] A hover scrollbar appears when the mouse is over the header list
 - [ ] Header text can still be selected
 
