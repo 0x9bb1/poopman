@@ -86,8 +86,14 @@ impl Render for TabBar {
                 // Viewport for the scrolling tab strip. The "+" button is deliberately
                 // outside it (it stays a child of the outer row below), so a full row
                 // can never push it off-screen.
+                //
+                // No flex_1 on purpose: the default `flex: 0 1 auto` sizes this to the
+                // strip's content, so "+" sits right after the last tab while there is
+                // room (Postman's behaviour). min_w_0 is what lets it shrink past that
+                // content width once the row fills, at which point the strip overflows
+                // and scrolls internally and "+" ends up pinned at the right edge.
+                // flex_1 here would hold "+" against the right edge even with two tabs.
                 div()
-                    .flex_1()
                     .min_w_0()
                     .child(
                         h_flex()
@@ -158,6 +164,7 @@ impl Render for TabBar {
                 // New tab button
                 div()
                     .id("new-tab-button")
+                    .flex_shrink_0()
                     .px_2()
                     .py_1()
                     .rounded(theme.radius)
