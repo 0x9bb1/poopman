@@ -31,6 +31,9 @@ pub struct PoopmanApp {
     /// then just that root — and our `on_action` handlers live on `PoopmanApp`'s own
     /// element, a descendant of it, so with no focus they are never reached and
     /// every shortcut silently does nothing.
+    ///
+    /// Tracked on the content area rather than the root — see the note at the
+    /// `track_focus` call in `render`. Moving it back up kills the window controls.
     focus_handle: FocusHandle,
     db: Arc<Database>,
     history_panel: Entity<HistoryPanel>,
@@ -516,7 +519,6 @@ impl Render for PoopmanApp {
         let theme = cx.theme();
 
         v_flex()
-            .track_focus(&self.focus_handle)
             .key_context("Poopman")
             .on_action(cx.listener(|this, _: &SendRequest, window, cx| {
                 this.request_editor.update(cx, |editor, cx| editor.send(window, cx));
@@ -566,6 +568,21 @@ impl Render for PoopmanApp {
             )
             .child(
                 div()
+                    // Focus lives here, on the content area, and deliberately NOT on the
+                    // root — the root spans the title bar too, and that breaks the window
+                    // controls. `track_focus` makes an element insert a hitbox
+                    // (`div.rs:1699`) and registers a focus-on-mouse-down listener that
+                    // calls `window.prevent_default()` (`div.rs:2035`). Windows delivers
+                    // WM_NCLBUTTONDOWN on minimize/maximize/close through gpui as an
+                    // ordinary MouseDownEvent first, and treats it as consumed when the
+                    // default was prevented (`platform/windows/events.rs:976`) — so it
+                    // returns early and never records `nc_button_pressed`, leaving the
+                    // matching mouse-up with nothing to act on. All three buttons go dead
+                    // while still painting their hover styles.
+                    //
+                    // The actions stay on the root: dispatch walks the whole focus path,
+                    // and the root is still an ancestor of this element.
+                    .track_focus(&self.focus_handle)
                     .flex_1()
                     .min_h_0()
                     .flex()
