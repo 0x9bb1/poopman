@@ -22,6 +22,16 @@ actions!(poopman, [SendRequest, NewTab, CloseTab, NextTab, PrevTab, FocusUrl]);
 
 /// Main application view
 pub struct PoopmanApp {
+    /// Focused at startup so the window's focus is never `None`.
+    ///
+    /// This is load-bearing for every keyboard shortcut, not a nicety.
+    /// `Window::dispatch_key_event` (`gpui-0.2.2/src/window.rs:3735`) resolves the
+    /// dispatch path from the focused node, and `focus_node_id_in_rendered_frame`
+    /// falls back to the dispatch tree's *root* when focus is `None`. The path is
+    /// then just that root — and our `on_action` handlers live on `PoopmanApp`'s own
+    /// element, a descendant of it, so with no focus they are never reached and
+    /// every shortcut silently does nothing.
+    focus_handle: FocusHandle,
     db: Arc<Database>,
     history_panel: Entity<HistoryPanel>,
     request_editor: Entity<RequestEditor>,
@@ -203,7 +213,14 @@ impl PoopmanApp {
             bar.update_tabs(request_tabs.clone(), active_tab_index, cx);
         });
 
+        // Focus the root so the window's focus is never `None` — see the field's
+        // doc comment. Without this, shortcuts are dead until the user happens to
+        // click something focusable.
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle);
+
         Self {
+            focus_handle,
             db,
             history_panel,
             request_editor,
@@ -499,6 +516,7 @@ impl Render for PoopmanApp {
         let theme = cx.theme();
 
         v_flex()
+            .track_focus(&self.focus_handle)
             .key_context("Poopman")
             .on_action(cx.listener(|this, _: &SendRequest, window, cx| {
                 this.request_editor.update(cx, |editor, cx| editor.send(window, cx));
