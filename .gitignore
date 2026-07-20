@@ -2,3 +2,5 @@
 /gpui-component/
 .claude
 .superpowers/
+# Local scratch for preview HTML and verification screenshots.
+.preview/
