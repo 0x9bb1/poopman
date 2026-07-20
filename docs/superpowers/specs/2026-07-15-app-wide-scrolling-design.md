@@ -319,6 +319,61 @@ panel's div and nowhere higher. The next measurement worth taking is the width o
 break is inside `ResizablePanel`; if it reads 281 the break is above it and the model is
 missing a node.
 
+### Second round, 2026-07-20
+
+Attacked again while clearing known debt. Did **not** find the mechanism either, but
+narrowed it enough to be worth recording.
+
+**The two panels were never symmetric, and the asymmetry is in our code** (`app.rs`):
+
+```rust
+// request
+resizable_panel().size(..).size_range(..).child(card_panel().size_full())
+// response — not a resizable_panel() at all; From<E> wraps it via
+// `resizable_panel().child(value)`, so initial_size is None
+card_panel().flex_1().min_h(px(200.)).mt(px(10.)).into_any_element()
+```
+
+`ResizablePanel::render` builds its div with `.flex().flex_grow().size_full()`, i.e. the
+panel is itself a flex **row**. For its child card that makes width the *main* axis.
+`size_full()` asks for `width: 100%` and fills only while that percentage resolves;
+`flex_1()` fills unconditionally. That maps exactly onto the bisect: the card depending
+on percentage resolution is the one that collapsed, the card that grows never did. Hence
+the fix attempted this round — request card to `flex_1() + h_full()`, plus `w_full()` on
+the `v_resizable` host to keep the percentage chain definite.
+
+**Also ruled out this round:**
+
+- `ResizePanelGroupElement`, the container's third child and the one custom `Element` in
+  the subtree. Its `request_layout` returns `window.request_layout(Style::default(), ..)`
+  — a zero-size node with no children. It cannot influence sibling widths.
+- gpui's `AvailableSpace::min_size()` paths (`window.rs:2058,2102`) — they apply to the
+  active-drag preview and to tooltips, neither of which is in this tree outside a drag.
+
+**Two more headless taffy 0.9 reconstructions, both negative.** Reconstruction #1
+repeated the original round's result. Reconstruction #2 fixed two infidelities that
+looked load-bearing:
+
+1. the response headers subtree was modelled as one leaf, eliding the
+   `overflow_hidden` wrapper → `overflow: scroll` scroller → inner `v_flex` → row chain,
+   and `overflow: scroll` changes how intrinsic sizes propagate;
+2. nowrap text was measured as `min(max_content, available)`, whereas gpui's nowrap
+   measurement ignores available space and returns the whole string's width — that
+   difference is precisely what the bisect isolated.
+
+With both corrected, and with `size_full` vs `flex_1` on the request card as a second
+variable, all four combinations still put both panels at the full 1238. Script kept out
+of tree; it is ~350 lines of taffy tree construction and reproducible from this
+description.
+
+**So three independent models now say the collapse cannot happen, against five GUI
+builds that say it does.** That is enough to stop blaming styles. The remaining suspects
+are above taffy's flexbox math: gpui's layout driver (`gpui/src/taffy.rs`) — how it feeds
+available space per pass — or its layout/text-measurement caching across frames, where a
+stale measurement from one frame could size a node in the next. A third round should
+start by instrumenting `TaffyLayoutEngine::compute_layout` for this window rather than by
+editing flex properties.
+
 ## Risk: the `min_h_0` diagnosis is a hypothesis
 
 The only established facts are that the user reports these surfaces don't scroll, and
