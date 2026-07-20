@@ -626,15 +626,28 @@ impl Render for PoopmanApp {
                                     )
                                     .child(
                                         // Request editor and response viewer with resizable splitter
-                                        div().flex_1().overflow_hidden().child(
+                                        // w_full keeps this host's width definite, so the
+                                        // width:100% that ResizablePanelGroup and
+                                        // ResizablePanel both size themselves with has
+                                        // something to resolve against.
+                                        div().flex_1().w_full().overflow_hidden().child(
                                             v_resizable("request-response-splitter")
                                                 .child(
                                                     resizable_panel()
                                                         .size(px(REQUEST_INITIAL_HEIGHT))
                                                         .size_range(px(REQUEST_MIN)..px(REQUEST_MAX))
                                                         .child(
+                                                            // flex_1 rather than size_full: the
+                                                            // panel is a flex ROW, so this is the
+                                                            // main axis. size_full asks for
+                                                            // width:100%, which only fills if that
+                                                            // percentage resolves; flex-grow fills
+                                                            // unconditionally. The response card
+                                                            // below has always used flex_1 and has
+                                                            // never collapsed, while this one has.
                                                             crate::ui::card_panel(theme)
-                                                                .size_full()
+                                                                .flex_1()
+                                                                .h_full()
                                                                 .child(self.request_editor.clone()),
                                                         ),
                                                 )
