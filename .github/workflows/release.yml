@@ -1,14 +1,95 @@
 name: Build and Release
 
+# Releasing is dispatch-driven so Cargo.toml can never drift from the tag:
+# the version you type here is written into Cargo.toml and committed FIRST,
+# and everything downstream builds from that commit. There is deliberately no
+# `push: tags` trigger — a hand-pushed tag would bypass the bump and
+# reintroduce the drift this workflow exists to prevent.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (e.g. 0.3.3)'
+        required: true
+        type: string
 
 jobs:
+  bump:
+    name: Bump Cargo.toml and push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate input
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' is not a semver version. Pass it without the leading v, e.g. 0.3.3"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"
+            exit 1
+          fi
+
+      - name: Set the crate version
+        run: |
+          VERSION="${{ inputs.version }}"
+          # Section-aware on purpose. Two versions have to move together:
+          # [package] and [package.metadata.bundle], the latter being what
+          # cargo-bundle stamps into the macOS .app/.dmg. A blanket sed would
+          # also rewrite dependency versions; a first-match-only edit would
+          # silently leave the macOS bundle on the old version forever.
+          # Cargo.toml is CRLF in this repo, so the section header carries a
+          # trailing \r that has to come off before comparing.
+          awk -v v="$VERSION" '
+            /^\[/ { sect = $0; sub(/\r$/, "", sect) }
+            /^version = / && (sect == "[package]" || sect == "[package.metadata.bundle]") {
+              sub(/"[^"]*"/, "\"" v "\"")
+            }
+            { print }
+          ' Cargo.toml > Cargo.toml.new
+          mv Cargo.toml.new Cargo.toml
+
+          # Both must now read the new version, or the edit missed one.
+          if [ "$(grep -c "^version = \"$VERSION\"" Cargo.toml)" -ne 2 ]; then
+            echo "::error::expected 2 version lines at $VERSION, got:"
+            grep -n '^version' Cargo.toml
+            exit 1
+          fi
+          grep -n '^version' Cargo.toml
+
+          # Syncs Cargo.lock's poopman entry without compiling and without
+          # touching dependency versions. `cargo metadata` does NOT rewrite the
+          # lock here, and `cargo generate-lockfile` would re-resolve everything.
+          cargo update --workspace
+
+      - name: Commit and push
+        id: commit
+        run: |
+          VERSION="${{ inputs.version }}"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          if git diff --quiet; then
+            echo "::error::Cargo.toml is already at $VERSION — nothing to release"
+            exit 1
+          fi
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release v$VERSION"
+          git push origin main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: bump
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -30,8 +111,12 @@ jobs:
             asset_name: Poopman-windows-x86_64
 
     steps:
-      - name: Checkout code
+      # The bump commit, not main's tip — the binaries must carry the version
+      # that was just written, and main may have moved on.
+      - name: Checkout the bump commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -103,15 +188,16 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [bump, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout the bump commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -121,9 +207,13 @@ jobs:
       - name: Display structure of downloaded files
         run: ls -R artifacts
 
+      # Creates the tag as well, on the bump commit. Tagging here rather than
+      # in the bump job means a failed build leaves no dangling tag.
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ inputs.version }}
+          target_commitish: ${{ needs.bump.outputs.sha }}
           draft: false
           prerelease: false
           generate_release_notes: true
