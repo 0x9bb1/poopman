@@ -125,6 +125,49 @@ partial wiring. See the `mechanism-exists-is-not-feature-works` lesson.
 Value-side completion, fuzzy/substring matching, learning from history, Params tab
 completion, duplicate detection across custom rows.
 
+## The focus jump has no clean hook
+
+"Focus moves to the value input after selection" is an approved criterion that the
+library does not support directly. Three candidate hooks were checked and all three
+are closed:
+
+- **No completion-accepted event.** `InputEvent` is only
+  `Change | PressEnter | Focus | Blur` (`state.rs:93-98`).
+- **No way to observe the menu.** `InputState::context_menu` is `pub(crate)` and there
+  is no public accessor.
+- **`CompletionItem.command` is ignored.** LSP's standard post-insert hook is not read
+  anywhere in `completion_menu.rs` or `lsp/completions.rs`.
+
+Two related facts, both from reading the insertion path in
+`completion_menu.rs:229-273`:
+
+- `replace_text_in_range_silent` suppresses only the re-trigger check
+  (`state.rs:2006`); `cx.emit(InputEvent::Change)` sits outside that guard
+  (`:2009`) and still fires. The editor's existing "append a blank row" subscription
+  therefore survives completion insertion.
+- The library re-focuses the key input itself after inserting, under a standing
+  `// FIXME: Input not get the focus` (`completion_menu.rs:266-267`). Anything that
+  moves focus elsewhere is racing that call.
+
+**Decision (user, 2026-07-20):** accept a heuristic — treat a `Change` that grows the
+text by more than one character *and* leaves it exactly equal to a canonical table
+entry as an accepted completion. Manual typing advances one character at a time, so
+it cannot false-positive; pasting a complete header name can, and jumping focus is
+the desired behaviour there anyway. To be implemented after the Tier 0 gate passes.
+
+## Progress
+
+- **Tier 1: passed, with evidence.** `cargo test` on Windows reports 144 passed /
+  0 failed, including the 10 new assertions. `cargo clippy --all-targets` recompiles
+  clean with no warning lines, exit 0.
+- **Tier 0 and Tier 2: not yet run.** WSL2 cannot type into the GUI. The Windows
+  binary builds and launches without regression (headers list renders, six predefined
+  rows present), but that screenshot proves startup only — it says nothing about
+  whether the menu opens.
+- **Focus jump: not implemented**, per the sequencing above.
+
+Commits live on `feat/header-key-autocomplete`.
+
 ## Test gate
 
 WSL2 cannot build or run the GUI. `cargo check` and `cargo clippy` run locally;
