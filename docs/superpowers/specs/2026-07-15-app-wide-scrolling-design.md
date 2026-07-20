@@ -366,13 +366,30 @@ variable, all four combinations still put both panels at the full 1238. Script k
 of tree; it is ~350 lines of taffy tree construction and reproducible from this
 description.
 
-**So three independent models now say the collapse cannot happen, against five GUI
-builds that say it does.** That is enough to stop blaming styles. The remaining suspects
-are above taffy's flexbox math: gpui's layout driver (`gpui/src/taffy.rs`) — how it feeds
-available space per pass — or its layout/text-measurement caching across frames, where a
-stale measurement from one frame could size a node in the next. A third round should
-start by instrumenting `TaffyLayoutEngine::compute_layout` for this window rather than by
-editing flex properties.
+**So three independent models said the collapse cannot happen, against five GUI builds
+that said it does.** The models were wrong about something, but the fix they suggested
+was right anyway.
+
+### Resolved, 2026-07-20
+
+**Verified fixed by manual GUI test.** With the request card on `flex_1() + h_full()` and
+`w_full()` on the `v_resizable` host, wrapping long response header values no longer
+collapses the request card. Wrapping is back on; values are readable in full.
+
+The mechanism was never proven — the reconstructions still say this subtree cannot
+produce the collapse, so *why* percentage resolution failed in the real tree remains
+open. What is now established empirically:
+
+- the collapse is a property of **`size_full()` on a `ResizablePanel`'s child**, not of
+  anything in the response subtree. Wrapping only ever exposed it;
+- `flex_1()` on that child is immune, which is why the response card never collapsed
+  across any of the five bisect builds.
+
+**Rule for this codebase: never size a `ResizablePanel`'s child with `size_full()`. Use
+`flex_1()` plus an explicit cross-axis size.** The panel is a flex row, so `size_full()`
+puts the child's main size on a percentage with no stretch fallback; that is one failed
+resolution away from content sizing, and something in gpui's real layout does make it
+fail. If a third panel is ever added, style its child the same way.
 
 ## Risk: the `min_h_0` diagnosis is a hypothesis
 
