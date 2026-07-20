@@ -4451,6 +4451,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "log",
+ "lsp-types",
  "mime_guess",
  "quick-xml 0.40.1",
  "reqwest",

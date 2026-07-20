@@ -9,6 +9,8 @@ mod curl_import;
 mod db;
 mod environment_manager;
 mod format;
+mod header_completion;
+mod header_names;
 mod history_panel;
 mod http_client;
 mod menu_bar;

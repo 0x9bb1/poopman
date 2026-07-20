@@ -9,6 +9,7 @@ use gpui_component::{
 use gpui_component::input::InputEvent;
 
 use crate::body_editor::{BodyEditor, BodyTypeChanged};
+use crate::header_completion::HeaderCompletionProvider;
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
 use crate::url_params::{self, QueryParam};
 use crate::theme::METHOD_SELECT_WIDTH;
@@ -28,6 +29,29 @@ pub struct OpenCodeSnippet;
 /// Event emitted when the user cancels an in-flight request.
 #[derive(Clone)]
 pub struct RequestCancelled;
+
+/// Create a header-name input carrying the standard-header typeahead.
+///
+/// Custom rows get built in three places — loading a request, restoring saved
+/// header state, and appending the trailing blank row. Routing all of them through
+/// this helper is what stops the completion from being live on one path and dead on
+/// the others.
+fn custom_header_key_input<T: 'static>(
+    value: &str,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) -> Entity<InputState> {
+    // Owned because `cx.new` takes a 'static closure.
+    let value = value.to_string();
+    cx.new(move |cx| {
+        let mut input = InputState::new(window, cx).placeholder("Header name");
+        input.lsp.completion_provider = Some(std::rc::Rc::new(HeaderCompletionProvider));
+        if !value.is_empty() {
+            input.set_value(&value, window, cx);
+        }
+        input
+    })
+}
 
 /// Header row with key-value inputs and enabled checkbox
 struct HeaderRow {
@@ -225,11 +249,7 @@ impl RequestEditor {
                 }
             } else {
                 // Add as custom header
-                let key_input = cx.new(|cx| {
-                    let mut input = InputState::new(window, cx);
-                    input.set_value(key, window, cx);
-                    input
-                });
+                let key_input = custom_header_key_input(key, window, cx);
                 let value_input = cx.new(|cx| {
                     let mut input = InputState::new(window, cx);
                     input.set_value(value, window, cx);
@@ -396,13 +416,21 @@ impl RequestEditor {
 
         // Rebuild headers from saved state
         for header_state in state {
-            let header_row = HeaderRow {
-                enabled: header_state.enabled,
-                key_input: cx.new(|cx| {
+            // Predefined rows render their key field disabled, so only custom rows
+            // get the typeahead.
+            let key_input = if matches!(header_state.header_type, HeaderType::Custom) {
+                custom_header_key_input(&header_state.key, window, cx)
+            } else {
+                cx.new(|cx| {
                     let mut input = InputState::new(window, cx);
                     input.set_value(&header_state.key, window, cx);
                     input
-                }),
+                })
+            };
+
+            let header_row = HeaderRow {
+                enabled: header_state.enabled,
+                key_input,
                 value_input: cx.new(|cx| {
                     let mut input = InputState::new(window, cx);
                     input.set_value(&header_state.value, window, cx);
@@ -445,7 +473,7 @@ impl RequestEditor {
     fn add_custom_header_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let new_row = HeaderRow {
             enabled: true,
-            key_input: cx.new(|cx| InputState::new(window, cx).placeholder("Header name")),
+            key_input: custom_header_key_input("", window, cx),
             value_input: cx.new(|cx| InputState::new(window, cx).placeholder("Value")),
             header_type: HeaderType::Custom,
             predefined: None,
