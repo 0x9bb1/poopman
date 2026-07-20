@@ -256,6 +256,7 @@ impl ResponseViewer {
                             h_flex()
                                 .gap_2()
                                 .w_full()
+                                .items_start()
                                 .child(
                                     div()
                                         .font_weight(FontWeight::SEMIBOLD)
@@ -264,23 +265,16 @@ impl ResponseViewer {
                                         .child(format!("{}:", key)),
                                 )
                                 .child(
-                                    // Stays on one line, ellipsized. Wrapping was tried
-                                    // and reverted: dropping `whitespace_nowrap` collapses
-                                    // this value's min-content width, and that somehow
-                                    // collapses the *request* card above to ~280px — its
-                                    // ResizablePanel stops resolving `size_full`'s
-                                    // width:100% and falls back to content sizing.
-                                    // Bisected across five GUI builds and localised with
-                                    // canvas probes; the mechanism was never found, so
-                                    // wrapping stays off until it is. See
-                                    // docs/superpowers/specs/2026-07-15-app-wide-scrolling-design.md
-                                    // ("Wrapping: attempted and reverted").
+                                    // Wraps rather than ellipsizing — reading the whole
+                                    // value is the point of looking at headers. min_w_0
+                                    // is load-bearing: a value with no break
+                                    // opportunities (a JWT, a long set-cookie) otherwise
+                                    // has an automatic minimum width of the entire
+                                    // string and blows the row out horizontally.
                                     div()
                                         .text_sm()
                                         .flex_1()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .whitespace_nowrap()
+                                        .min_w_0()
                                         .child(value.clone()),
                                 )
                         })),
