@@ -1,9 +1,53 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{button::*, h_flex, input::*, scroll::ScrollableElement as _, v_flex, ActiveTheme as _};
+use gpui_component::{
+    button::*, h_flex, input::*,
+    menu::{ContextMenuExt as _, PopupMenuItem},
+    scroll::ScrollableElement as _,
+    text::{TextView, TextViewStyle},
+    v_flex, ActiveTheme as _,
+};
 use std::sync::Arc;
 
 use crate::types::ResponseData;
+
+/// Render headers as `key: value` lines — what "Copy all" puts on the clipboard.
+/// No trailing newline, so pasting into a single-line field stays clean.
+fn headers_to_text(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(k, v)| format!("{}: {}", k, v))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Escape text for embedding in the HTML fed to `TextView`.
+///
+/// Header values are arbitrary bytes from the network: `&` shows up in every
+/// URL-bearing header and `<` appears in Link/Report-To headers. Without this
+/// they would be swallowed as markup.
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// One paragraph per header, key in bold — as HTML so `TextView` can render it
+/// with real text selection.
+fn headers_to_html(headers: &[(String, String)]) -> String {
+    headers
+        .iter()
+        .map(|(k, v)| format!("<p><b>{}:</b> {}</p>", escape_html(k), escape_html(v)))
+        .collect::<Vec<_>>()
+        .join("")
+}
 
 /// Map a raw Content-Type header value to a gpui-renderable image format.
 /// Strips `;`-parameters (e.g. charset), trims, and is case-insensitive.
@@ -239,8 +283,9 @@ impl ResponseViewer {
         }
     }
 
-    fn render_headers(&self, _cx: &App) -> impl IntoElement {
+    fn render_headers(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         if let Some(response) = &self.response {
+            let all_headers = headers_to_text(&response.headers);
             v_flex()
                 .id("response-headers-scroll")
                 .flex_1()
@@ -249,47 +294,56 @@ impl ResponseViewer {
                 .track_scroll(&self.headers_scroll_handle)
                 .overflow_scroll()
                 .child(
-                    v_flex()
-                        .gap_1()
+                    div()
                         .p_2()
-                        .children(response.headers.iter().map(|(key, value)| {
-                            h_flex()
-                                .gap_2()
-                                .w_full()
-                                .items_start()
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_sm()
-                                        .flex_shrink_0()
-                                        .child(format!("{}:", key)),
-                                )
-                                .child(
-                                    // Wraps rather than ellipsizing — reading the whole
-                                    // value is the point of looking at headers. min_w_0
-                                    // is load-bearing: a value with no break
-                                    // opportunities (a JWT, a long set-cookie) otherwise
-                                    // has an automatic minimum width of the entire
-                                    // string and blows the row out horizontally.
-                                    div()
-                                        .text_sm()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(value.clone()),
-                                )
-                        })),
+                        .w_full()
+                        .text_sm()
+                        // TextView, not a div list: gpui has no text selection outside
+                        // it and inputs (gpui/src/elements/text.rs exposes no selection
+                        // API at all). Selectable gives the I-beam cursor, click-drag
+                        // selection and the ctrl-c binding.
+                        .child(
+                            TextView::html(
+                                "response-headers",
+                                headers_to_html(&response.headers),
+                                window,
+                                cx,
+                            )
+                            .selectable(true)
+                            .style(TextViewStyle::default().paragraph_gap(rems(0.25))),
+                        )
+                        .context_menu(move |menu, _window, _cx| {
+                            // Only "Copy all headers" -- a "Copy selection" item cannot
+                            // work here: it would have to dispatch TextView's Copy
+                            // action, and by the time the menu is open the TextView no
+                            // longer holds focus, so the dispatch goes nowhere and the
+                            // clipboard keeps whatever ctrl-c last put there. Use ctrl-c
+                            // for the selection.
+                            let all = all_headers.clone();
+                            menu.item(PopupMenuItem::new("Copy all headers").on_click(
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(all.clone()));
+                                },
+                            ))
+                        }),
                 )
+                .into_any_element()
         } else {
             v_flex()
                 .id("response-headers-empty")
                 .flex_1()
                 .child(v_flex().p_2().child("No headers"))
+                .into_any_element()
         }
     }
 }
 
 impl Render for ResponseViewer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Built before `theme` borrows cx immutably -- TextView needs &mut App.
+        // Only while the tab is showing, so the HTML is not parsed for nothing.
+        let headers_el = (self.active_tab == 1 && self.response.is_some())
+            .then(|| self.render_headers(window, cx));
         let theme = cx.theme();
 
         div()
@@ -315,6 +369,12 @@ impl Render for ResponseViewer {
                         .flex_col()
                         .gap_2()
                         .flex_1()
+                        // Load-bearing: a flex item's min-height defaults to auto, i.e.
+                        // its content height, so without this the container grows to fit
+                        // the header list and the scroller below it is never bounded --
+                        // overflow_scroll then has nothing to overflow and the list
+                        // cannot scroll however long it gets.
+                        .min_h_0()
                         .p_4()
                         .w_full()
                         .child(
@@ -447,7 +507,7 @@ impl Render for ResponseViewer {
                                     .min_h_0() // Let the list shrink so its overflow_scroll engages
                                     .w_full()
                                     .overflow_hidden()
-                                    .child(self.render_headers(cx))
+                                    .children(headers_el)
                                     .vertical_scrollbar(&self.headers_scroll_handle),
                             )
                         }),
@@ -475,6 +535,8 @@ impl Render for ResponseViewer {
 mod tests {
     // NOT `use super::*`: that would pull in `gpui::*`, whose `test` attribute
     // macro shadows the standard `#[test]`.
+    use super::headers_to_html;
+    use super::headers_to_text;
     use super::image_format_for_content_type;
     use gpui::ImageFormat;
 
@@ -505,5 +567,90 @@ mod tests {
         assert_eq!(image_format_for_content_type("image/x-exotic"), None);
         assert_eq!(image_format_for_content_type(""), None);
         assert_eq!(image_format_for_content_type("text/html"), None);
+    }
+
+    // ===== headers_to_text ("Copy all") =====
+
+    fn hs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn joins_headers_as_key_colon_value_lines() {
+        assert_eq!(
+            headers_to_text(&hs(&[("content-type", "text/html"), ("server", "nginx")])),
+            "content-type: text/html\nserver: nginx"
+        );
+    }
+
+    #[test]
+    fn no_trailing_newline() {
+        let out = headers_to_text(&hs(&[("a", "1"), ("b", "2")]));
+        assert!(!out.ends_with('\n'), "got {out:?}");
+    }
+
+    #[test]
+    fn empty_headers_give_empty_string() {
+        assert_eq!(headers_to_text(&[]), "");
+    }
+
+    #[test]
+    fn single_header_has_no_newline() {
+        assert_eq!(headers_to_text(&hs(&[("date", "Mon, 20 Jul 2026")])), "date: Mon, 20 Jul 2026");
+    }
+
+    #[test]
+    fn preserves_duplicate_keys_and_order() {
+        // set-cookie legitimately repeats; collapsing it would lose data.
+        assert_eq!(
+            headers_to_text(&hs(&[("set-cookie", "a=1"), ("set-cookie", "b=2")])),
+            "set-cookie: a=1\nset-cookie: b=2"
+        );
+    }
+
+    #[test]
+    fn keeps_empty_values() {
+        assert_eq!(headers_to_text(&hs(&[("x-empty", "")])), "x-empty: ");
+    }
+
+    // ===== headers_to_html (what TextView renders) =====
+
+    #[test]
+    fn one_bold_key_paragraph_per_header() {
+        assert_eq!(
+            headers_to_html(&hs(&[("content-type", "text/html"), ("server", "nginx")])),
+            "<p><b>content-type:</b> text/html</p><p><b>server:</b> nginx</p>"
+        );
+    }
+
+    #[test]
+    fn escapes_ampersands_in_values() {
+        // Every URL-bearing header carries these; unescaped they vanish as markup.
+        assert_eq!(
+            headers_to_html(&hs(&[("location", "/a?x=1&y=2")])),
+            "<p><b>location:</b> /a?x=1&amp;y=2</p>"
+        );
+    }
+
+    #[test]
+    fn escapes_angle_brackets_in_values() {
+        // Link and Report-To headers really do contain these.
+        assert_eq!(
+            headers_to_html(&hs(&[("link", "<https://a/b>; rel=preload")])),
+            "<p><b>link:</b> &lt;https://a/b&gt;; rel=preload</p>"
+        );
+    }
+
+    #[test]
+    fn escapes_keys_too() {
+        assert_eq!(
+            headers_to_html(&hs(&[("x<evil>", "v")])),
+            "<p><b>x&lt;evil&gt;:</b> v</p>"
+        );
+    }
+
+    #[test]
+    fn empty_headers_give_empty_html() {
+        assert_eq!(headers_to_html(&[]), "");
     }
 }

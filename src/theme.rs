@@ -92,7 +92,11 @@ pub fn apply_theme(cx: &mut App) {
     theme.caret = c(PRIMARY);
     theme.accent = c(WASH);
     theme.accent_foreground = c(FOREGROUND);
-    theme.selection = c(WASH);
+    // Semi-transparent on purpose. gpui-component's TextView paints the selection
+    // quad AFTER the text (text/inline.rs: styled_text.paint() then
+    // paint_selection()), so an opaque colour covers the selected text completely
+    // — you select a header value and it vanishes. Alpha lets it show through.
+    theme.selection = c(WASH).alpha(0.55);
 
     // Lists (history rows)
     theme.list = c(SIDEBAR);
