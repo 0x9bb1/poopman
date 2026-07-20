@@ -27,6 +27,7 @@ pub struct HistoryPanel {
     selected_id: Option<i64>,
     search: Entity<InputState>,
     query: String,
+    list_scroll_handle: ScrollHandle,
 }
 
 impl HistoryPanel {
@@ -43,6 +44,7 @@ impl HistoryPanel {
             selected_id: None,
             search,
             query: String::new(),
+            list_scroll_handle: ScrollHandle::new(),
         }
     }
 
@@ -99,6 +101,84 @@ impl HistoryPanel {
         self.search
             .update(cx, |state, cx| state.set_value("", window, cx));
         cx.notify();
+    }
+
+    /// Render one history row. Split out of `render` so the list body stays
+    /// shallow enough for rustfmt to format it.
+    fn render_item(&self, item: &HistoryItem, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let item_id = item.id;
+        let is_selected = self.selected_id == Some(item_id);
+        let verb = item.request.method.as_str();
+        let verb_color = crate::theme::method_color(item.request.method, theme);
+        let url = item.request.url.clone();
+        let time = crate::format::format_relative_time(&item.timestamp, chrono::Utc::now());
+        let item_clone = item.clone();
+
+        h_flex()
+            .id(("history-item", item_id as u64))
+            .gap_2()
+            .items_start()
+            .w_full()
+            .px_2p5()
+            .py_2()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(if is_selected {
+                theme.list_active_border
+            } else {
+                gpui::transparent_black()
+            })
+            .bg(if is_selected {
+                theme.list_active
+            } else {
+                gpui::transparent_black()
+            })
+            .cursor_pointer()
+            .hover(|s| {
+                s.bg(if is_selected {
+                    theme.list_active
+                } else {
+                    theme.list_hover
+                })
+            })
+            .on_click(
+                cx.listener(move |this, _event: &gpui::ClickEvent, window, cx| {
+                    this.on_item_click(&item_clone, window, cx);
+                }),
+            )
+            .child(
+                // small mono method label, no filled pill
+                div()
+                    .flex_shrink_0()
+                    .w(px(34.))
+                    .text_right()
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(verb_color)
+                    .child(verb),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .overflow_x_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(url),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(time),
+                    ),
+            )
     }
 }
 
@@ -166,83 +246,27 @@ impl Render for HistoryPanel {
             })
             .when(!self.history.is_empty(), |this| {
                 this.child(
-                    // List - use size_full to fill available space
-                    v_flex()
-                        .size_full()
-                        .gap_0p5()
-                        .px_2()
-                        .py_1()
-                        .children(self.history.iter().map(|item| {
-                            let item_id = item.id;
-                            let is_selected = self.selected_id == Some(item_id);
-                            let verb = item.request.method.as_str();
-                            let verb_color = crate::theme::method_color(item.request.method, theme);
-                            let url = item.request.url.clone();
-                            let time = crate::format::format_relative_time(
-                                &item.timestamp,
-                                chrono::Utc::now(),
-                            );
-                            let item_clone = item.clone();
-
-                            h_flex()
-                                .id(("history-item", item_id as u64))
-                                .gap_2()
-                                .items_start()
+                    // Viewport: bounded so the scroller inside it can overflow.
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0() // Let the list shrink so its overflow_scroll engages
+                        .w_full()
+                        .overflow_hidden()
+                        .child(
+                            v_flex()
+                                .id("history-list-scroll")
+                                .flex_1()
                                 .w_full()
-                                .px_2p5()
-                                .py_2()
-                                .rounded(theme.radius_lg)
-                                .border_1()
-                                .border_color(if is_selected {
-                                    theme.list_active_border
-                                } else {
-                                    gpui::transparent_black()
-                                })
-                                .bg(if is_selected {
-                                    theme.list_active
-                                } else {
-                                    gpui::transparent_black()
-                                })
-                                .cursor_pointer()
-                                .hover(|s| s.bg(if is_selected { theme.list_active } else { theme.list_hover }))
-                                .on_click(cx.listener(move |this, _event: &gpui::ClickEvent, window, cx| {
-                                    this.on_item_click(&item_clone, window, cx);
-                                }))
-                                .child(
-                                    // small mono method label, no filled pill
-                                    div()
-                                        .flex_shrink_0()
-                                        .w(px(34.))
-                                        .text_right()
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(verb_color)
-                                        .child(verb),
-                                )
-                                .child(
-                                    v_flex()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .gap_0p5()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme.foreground)
-                                                .overflow_x_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .child(url),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(time),
-                                        ),
-                                )
-                        }))
-                        .overflow_y_scrollbar()
-                        .size_full(),
+                                .min_h_0()
+                                .track_scroll(&self.list_scroll_handle)
+                                .overflow_scroll()
+                                .child(v_flex().gap_0p5().px_2().py_1().children(
+                                    self.history.iter().map(|item| self.render_item(item, cx)),
+                                )),
+                        )
+                        .vertical_scrollbar(&self.list_scroll_handle),
                 )
             })
     }
