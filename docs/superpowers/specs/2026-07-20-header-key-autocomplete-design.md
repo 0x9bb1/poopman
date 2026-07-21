@@ -155,16 +155,32 @@ entry as an accepted completion. Manual typing advances one character at a time,
 it cannot false-positive; pasting a complete header name can, and jumping focus is
 the desired behaviour there anyway. To be implemented after the Tier 0 gate passes.
 
-## Progress
+## Progress — complete
 
 - **Tier 1: passed, with evidence.** `cargo test` on Windows reports 144 passed /
   0 failed, including the 10 new assertions. `cargo clippy --all-targets` recompiles
   clean with no warning lines, exit 0.
-- **Tier 0 and Tier 2: not yet run.** WSL2 cannot type into the GUI. The Windows
-  binary builds and launches without regression (headers list renders, six predefined
-  rows present), but that screenshot proves startup only — it says nothing about
-  whether the menu opens.
-- **Focus jump: not implemented**, per the sequencing above.
+- **Tier 0: passed, user-verified** on the release build. The menu opens on the first
+  character, sits below the input, is not clipped when the list scrolls, Enter/Escape
+  and arrow navigation all work, and Enter with the menu open does not send.
+- **Tier 2: passed, user-verified.** `Au` → `Authorization` with canonical casing;
+  focus lands on the value field; the trailing blank row is still appended; the six
+  predefined rows stay disabled with no menu; custom rows loaded from history and
+  restored after a tab switch both autocomplete; a name absent from the table can be
+  typed and sent; Escape closes the menu without sending.
+- **Focus jump: implemented and verified.**
+
+### One bug the spike gate caught
+
+The gate did its job. First user test: the menu opened but the Down arrow did not move
+the highlight. Root cause was in the library, not our code: gpui-component registers
+the up/down action handlers only for multi-line inputs
+(`input.rs` `.when(state.mode.is_multi_line())`), so on a single-line field the arrow
+actions dispatched with no listener and never reached the menu — while Enter/Escape
+worked because their handlers are unconditional. Fixed by forwarding `MoveUp`/`MoveDown`
+from the wrapping div to the library's public `handle_action_for_context_menu`. Had we
+skipped the gate and shipped on the strength of "it compiles and the menu renders,"
+this would have gone out broken. See [[gpui-focus-dispatch-gotchas]].
 
 Commits live on `feat/header-key-autocomplete`.
 
