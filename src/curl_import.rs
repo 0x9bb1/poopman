@@ -172,6 +172,15 @@ pub fn parse_curl(input: &str) -> Option<RequestData> {
                 };
                 form_rows.push(FormDataRow { enabled: true, key: k.to_string(), value });
             }
+        } else if matches_flag(&tok, "-b", "--cookie") {
+            if let Some(v) = flag_value(&tokens, &mut i, "-b", "--cookie") {
+                // curl reads the -b argument as cookie data when it contains '=',
+                // otherwise as a cookie-jar filename (which we cannot load).
+                // Browser "Copy as cURL" always emits cookie data as a -b string.
+                if v.contains('=') {
+                    headers.push(("Cookie".to_string(), v));
+                }
+            }
         } else if matches_flag(&tok, "-u", "--user") {
             if let Some(v) = flag_value(&tokens, &mut i, "-u", "--user") {
                 headers.push(("Authorization".to_string(), format!("Basic {}", BASE64.encode(v))));
@@ -365,6 +374,64 @@ mod tests {
         let flat = "curl -X POST \\ -H 'A: 1' \\ https://example.com";
         let r = parse(flat);
         assert_eq!(r.method, HttpMethod::POST);
+        assert_eq!(r.url, "https://example.com");
+    }
+
+    #[test]
+    fn cookie_as_header_is_kept() {
+        // Cookie passed the -H way still works (regression guard).
+        let r = parse("curl 'https://example.com/' -H 'Cookie: sid=abc123; keepLogin=true'");
+        assert_eq!(
+            r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("cookie")),
+            Some(&("Cookie".to_string(), "sid=abc123; keepLogin=true".to_string()))
+        );
+    }
+
+    #[test]
+    fn cookie_flag_becomes_cookie_header() {
+        // Browser DevTools "Copy as cURL (bash)" emits cookies via -b, not -H.
+        // The $ characters mirror real GA cookie values inside single quotes.
+        let value = "sid=abc123; _ga=GA1.1.x$o2$g1$t123; keepLogin=true";
+        let r = parse(&format!("curl 'https://example.com/' -b '{value}'"));
+        assert_eq!(
+            r.headers,
+            vec![("Cookie".to_string(), value.to_string())],
+            "parsed headers = {:?}",
+            r.headers
+        );
+    }
+
+    #[test]
+    fn cookie_long_and_attached_forms() {
+        // --cookie=..., --cookie <v>, and attached -b<v> all land as a Cookie header.
+        assert_eq!(
+            parse("curl --cookie 'a=1' https://example.com").headers,
+            vec![("Cookie".to_string(), "a=1".to_string())]
+        );
+        assert_eq!(
+            parse("curl --cookie=a=1 https://example.com").headers,
+            vec![("Cookie".to_string(), "a=1".to_string())]
+        );
+        assert_eq!(
+            parse("curl -ba=1 https://example.com").headers,
+            vec![("Cookie".to_string(), "a=1".to_string())]
+        );
+    }
+
+    #[test]
+    fn cookie_flag_before_url_does_not_hijack_the_url() {
+        // -b consumes its own value, so the cookie string is not mistaken for the URL.
+        let r = parse("curl -b 'sid=abc; k=v' https://example.com/api");
+        assert_eq!(r.url, "https://example.com/api");
+        assert_eq!(r.headers, vec![("Cookie".to_string(), "sid=abc; k=v".to_string())]);
+    }
+
+    #[test]
+    fn cookie_jar_filename_is_not_treated_as_data() {
+        // A -b argument without '=' is a cookie-jar filename in curl; we can't load
+        // it, so it must not become a bogus Cookie header.
+        let r = parse("curl -b cookies.txt https://example.com");
+        assert!(r.headers.is_empty(), "headers = {:?}", r.headers);
         assert_eq!(r.url, "https://example.com");
     }
 
