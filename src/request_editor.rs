@@ -60,6 +60,10 @@ struct HeaderRow {
     value_input: Entity<InputState>,
     header_type: HeaderType,
     predefined: Option<PredefinedHeader>,
+    /// Character count of the key field at the previous change, used to tell an
+    /// accepted completion (a multi-character replacement) from manual typing (one
+    /// character at a time). See `maybe_advance_after_completion`.
+    last_key_len: usize,
 }
 
 /// Query parameter row with key-value inputs and enabled checkbox
@@ -185,6 +189,7 @@ impl RequestEditor {
                 value_input,
                 header_type,
                 predefined: Some(predefined),
+                last_key_len: predefined.name().chars().count(),
             });
         }
     }
@@ -262,6 +267,7 @@ impl RequestEditor {
                     value_input,
                     header_type: HeaderType::Custom,
                     predefined: None,
+                    last_key_len: key.chars().count(),
                 });
             }
         }
@@ -438,13 +444,16 @@ impl RequestEditor {
                 }),
                 header_type: header_state.header_type,
                 predefined: header_state.predefined,
+                last_key_len: header_state.key.chars().count(),
             };
 
             // Subscribe to key input change if it's a custom header
             if matches!(header_state.header_type, HeaderType::Custom) {
                 let key_input = header_row.key_input.clone();
                 let key_input_for_closure = key_input.clone();
-                let sub = cx.subscribe_in(&key_input, window, move |this, _, _event: &InputEvent, window, cx| {
+                let sub = cx.subscribe_in(&key_input, window, move |this, emitter, _event: &InputEvent, window, cx| {
+                    this.maybe_advance_after_completion(emitter, window, cx);
+
                     if let Some(last) = this.headers.last() {
                         let has_key = !last.key_input.read(cx).value().is_empty();
                         if has_key
@@ -470,6 +479,40 @@ impl RequestEditor {
         cx.notify();
     }
 
+    /// Detect an accepted header-name completion and move focus to the value field.
+    ///
+    /// The library exposes no "completion accepted" hook, so we infer one: a change
+    /// that grows the key by more than one character and leaves it exactly equal to a
+    /// standard header name is a menu insertion (or a paste of a full name), never
+    /// manual typing, which advances one character at a time. This fires after the
+    /// library re-focuses the key input (both run off the same Change), so focusing
+    /// the value input here wins.
+    fn maybe_advance_after_completion(
+        &mut self,
+        changed: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed_id = Entity::entity_id(changed);
+        let Some(idx) = self
+            .headers
+            .iter()
+            .position(|h| Entity::entity_id(&h.key_input) == changed_id)
+        else {
+            return;
+        };
+
+        let value = self.headers[idx].key_input.read(cx).value().to_string();
+        let cur_len = value.chars().count();
+        let grew_by_more_than_one = cur_len > self.headers[idx].last_key_len + 1;
+        self.headers[idx].last_key_len = cur_len;
+
+        if grew_by_more_than_one && crate::header_names::HEADER_NAMES.contains(&value.as_str()) {
+            let value_input = self.headers[idx].value_input.clone();
+            value_input.update(cx, |input, cx| input.focus(window, cx));
+        }
+    }
+
     fn add_custom_header_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let new_row = HeaderRow {
             enabled: true,
@@ -477,12 +520,15 @@ impl RequestEditor {
             value_input: cx.new(|cx| InputState::new(window, cx).placeholder("Value")),
             header_type: HeaderType::Custom,
             predefined: None,
+            last_key_len: 0,
         };
 
         // Subscribe to the key input change
         let key_input = new_row.key_input.clone();
         let key_input_for_closure = key_input.clone();
-        let sub = cx.subscribe_in(&key_input, window, move |this, _, _event: &InputEvent, window, cx| {
+        let sub = cx.subscribe_in(&key_input, window, move |this, emitter, _event: &InputEvent, window, cx| {
+            this.maybe_advance_after_completion(emitter, window, cx);
+
             // Check if this was the last row and it now has content
             if let Some(last) = this.headers.last() {
                 let has_key = !last.key_input.read(cx).value().is_empty();
