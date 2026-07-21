@@ -113,6 +113,15 @@ fn main() {
         gpui_component::init(cx);
         crate::theme::apply_theme(cx);
 
+        // macOS routes Cmd+Q through the application menu bar, so a keybinding
+        // alone is not enough: without a menu item bound to this action the
+        // keystroke has nowhere to dispatch and the app cannot be quit. Register
+        // the handler (which also makes the menu item enabled — gpui gates that on
+        // the action being available), bind the key so the menu item carries the
+        // Cmd+Q equivalent, and install the menu below. `set_menus` is a harmless
+        // no-op on Windows/Linux, which quit via the window's close button.
+        cx.on_action(|_: &crate::app::Quit, cx| cx.quit());
+
         // Late binding on purpose: gpui gives later-added bindings precedence,
         // so the "Input"-context ctrl-enter shadows gpui-component's own
         // secondary-enter input binding (its PressEnter{secondary:true} event
@@ -125,7 +134,13 @@ fn main() {
             KeyBinding::new("ctrl-tab", crate::app::NextTab, None),
             KeyBinding::new("ctrl-shift-tab", crate::app::PrevTab, None),
             KeyBinding::new("ctrl-l", crate::app::FocusUrl, None),
+            KeyBinding::new("cmd-q", crate::app::Quit, None),
         ]);
+
+        cx.set_menus(vec![Menu {
+            name: "Poopman".into(),
+            items: vec![MenuItem::action("Quit Poopman", crate::app::Quit)],
+        }]);
 
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
