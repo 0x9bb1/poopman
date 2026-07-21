@@ -1269,12 +1269,38 @@ impl Render for RequestEditor {
                                                             ))
                                                     )
                                                 )
-                                                .child(
-                                                    // Key input - disabled for predefined headers
+                                                .child({
+                                                    // Key input - disabled for predefined headers.
+                                                    //
+                                                    // gpui-component registers the up/down action
+                                                    // handlers only for multi-line inputs (input.rs
+                                                    // `.when(is_multi_line)`), so on a single-line
+                                                    // field the arrow keys never reach the completion
+                                                    // menu and the highlight cannot move. Enter/Escape
+                                                    // work because their handlers are unconditional.
+                                                    // We bridge the two arrow actions to the menu via
+                                                    // the public `handle_action_for_context_menu`; the
+                                                    // single-line Input ignores them, so they bubble
+                                                    // up to this wrapper.
+                                                    let key_input = header.key_input.clone();
                                                     div()
                                                         .flex_1()
-                                                        .child(Input::new(&header.key_input).disabled(is_predefined)),
-                                                )
+                                                        .when(is_custom, |this| {
+                                                            let down_input = key_input.clone();
+                                                            let up_input = key_input.clone();
+                                                            this.on_action(move |_: &MoveDown, window, cx| {
+                                                                down_input.update(cx, |state, cx| {
+                                                                    state.handle_action_for_context_menu(Box::new(MoveDown), window, cx);
+                                                                });
+                                                            })
+                                                            .on_action(move |_: &MoveUp, window, cx| {
+                                                                up_input.update(cx, |state, cx| {
+                                                                    state.handle_action_for_context_menu(Box::new(MoveUp), window, cx);
+                                                                });
+                                                            })
+                                                        })
+                                                        .child(Input::new(&header.key_input).disabled(is_predefined))
+                                                })
                                                 .child(
                                                     // Value input - disabled for auto-calculated headers and Content-Type
                                                     // Delete button embedded as suffix for custom headers
