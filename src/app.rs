@@ -482,11 +482,24 @@ impl PoopmanApp {
         // Save current tab state
         self.save_current_tab_state(cx);
 
-        // Create new tab from history
-        let new_tab = RequestTab::from_history(self.next_tab_id, item);
-        self.next_tab_id += 1;
-        self.request_tabs.push(new_tab.clone());
-        self.active_tab_index = self.request_tabs.len() - 1;
+        // If the active tab is a pristine scratch tab (e.g. the default tab at
+        // startup), fill it in place instead of spawning a sibling.
+        let new_tab = if self
+            .request_tabs
+            .get(self.active_tab_index)
+            .is_some_and(RequestTab::is_blank)
+        {
+            let id = self.request_tabs[self.active_tab_index].id;
+            let tab = RequestTab::from_history(id, item);
+            self.request_tabs[self.active_tab_index] = tab.clone();
+            tab
+        } else {
+            let tab = RequestTab::from_history(self.next_tab_id, item);
+            self.next_tab_id += 1;
+            self.request_tabs.push(tab.clone());
+            self.active_tab_index = self.request_tabs.len() - 1;
+            tab
+        };
 
         // Load into editor
         self.request_editor.update(cx, |editor, cx| {
