@@ -8,6 +8,7 @@ use gpui_component::{
 };
 use gpui_component::input::InputEvent;
 
+use crate::auth_editor::AuthEditor;
 use crate::body_editor::{BodyEditor, BodyTypeChanged};
 use crate::header_completion::HeaderCompletionProvider;
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
@@ -78,6 +79,7 @@ pub struct RequestEditor {
     url_input: Entity<InputState>,
     method_select: Entity<SelectState<Vec<&'static str>>>,
     body_editor: Entity<BodyEditor>,
+    auth_editor: Entity<AuthEditor>,
     headers: Vec<HeaderRow>,
     headers_scroll_handle: ScrollHandle,
     params: Vec<ParamRow>,
@@ -111,6 +113,7 @@ impl RequestEditor {
         });
 
         let body_editor = cx.new(|cx| BodyEditor::new(window, cx));
+        let auth_editor = cx.new(|cx| AuthEditor::new(window, cx));
 
         // Subscribe to body type changes to auto-update Content-Type header
         let body_sub = cx.subscribe_in(&body_editor, window, |this: &mut RequestEditor, _, event: &BodyTypeChanged, window, cx| {
@@ -121,6 +124,7 @@ impl RequestEditor {
             url_input: url_input.clone(),
             method_select,
             body_editor,
+            auth_editor,
             headers: vec![],
             headers_scroll_handle: ScrollHandle::new(),
             params: vec![],
@@ -218,6 +222,11 @@ impl RequestEditor {
         // Set body via BodyEditor
         self.body_editor.update(cx, |editor, cx| {
             editor.set_body(&request.body, window, cx);
+        });
+
+        // Set auth via AuthEditor
+        self.auth_editor.update(cx, |editor, cx| {
+            editor.set_auth(&request.auth, window, cx);
         });
 
         // Set headers - reinitialize with predefined headers
@@ -331,7 +340,7 @@ impl RequestEditor {
             url,
             headers,
             body,
-            auth: crate::types::AuthConfig::default(),
+            auth: self.auth_editor.read(cx).get_auth(cx),
         }
     }
 
@@ -1053,12 +1062,17 @@ impl RequestEditor {
             crate::types::BodyType::None => crate::types::BodyType::None,
         };
 
+        // Resolve auth {{vars}} and compute the wire header. The saved request
+        // keeps manual headers + the auth config; only the wire gets the merged
+        // header set (auth wins over a manual same-name header).
+        let resolved_auth = crate::variables::substitute_auth(&self.auth_editor.read(cx).get_auth(cx), env);
+
         let request = RequestData {
             method,
             url: url.clone(),
             headers: headers.clone(),
             body: body.clone(),
-            auth: crate::types::AuthConfig::default(),
+            auth: resolved_auth.clone(),
         };
 
         self.send_generation = self.send_generation.wrapping_add(1);
@@ -1071,7 +1085,8 @@ impl RequestEditor {
         // abort handle; the gpui task below only awaits the outcome.
         let start = std::time::Instant::now();
         let client = crate::http_client::HttpClient::new();
-        let inflight = client.start_send(method, url, headers, body);
+        let wire_headers = crate::types::effective_wire_headers(&headers, &resolved_auth);
+        let inflight = client.start_send(method, url, wire_headers, body);
         self.abort_handle = Some(inflight.abort_handle());
         cx.notify();
 
@@ -1243,7 +1258,7 @@ impl Render for RequestEditor {
                                 )
                                 .child(
                                     crate::ui::segment_pill(theme, self.active_tab == 1)
-                                        .id("tab-params")
+                                        .id("tab-auth")
                                         .when(self.active_tab != 1, |s| {
                                             s.hover(|s| s.text_color(theme.foreground))
                                         })
@@ -1253,17 +1268,31 @@ impl Render for RequestEditor {
                                                 cx.notify();
                                             },
                                         ))
-                                        .child("Params"),
+                                        .child("Auth"),
                                 )
                                 .child(
                                     crate::ui::segment_pill(theme, self.active_tab == 2)
-                                        .id("tab-body")
+                                        .id("tab-params")
                                         .when(self.active_tab != 2, |s| {
                                             s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
                                                 this.active_tab = 2;
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child("Params"),
+                                )
+                                .child(
+                                    crate::ui::segment_pill(theme, self.active_tab == 3)
+                                        .id("tab-body")
+                                        .when(self.active_tab != 3, |s| {
+                                            s.hover(|s| s.text_color(theme.foreground))
+                                        })
+                                        .on_click(cx.listener(
+                                            |this, _event: &gpui::ClickEvent, _window, cx| {
+                                                this.active_tab = 3;
                                                 cx.notify();
                                             },
                                         ))
@@ -1382,6 +1411,18 @@ impl Render for RequestEditor {
                         })
                         .when(self.active_tab == 1, |this| {
                             this.child(
+                                div()
+                                    .p_2()
+                                    .w_full()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .min_h_0()
+                                    .child(self.auth_editor.clone()),
+                            )
+                        })
+                        .when(self.active_tab == 2, |this| {
+                            this.child(
                                 // Viewport: owns the size constraint so the list can
                                 // shrink and actually scroll; also hosts the scrollbar,
                                 // which must be the scroller's sibling rather than its
@@ -1453,7 +1494,7 @@ impl Render for RequestEditor {
                                     .vertical_scrollbar(&self.params_scroll_handle),
                             )
                         })
-                        .when(self.active_tab == 2, |this| {
+                        .when(self.active_tab == 3, |this| {
                             // Body tab - render BodyEditor component
                             this.child(
                                 div()
