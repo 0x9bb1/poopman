@@ -28,6 +28,7 @@ impl RequestTab {
                 url: String::new(),
                 headers: vec![],
                 body: BodyType::default(),
+                auth: crate::types::AuthConfig::default(),
             },
             response: None,
             params_state: None,
@@ -107,6 +108,7 @@ mod tests {
             url: String::new(),
             headers: vec![],
             body: BodyType::default(),
+            auth: crate::types::AuthConfig::default(),
         }
     }
 

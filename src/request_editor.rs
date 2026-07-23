@@ -331,6 +331,7 @@ impl RequestEditor {
             url,
             headers,
             body,
+            auth: crate::types::AuthConfig::default(),
         }
     }
 
@@ -1057,6 +1058,7 @@ impl RequestEditor {
             url: url.clone(),
             headers: headers.clone(),
             body: body.clone(),
+            auth: crate::types::AuthConfig::default(),
         };
 
         self.send_generation = self.send_generation.wrapping_add(1);

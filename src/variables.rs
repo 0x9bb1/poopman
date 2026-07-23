@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::types::{BodyType, FormDataRow, FormDataValue, RequestData};
+use crate::types::{AuthConfig, BodyType, FormDataRow, FormDataValue, RequestData};
 
 /// Replace `{{key}}` / `{{ key }}` (key trimmed) with values from `vars`.
 ///
@@ -36,6 +36,18 @@ pub fn substitute(input: &str, vars: &HashMap<String, String>) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Substitute `{{vars}}` in every auth field. `auth_type` is preserved as-is.
+pub fn substitute_auth(auth: &AuthConfig, vars: &HashMap<String, String>) -> AuthConfig {
+    AuthConfig {
+        auth_type: auth.auth_type,
+        bearer_token: substitute(&auth.bearer_token, vars),
+        basic_username: substitute(&auth.basic_username, vars),
+        basic_password: substitute(&auth.basic_password, vars),
+        api_key_name: substitute(&auth.api_key_name, vars),
+        api_key_value: substitute(&auth.api_key_value, vars),
+    }
 }
 
 /// Substitute `{{vars}}` throughout a request — URL, header keys+values, and
@@ -73,6 +85,7 @@ pub fn substitute_request(req: &RequestData, vars: &HashMap<String, String>) -> 
         url: substitute(&req.url, vars),
         headers,
         body,
+        auth: substitute_auth(&req.auth, vars),
     }
 }
 
@@ -137,6 +150,7 @@ mod tests {
                 content: "{\"env\": \"{{env}}\"}".to_string(),
                 subtype: RawSubtype::Json,
             },
+            auth: crate::types::AuthConfig::default(),
         };
         let v = vars(&[("base_url", "https://api.test"), ("token", "abc"), ("env", "prod")]);
         let out = super::substitute_request(&req, &v);
@@ -146,5 +160,43 @@ mod tests {
             BodyType::Raw { content, .. } => assert_eq!(content, "{\"env\": \"prod\"}"),
             _ => panic!("expected raw body"),
         }
+    }
+
+    #[test]
+    fn substitute_auth_resolves_all_fields() {
+        use crate::types::{AuthConfig, AuthType};
+        let auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "{{token}}".into(),
+            basic_username: "{{user}}".into(),
+            basic_password: "{{pass}}".into(),
+            api_key_name: "{{keyname}}".into(),
+            api_key_value: "{{keyval}}".into(),
+        };
+        let v = vars(&[
+            ("token", "abc"), ("user", "u"), ("pass", "p"),
+            ("keyname", "X-Key"), ("keyval", "kv"),
+        ]);
+        let out = super::substitute_auth(&auth, &v);
+        assert_eq!(out.auth_type, AuthType::Bearer);
+        assert_eq!(out.bearer_token, "abc");
+        assert_eq!(out.basic_username, "u");
+        assert_eq!(out.basic_password, "p");
+        assert_eq!(out.api_key_name, "X-Key");
+        assert_eq!(out.api_key_value, "kv");
+    }
+
+    #[test]
+    fn substitute_request_resolves_auth() {
+        use crate::types::{AuthConfig, AuthType, BodyType, HttpMethod, RequestData};
+        let req = RequestData {
+            method: HttpMethod::GET,
+            url: "https://api.test".into(),
+            headers: vec![],
+            body: BodyType::None,
+            auth: AuthConfig { auth_type: AuthType::Bearer, bearer_token: "{{token}}".into(), ..Default::default() },
+        };
+        let out = super::substitute_request(&req, &vars(&[("token", "abc")]));
+        assert_eq!(out.auth.bearer_token, "abc");
     }
 }
