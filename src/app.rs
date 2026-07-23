@@ -102,6 +102,7 @@ impl PoopmanApp {
                         &event.request.url,
                         &request_headers,
                         &event.request.body,
+                        &event.request.auth,
                     ) {
                         log::error!("Failed to save history: {}", e);
                     }

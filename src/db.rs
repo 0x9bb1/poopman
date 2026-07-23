@@ -13,14 +13,15 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
-use crate::types::{BodyType, Environment, EnvVar, HistoryItem, HttpMethod, RequestData};
+use crate::types::{AuthConfig, BodyType, Environment, EnvVar, HistoryItem, HttpMethod, RequestData};
 
 /// A unit of work executed on the database's owning thread.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
-/// Map a `history` row (id, timestamp, method, url, request_headers, request_body)
-/// into a `HistoryItem`. Shared by `load_recent_history` and `search_history` so
-/// the two queries can never drift in how they decode a row.
+/// Map a `history` row (id, timestamp, method, url, request_headers,
+/// request_body, request_auth) into a `HistoryItem`. Shared by
+/// `load_recent_history` and `search_history` so the two queries can never
+/// drift in how they decode a row.
 fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let id: i64 = row.get(0)?;
     let timestamp: String = row.get(1)?;
@@ -28,17 +29,22 @@ fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let url: String = row.get(3)?;
     let request_headers: String = row.get(4)?;
     let request_body: String = row.get(5)?;
+    let request_auth: Option<String> = row.get(6)?;
 
     let headers: Vec<(String, String)> =
         serde_json::from_str(&request_headers).unwrap_or_default();
     let body: BodyType = serde_json::from_str(&request_body).unwrap_or_default();
+    let auth: crate::types::AuthConfig = request_auth
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
 
     let request = RequestData {
         method: HttpMethod::from_str(&method).unwrap_or(HttpMethod::GET),
         url,
         headers,
         body,
-        auth: crate::types::AuthConfig::default(),
+        auth,
     };
     Ok(HistoryItem::new(id, timestamp, request, None))
 }
@@ -139,6 +145,23 @@ impl Database {
                  value TEXT NOT NULL
              );",
         )?;
+        Self::migrate_add_request_auth(conn)?;
+        Ok(())
+    }
+
+    /// Idempotently add the `request_auth` column. SQLite has no
+    /// `ADD COLUMN IF NOT EXISTS`, so check `PRAGMA table_info` first. Old rows
+    /// read back as NULL → `AuthConfig::default()`.
+    fn migrate_add_request_auth(conn: &Connection) -> Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(history)")?;
+        let has_column = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == "request_auth");
+        drop(stmt);
+        if !has_column {
+            conn.execute("ALTER TABLE history ADD COLUMN request_auth TEXT", [])?;
+        }
         Ok(())
     }
 
@@ -155,19 +178,21 @@ impl Database {
         url: &str,
         request_headers: &str,
         request_body: &BodyType,
+        auth: &AuthConfig,
     ) -> Result<i64> {
         let method = method.to_string();
         let url = url.to_string();
         let request_headers = request_headers.to_string();
-        // Serialize body type to JSON before crossing the channel.
+        // Serialize body type + auth to JSON before crossing the channel.
         let body_json = serde_json::to_string(request_body).unwrap_or_default();
+        let auth_json = serde_json::to_string(auth).unwrap_or_default();
 
         self.call(move |conn| {
             let timestamp = chrono::Utc::now().to_rfc3339();
             conn.execute(
-                "INSERT INTO history (timestamp, method, url, request_headers, request_body)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![timestamp, method, url, request_headers, body_json],
+                "INSERT INTO history (timestamp, method, url, request_headers, request_body, request_auth)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![timestamp, method, url, request_headers, body_json, auth_json],
             )?;
             Ok(conn.last_insert_rowid())
         })
@@ -177,7 +202,7 @@ impl Database {
     pub fn load_recent_history(&self, limit: usize) -> Result<Vec<HistoryItem>> {
         self.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, timestamp, method, url, request_headers, request_body
+                "SELECT id, timestamp, method, url, request_headers, request_body, request_auth
                  FROM history
                  ORDER BY timestamp DESC, id DESC
                  LIMIT ?1",
@@ -200,7 +225,7 @@ impl Database {
         let pattern = format!("%{}%", escape_like(query));
         self.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, timestamp, method, url, request_headers, request_body
+                "SELECT id, timestamp, method, url, request_headers, request_body, request_auth
                  FROM history
                  WHERE url LIKE ?1 ESCAPE '\\' OR method LIKE ?1 ESCAPE '\\'
                  ORDER BY timestamp DESC, id DESC
@@ -361,10 +386,57 @@ impl Database {
 mod tests {
     use super::*;
 
+    use crate::types::{AuthConfig, AuthType};
+
     fn mem_db() -> Database {
         let conn = Connection::open_in_memory().unwrap();
         Database::init_schema(&conn).unwrap();
         Database::spawn(conn)
+    }
+
+    #[test]
+    fn migration_adds_request_auth_and_old_rows_default() {
+        // Simulate a pre-feature database: history table WITHOUT request_auth.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 timestamp TEXT NOT NULL, method TEXT NOT NULL, url TEXT NOT NULL,
+                 request_headers TEXT, request_body TEXT,
+                 status_code INTEGER, duration_ms INTEGER,
+                 response_headers TEXT, response_body TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history (timestamp, method, url, request_headers, request_body)
+             VALUES ('t','GET','https://x','[]','null')",
+            [],
+        )
+        .unwrap();
+
+        // Migration is idempotent and adds the column.
+        Database::migrate_add_request_auth(&conn).unwrap();
+        Database::migrate_add_request_auth(&conn).unwrap(); // second run is a no-op
+
+        let db = Database::spawn(conn);
+        let items = db.load_recent_history(10).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].request.auth.auth_type, AuthType::None);
+    }
+
+    #[test]
+    fn history_roundtrips_auth() {
+        let db = mem_db();
+        let auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "abc".into(),
+            ..Default::default()
+        };
+        db.insert_history("GET", "https://x", "[]", &BodyType::None, &auth).unwrap();
+        let items = db.load_recent_history(10).unwrap();
+        assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);
+        assert_eq!(items[0].request.auth.bearer_token, "abc");
     }
 
     #[test]
@@ -403,7 +475,7 @@ mod tests {
     #[test]
     fn history_roundtrip() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/x", "[]", &crate::types::BodyType::None)
+        db.insert_history("GET", "https://api.test/x", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
         let items = db.load_recent_history(10).unwrap();
         assert_eq!(items.len(), 1);
@@ -415,11 +487,11 @@ mod tests {
     #[test]
     fn search_history_matches_url_and_method_newest_first() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None)
+        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
-        db.insert_history("POST", "https://api.test/login", "[]", &crate::types::BodyType::None)
+        db.insert_history("POST", "https://api.test/login", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
-        db.insert_history("DELETE", "https://api.test/orders/1", "[]", &crate::types::BodyType::None)
+        db.insert_history("DELETE", "https://api.test/orders/1", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
 
         // URL substring
@@ -441,11 +513,11 @@ mod tests {
     #[test]
     fn search_history_escapes_wildcards() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/a%b", "[]", &crate::types::BodyType::None)
+        db.insert_history("GET", "https://api.test/a%b", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
-        db.insert_history("GET", "https://api.test/a_b", "[]", &crate::types::BodyType::None)
+        db.insert_history("GET", "https://api.test/a_b", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
-        db.insert_history("GET", "https://api.test/axb", "[]", &crate::types::BodyType::None)
+        db.insert_history("GET", "https://api.test/axb", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
 
         // '%' must be treated literally: matches only the URL with a literal '%'
@@ -463,7 +535,7 @@ mod tests {
     #[test]
     fn search_history_empty_query_matches_all() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None)
+        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
             .unwrap();
         let r = db.search_history("", 10).unwrap();
         assert_eq!(r.len(), 1);
