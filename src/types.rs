@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -204,6 +205,92 @@ impl Default for BodyType {
         BodyType::Raw {
             content: String::new(),
             subtype: RawSubtype::Json,
+        }
+    }
+}
+
+/// Authentication scheme selected in the Auth sub-tab.
+///
+/// Variant names are serialized by name into the history database, so renaming
+/// them would break previously saved requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AuthType {
+    #[default]
+    None,
+    Bearer,
+    Basic,
+    ApiKey,
+}
+
+/// Config-based auth: a flat struct (all fields always present) so switching
+/// type in the UI preserves each type's previously-typed values, matching
+/// Postman. The wire header is *computed* from this — auth is never stored as a
+/// header row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthConfig {
+    pub auth_type: AuthType,
+    pub bearer_token: String,
+    pub basic_username: String,
+    pub basic_password: String,
+    /// Header name for API-Key auth, e.g. "X-API-Key".
+    pub api_key_name: String,
+    pub api_key_value: String,
+}
+
+impl AuthConfig {
+    /// The header this auth would put on the wire, or `None`.
+    ///
+    /// Emitted only when the relevant field(s) are non-empty, so an in-progress
+    /// edit never sends a placeholder header (e.g. a dangling `Bearer `). This
+    /// differs slightly from Postman, which emits once a type is selected.
+    pub fn compute_header(&self) -> Option<(String, String)> {
+        match self.auth_type {
+            AuthType::None => None,
+            AuthType::Bearer => {
+                if self.bearer_token.is_empty() {
+                    None
+                } else {
+                    Some(("Authorization".to_string(), format!("Bearer {}", self.bearer_token)))
+                }
+            }
+            AuthType::Basic => {
+                if self.basic_username.is_empty() && self.basic_password.is_empty() {
+                    None
+                } else {
+                    let encoded = BASE64.encode(format!("{}:{}", self.basic_username, self.basic_password));
+                    Some(("Authorization".to_string(), format!("Basic {}", encoded)))
+                }
+            }
+            AuthType::ApiKey => {
+                if self.api_key_name.is_empty() {
+                    None
+                } else {
+                    Some((self.api_key_name.clone(), self.api_key_value.clone()))
+                }
+            }
+        }
+    }
+}
+
+/// Manual headers with the computed auth header merged in.
+///
+/// Any manual header whose name case-insensitively matches the auth header's
+/// name is removed first (auth wins), then the auth header is appended. When the
+/// auth produces no header, the manual headers are returned unchanged.
+pub fn effective_wire_headers(
+    headers: &[(String, String)],
+    auth: &AuthConfig,
+) -> Vec<(String, String)> {
+    match auth.compute_header() {
+        None => headers.to_vec(),
+        Some((name, value)) => {
+            let mut out: Vec<(String, String)> = headers
+                .iter()
+                .filter(|(k, _)| !k.eq_ignore_ascii_case(&name))
+                .cloned()
+                .collect();
+            out.push((name, value));
+            out
         }
     }
 }
@@ -420,5 +507,107 @@ mod tests {
         // unknown application/* defers to sniff
         assert!(is_text_response(&h("application/weird"), b"readable"));
         assert!(!is_text_response(&h("application/weird"), &[0xff, 0x00]));
+    }
+
+    #[test]
+    fn compute_header_none_and_empty_fields_emit_nothing() {
+        assert_eq!(AuthConfig::default().compute_header(), None);
+        // Bearer with empty token → nothing (don't send a dangling "Bearer ")
+        let a = AuthConfig { auth_type: AuthType::Bearer, ..Default::default() };
+        assert_eq!(a.compute_header(), None);
+        // Basic with both fields empty → nothing
+        let a = AuthConfig { auth_type: AuthType::Basic, ..Default::default() };
+        assert_eq!(a.compute_header(), None);
+        // ApiKey with empty name → nothing
+        let a = AuthConfig { auth_type: AuthType::ApiKey, api_key_value: "v".into(), ..Default::default() };
+        assert_eq!(a.compute_header(), None);
+    }
+
+    #[test]
+    fn compute_header_bearer() {
+        let a = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "t0ken".into(), ..Default::default() };
+        assert_eq!(a.compute_header(), Some(("Authorization".into(), "Bearer t0ken".into())));
+    }
+
+    #[test]
+    fn compute_header_basic_base64() {
+        let a = AuthConfig {
+            auth_type: AuthType::Basic,
+            basic_username: "user".into(),
+            basic_password: "pass".into(),
+            ..Default::default()
+        };
+        // base64("user:pass") == "dXNlcjpwYXNz"
+        assert_eq!(a.compute_header(), Some(("Authorization".into(), "Basic dXNlcjpwYXNz".into())));
+    }
+
+    #[test]
+    fn compute_header_basic_username_only() {
+        let a = AuthConfig { auth_type: AuthType::Basic, basic_username: "user".into(), ..Default::default() };
+        // base64("user:") == "dXNlcjo="
+        assert_eq!(a.compute_header(), Some(("Authorization".into(), "Basic dXNlcjo=".into())));
+    }
+
+    #[test]
+    fn compute_header_api_key_uses_custom_name() {
+        let a = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            api_key_name: "X-API-Key".into(),
+            api_key_value: "secret".into(),
+            ..Default::default()
+        };
+        assert_eq!(a.compute_header(), Some(("X-API-Key".into(), "secret".into())));
+    }
+
+    #[test]
+    fn effective_headers_none_leaves_manual_untouched() {
+        let manual = vec![("Accept".to_string(), "*/*".to_string())];
+        let out = effective_wire_headers(&manual, &AuthConfig::default());
+        assert_eq!(out, manual);
+    }
+
+    #[test]
+    fn effective_headers_appends_auth() {
+        let manual = vec![("Accept".to_string(), "*/*".to_string())];
+        let auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "t".into(), ..Default::default() };
+        let out = effective_wire_headers(&manual, &auth);
+        assert_eq!(
+            out,
+            vec![
+                ("Accept".to_string(), "*/*".to_string()),
+                ("Authorization".to_string(), "Bearer t".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn effective_headers_auth_wins_over_same_name_manual_case_insensitive() {
+        // A manually-typed "authorization" is dropped in favor of the computed one.
+        let manual = vec![
+            ("Accept".to_string(), "*/*".to_string()),
+            ("authorization".to_string(), "Bearer OLD".to_string()),
+        ];
+        let auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "NEW".into(), ..Default::default() };
+        let out = effective_wire_headers(&manual, &auth);
+        assert_eq!(
+            out,
+            vec![
+                ("Accept".to_string(), "*/*".to_string()),
+                ("Authorization".to_string(), "Bearer NEW".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn effective_headers_api_key_custom_name_dedupes() {
+        let manual = vec![("X-API-Key".to_string(), "old".to_string())];
+        let auth = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            api_key_name: "X-API-Key".into(),
+            api_key_value: "new".into(),
+            ..Default::default()
+        };
+        let out = effective_wire_headers(&manual, &auth);
+        assert_eq!(out, vec![("X-API-Key".to_string(), "new".to_string())]);
     }
 }
