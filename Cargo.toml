@@ -4,7 +4,7 @@ name = "poopman"
 description = "A Postman-like API client built with GPUI Component."
 license = "Apache-2.0"
 publish = false
-version = "0.3.3"
+version = "0.4.0"
 
 [dependencies]
 anyhow = "1"
@@ -39,7 +39,7 @@ winresource = "0.1"
 name = "Poopman"
 identifier = "com.poopman.app"
 icon = ["assets/icons/logo.ico"]
-version = "0.3.3"
+version = "0.4.0"
 copyright = "Copyright (c) 2024"
 category = "Utility"
 short_description = "A Postman-like API client"
