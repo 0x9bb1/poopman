@@ -169,6 +169,13 @@ fn file_basename(path: &str) -> &str {
 
 /// Top-level dispatch: generate source code for `target` from `req`.
 pub fn generate(target: CodeTarget, req: &RequestData) -> String {
+    // Fold the computed auth header into the header list so every target emits it
+    // as a normal header. `effective_wire_headers` is the single source of truth,
+    // shared with the send path. When auth is None this is a no-op copy.
+    let mut merged = req.clone();
+    merged.headers = crate::types::effective_wire_headers(&req.headers, &req.auth);
+    let req = &merged;
+
     match target {
         CodeTarget::Curl => gen_curl(req),
         CodeTarget::RustReqwest => gen_rust(req),
@@ -590,6 +597,48 @@ mod tests {
             ]),
             auth: crate::types::AuthConfig::default(),
         }
+    }
+
+    #[test]
+    fn code_gen_emits_bearer_auth_header() {
+        use crate::types::{AuthConfig, AuthType};
+        let mut req = get_req();
+        req.auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "t0ken".into(), ..Default::default() };
+        assert!(generate(CodeTarget::Curl, &req).contains("--header 'Authorization: Bearer t0ken'"));
+        assert!(generate(CodeTarget::PythonRequests, &req).contains("\"Authorization\": \"Bearer t0ken\""));
+        assert!(generate(CodeTarget::GoNetHttp, &req).contains("req.Header.Add(\"Authorization\", \"Bearer t0ken\")"));
+    }
+
+    #[test]
+    fn code_gen_basic_and_api_key_headers() {
+        use crate::types::{AuthConfig, AuthType};
+        let mut req = get_req();
+        req.auth = AuthConfig {
+            auth_type: AuthType::Basic,
+            basic_username: "user".into(),
+            basic_password: "pass".into(),
+            ..Default::default()
+        };
+        assert!(generate(CodeTarget::Curl, &req).contains("Authorization: Basic dXNlcjpwYXNz"));
+
+        req.auth = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            api_key_name: "X-API-Key".into(),
+            api_key_value: "secret".into(),
+            ..Default::default()
+        };
+        assert!(generate(CodeTarget::Curl, &req).contains("--header 'X-API-Key: secret'"));
+    }
+
+    #[test]
+    fn code_gen_auth_overrides_manual_same_name_header() {
+        use crate::types::{AuthConfig, AuthType};
+        let mut req = get_req();
+        req.headers = vec![("Authorization".into(), "Bearer OLD".into())];
+        req.auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "NEW".into(), ..Default::default() };
+        let out = generate(CodeTarget::Curl, &req);
+        assert!(out.contains("Bearer NEW"));
+        assert!(!out.contains("Bearer OLD"));
     }
 
     #[test]
