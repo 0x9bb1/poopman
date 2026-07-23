@@ -121,8 +121,9 @@ Mirrors `BodyEditor` (its own entity, embedded in `RequestEditor`):
 - Renders only the active type's fields; `None` shows an explanatory line.
 - `get_auth(cx) -> AuthConfig` reads current field values.
 - `set_auth(&AuthConfig, window, cx)` loads values (used by `load_request`).
-- Registered as sub-tab **index 3 "Auth"** in `RequestEditor` — appended after
-  Headers(0) / Params(1) / Body(2) to minimize renumbering churn.
+- Registered as sub-tab **index 1 "Auth"** in `RequestEditor`, placed immediately
+  after Headers(0), with Params and Body renumbered to (2) and (3). Auth sits next
+  to Headers, where users look for it.
 
 Keeping this in its own file follows the existing `BodyEditor` boundary and keeps
 `request_editor.rs` (already ~1471 lines) from growing further.
