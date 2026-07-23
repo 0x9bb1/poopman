@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod auth_editor;
 mod body_editor;
 mod code_formatter;
 mod code_gen;
