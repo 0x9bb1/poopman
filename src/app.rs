@@ -84,34 +84,15 @@ impl PoopmanApp {
             &request_editor,
             window,
             move |this, _, event: &RequestCompleted, window, cx| {
-                // Check if current tab is from history (has history_id)
-                let is_from_history = this
-                    .request_tabs
-                    .get(this.active_tab_index)
-                    .map(|tab| tab.history_id.is_some())
-                    .unwrap_or(false);
-
-                // Only save to database if this is a new request (not from history)
-                // Note: Response is not saved to history (aligned with Postman behavior)
-                if !is_from_history {
-                    let request_headers =
-                        serde_json::to_string(&event.request.headers).unwrap_or_default();
-
-                    if let Err(e) = db_clone.insert_history(
-                        event.request.method.as_str(),
-                        &event.request.url,
-                        &request_headers,
-                        &event.request.body,
-                        &event.request.auth,
-                    ) {
-                        log::error!("Failed to save history: {}", e);
-                    }
-
-                    // Reload history panel only when new history is created
-                    history_panel_clone.update(cx, |panel, cx| {
-                        panel.reload(window, cx);
-                    });
+                // Postman behavior: every send is logged to History, including a
+                // re-send of a request opened from history (so edits like added
+                // auth are captured as a new entry).
+                if let Err(e) = Self::persist_send(&db_clone, &event.request) {
+                    log::error!("Failed to save history: {}", e);
                 }
+                history_panel_clone.update(cx, |panel, cx| {
+                    panel.reload(window, cx);
+                });
 
                 // Update response viewer (always)
                 response_viewer_clone.update(cx, |viewer, cx| {
@@ -266,6 +247,23 @@ impl PoopmanApp {
             }
         }
         map
+    }
+
+    /// Append a completed send to History and return the new row id.
+    ///
+    /// Postman behavior: EVERY send is logged, including a re-send of a request
+    /// opened from history. (Previously gated on `!is_from_history`, which
+    /// silently dropped edits — e.g. added auth — made to a restored request.)
+    /// Only the request is stored; response bodies are not.
+    fn persist_send(db: &Database, request: &crate::types::RequestData) -> anyhow::Result<i64> {
+        let request_headers = serde_json::to_string(&request.headers).unwrap_or_default();
+        db.insert_history(
+            request.method.as_str(),
+            &request.url,
+            &request_headers,
+            &request.body,
+            &request.auth,
+        )
     }
 
     /// Reload environments + active selection from the DB and push the active
@@ -740,5 +738,38 @@ mod tests {
     fn empty_list_returns_current_without_panicking() {
         assert_eq!(cycle_index(0, 0, true), 0);
         assert_eq!(cycle_index(0, 0, false), 0);
+    }
+
+    // Postman behavior: EVERY send is logged to History, including a re-send of a
+    // request opened from history. A previous `!is_from_history` gate silently
+    // dropped edits (e.g. added auth) made to a restored request.
+    #[test]
+    fn every_send_appends_history_including_a_resend() {
+        use super::PoopmanApp;
+        use crate::db::Database;
+        use crate::types::{AuthConfig, AuthType, HttpMethod, RequestData};
+
+        let db = Database::new_in_memory();
+
+        // First send: a fresh request, no auth.
+        let original = RequestData::new(HttpMethod::GET, "https://api.test/x".to_string());
+        PoopmanApp::persist_send(&db, &original).unwrap();
+
+        // Same request re-opened from history, edited to add Bearer auth, re-sent.
+        let mut edited = original.clone();
+        edited.auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "t0ken".into(),
+            ..Default::default()
+        };
+        PoopmanApp::persist_send(&db, &edited).unwrap();
+
+        let items = db.load_recent_history(10).unwrap();
+        assert_eq!(items.len(), 2, "each send must append its own history row");
+        // Newest first: the edited re-send carries the Bearer auth...
+        assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);
+        assert_eq!(items[0].request.auth.bearer_token, "t0ken");
+        // ...and the original row is untouched.
+        assert_eq!(items[1].request.auth.auth_type, AuthType::None);
     }
 }
