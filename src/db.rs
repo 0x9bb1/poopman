@@ -92,6 +92,15 @@ impl Database {
         Self { tx }
     }
 
+    /// Test-only: an in-memory database with the schema initialized. Shared by
+    /// the db and app test suites so they exercise the same schema/migrations.
+    #[cfg(test)]
+    pub(crate) fn new_in_memory() -> Self {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        Self::init_schema(&conn).expect("init schema");
+        Self::spawn(conn)
+    }
+
     /// Send `f` to the owning thread and block until it returns a result.
     fn call<T, F>(&self, f: F) -> Result<T>
     where
@@ -389,9 +398,7 @@ mod tests {
     use crate::types::{AuthConfig, AuthType};
 
     fn mem_db() -> Database {
-        let conn = Connection::open_in_memory().unwrap();
-        Database::init_schema(&conn).unwrap();
-        Database::spawn(conn)
+        Database::new_in_memory()
     }
 
     #[test]
