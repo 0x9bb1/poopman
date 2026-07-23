@@ -5,9 +5,7 @@
 //! into the single-line URL input arrives with `\<newline>` flattened to
 //! `\<space>`; POSIX "escaped space" semantics would corrupt it).
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-
-use crate::types::{BodyType, FormDataRow, FormDataValue, HttpMethod, RawSubtype, RequestData};
+use crate::types::{AuthConfig, AuthType, BodyType, FormDataRow, FormDataValue, HttpMethod, RawSubtype, RequestData};
 
 /// Shell-style tokenizer. Single quotes take content verbatim; double quotes
 /// honor `\"` and `\\`; outside quotes a backslash escapes the next char,
@@ -128,6 +126,7 @@ pub fn parse_curl(input: &str) -> Option<RequestData> {
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut data_parts: Vec<String> = Vec::new();
     let mut form_rows: Vec<FormDataRow> = Vec::new();
+    let mut auth = AuthConfig::default();
 
     let mut i = 1;
     while i < tokens.len() {
@@ -183,7 +182,18 @@ pub fn parse_curl(input: &str) -> Option<RequestData> {
             }
         } else if matches_flag(&tok, "-u", "--user") {
             if let Some(v) = flag_value(&tokens, &mut i, "-u", "--user") {
-                headers.push(("Authorization".to_string(), format!("Basic {}", BASE64.encode(v))));
+                // Split on the first ':' into user/pass; a value with no ':' is a
+                // username with an empty password (curl then prompts, we don't).
+                let (user, pass) = match v.split_once(':') {
+                    Some((u, p)) => (u.to_string(), p.to_string()),
+                    None => (v, String::new()),
+                };
+                auth = AuthConfig {
+                    auth_type: AuthType::Basic,
+                    basic_username: user,
+                    basic_password: pass,
+                    ..AuthConfig::default()
+                };
             }
         } else if matches_flag(&tok, "", "--url") {
             if let Some(v) = flag_value(&tokens, &mut i, "", "--url")
@@ -230,7 +240,7 @@ pub fn parse_curl(input: &str) -> Option<RequestData> {
         HttpMethod::POST
     });
 
-    Some(RequestData { method, url, headers, body, auth: crate::types::AuthConfig::default() })
+    Some(RequestData { method, url, headers, body, auth })
 }
 
 #[cfg(test)]
@@ -349,12 +359,30 @@ mod tests {
     }
 
     #[test]
-    fn user_flag_becomes_basic_auth_header() {
+    fn user_flag_becomes_basic_auth_config() {
         let r = parse("curl -u user:pass https://example.com");
-        assert_eq!(
-            r.headers,
-            vec![("Authorization".to_string(), "Basic dXNlcjpwYXNz".to_string())]
-        );
+        assert_eq!(r.auth.auth_type, crate::types::AuthType::Basic);
+        assert_eq!(r.auth.basic_username, "user");
+        assert_eq!(r.auth.basic_password, "pass");
+        // No Authorization header is synthesized — the config computes it at send time.
+        assert!(r.headers.iter().all(|(k, _)| !k.eq_ignore_ascii_case("authorization")));
+    }
+
+    #[test]
+    fn user_flag_long_and_attached_forms() {
+        assert_eq!(parse("curl --user u:p https://example.com").auth.basic_username, "u");
+        assert_eq!(parse("curl --user=u:p https://example.com").auth.basic_password, "p");
+        let r = parse("curl -uadmin:s3cret https://example.com");
+        assert_eq!(r.auth.basic_username, "admin");
+        assert_eq!(r.auth.basic_password, "s3cret");
+    }
+
+    #[test]
+    fn user_flag_without_colon_is_username_only() {
+        let r = parse("curl -u alice https://example.com");
+        assert_eq!(r.auth.auth_type, crate::types::AuthType::Basic);
+        assert_eq!(r.auth.basic_username, "alice");
+        assert_eq!(r.auth.basic_password, "");
     }
 
     #[test]
