@@ -38,6 +38,7 @@ fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
         url,
         headers,
         body,
+        auth: crate::types::AuthConfig::default(),
     };
     Ok(HistoryItem::new(id, timestamp, request, None))
 }

@@ -302,6 +302,10 @@ pub struct RequestData {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: BodyType,
+    /// Config-based auth. `#[serde(default)]` so requests serialized before this
+    /// feature (history rows / saved tabs) still deserialize — missing → `None`.
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 impl RequestData {
@@ -312,6 +316,7 @@ impl RequestData {
             url,
             headers: vec![],
             body: BodyType::default(),
+            auth: AuthConfig::default(),
         }
     }
 }

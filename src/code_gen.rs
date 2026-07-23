@@ -541,6 +541,7 @@ mod tests {
             url: "https://api.example.com/users".to_string(),
             headers: vec![("Accept".to_string(), "application/json".to_string())],
             body: BodyType::None,
+            auth: crate::types::AuthConfig::default(),
         }
     }
 
@@ -553,6 +554,7 @@ mod tests {
                 content: "{\"name\": \"ada\"}".to_string(),
                 subtype: RawSubtype::Json,
             },
+            auth: crate::types::AuthConfig::default(),
         }
     }
 
@@ -586,6 +588,7 @@ mod tests {
                     value: FormDataValue::Text("nope".to_string()),
                 },
             ]),
+            auth: crate::types::AuthConfig::default(),
         }
     }
 

@@ -230,7 +230,7 @@ pub fn parse_curl(input: &str) -> Option<RequestData> {
         HttpMethod::POST
     });
 
-    Some(RequestData { method, url, headers, body })
+    Some(RequestData { method, url, headers, body, auth: crate::types::AuthConfig::default() })
 }
 
 #[cfg(test)]
