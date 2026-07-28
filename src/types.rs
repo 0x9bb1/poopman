@@ -41,7 +41,7 @@ impl PredefinedHeader {
             PredefinedHeader::CacheControl => "no-cache",
             PredefinedHeader::ContentType => "application/json",
             PredefinedHeader::Accept => "*/*",
-            PredefinedHeader::UserAgent => "Poopman/1.0",
+            PredefinedHeader::UserAgent => "PostmanRuntime/7.48.0",
             PredefinedHeader::Connection => "keep-alive",
             PredefinedHeader::ContentLength => "0",
         }
