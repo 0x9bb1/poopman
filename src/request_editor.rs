@@ -31,6 +31,11 @@ pub struct OpenCodeSnippet;
 #[derive(Clone)]
 pub struct RequestCancelled;
 
+/// Emitted when the user explicitly saves the current request to a collection.
+/// The app decides whether this is a new save or an update to an existing row.
+#[derive(Clone)]
+pub struct SaveRequestRequested;
+
 /// Create a header-name input carrying the standard-header typeahead.
 ///
 /// Custom rows get built in three places — loading a request, restoring saved
@@ -480,9 +485,16 @@ impl RequestEditor {
             self.headers.push(header_row);
         }
 
-        // Ensure there's at least one empty custom header row
-        let has_custom_headers = self.headers.iter().any(|h| matches!(h.header_type, HeaderType::Custom));
-        if !has_custom_headers {
+        // Keep an empty custom row at the end so imported requests can still
+        // accept another header. A Postman collection has no trailing editor
+        // row, unlike a request saved from this UI, so checking only for the
+        // existence of a custom row would leave imported requests with no way
+        // to add one without deleting an existing row first.
+        let has_empty_custom_row = self.headers.iter().any(|header| {
+            matches!(header.header_type, HeaderType::Custom)
+                && header.key_input.read(cx).value().is_empty()
+        });
+        if !has_empty_custom_row {
             self.add_custom_header_row(window, cx);
         }
 
@@ -1166,6 +1178,7 @@ impl RequestEditor {
 impl EventEmitter<RequestCompleted> for RequestEditor {}
 impl EventEmitter<OpenCodeSnippet> for RequestEditor {}
 impl EventEmitter<RequestCancelled> for RequestEditor {}
+impl EventEmitter<SaveRequestRequested> for RequestEditor {}
 
 impl Render for RequestEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1203,6 +1216,20 @@ impl Render for RequestEditor {
                                 .flex_1()
                                 .overflow_hidden()
                                 .child(Input::new(&self.url_input)),
+                        )
+                        .child(
+                            // Explicit collection save. The bookmark icon keeps
+                            // the request bar compact; the tooltip explains the
+                            // action without repeating the old "Saved" status.
+                            div().flex_shrink_0().child(
+                                Button::new("save-request-btn")
+                                    .ghost()
+                                    .icon(Icon::empty().path("icons/bookmark.svg"))
+                                    .tooltip("Save request")
+                                    .on_click(cx.listener(|_this, _ev, _window, cx| {
+                                        cx.emit(SaveRequestRequested);
+                                    })),
+                            ),
                         )
                         .child(
                             // Code snippet button (</>) - opens the code dialog

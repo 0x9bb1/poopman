@@ -1306,7 +1306,7 @@ Expected: compiles clean.
 Run: `cargo test`
 Expected: PASS — all unit tests from Tasks 1–7 plus the pre-existing suite are green.
 
-- [ ] **Step 8: Manual verification on the Windows build**
+- [x] **Step 8: Manual verification on the Windows build**
 
 Run the app: `pwsh.exe -NoProfile -Command "cargo run"`. Confirm each — this is the part tests do **not** cover:
 

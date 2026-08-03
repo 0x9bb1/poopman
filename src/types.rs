@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Header type for distinguishing predefined vs custom headers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeaderType {
     /// Mandatory header that cannot be disabled or deleted (e.g., Cache-Control)
     Mandatory,
@@ -14,7 +14,7 @@ pub enum HeaderType {
 }
 
 /// Predefined header names
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PredefinedHeader {
     CacheControl,
     ContentType,
@@ -139,6 +139,7 @@ pub enum RawSubtype {
     Xml,
     Text,
     JavaScript,
+    UrlEncoded,
 }
 
 impl RawSubtype {
@@ -152,6 +153,7 @@ impl RawSubtype {
             RawSubtype::Xml => "plain",  // XML not supported, fallback to plain
             RawSubtype::Text => "plain",
             RawSubtype::JavaScript => "javascript",
+            RawSubtype::UrlEncoded => "plain",
         }
     }
 
@@ -161,6 +163,7 @@ impl RawSubtype {
             RawSubtype::Xml => "application/xml",
             RawSubtype::Text => "text/plain",
             RawSubtype::JavaScript => "application/javascript",
+            RawSubtype::UrlEncoded => "application/x-www-form-urlencoded",
         }
     }
 
@@ -170,6 +173,7 @@ impl RawSubtype {
             RawSubtype::Xml,
             RawSubtype::Text,
             RawSubtype::JavaScript,
+            RawSubtype::UrlEncoded,
         ]
     }
 }
@@ -182,7 +186,7 @@ pub enum FormDataValue {
 }
 
 /// Form-data row
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormDataRow {
     pub enabled: bool,
     pub key: String,
@@ -190,7 +194,7 @@ pub struct FormDataRow {
 }
 
 /// Request body type
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BodyType {
     None,
     Raw {
@@ -296,7 +300,7 @@ pub fn effective_wire_headers(
 }
 
 /// Request data structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestData {
     pub method: HttpMethod,
     pub url: String,
@@ -447,7 +451,7 @@ impl HistoryItem {
 }
 
 /// Query parameter state for UI (including enabled/disabled state)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParamState {
     pub enabled: bool,
     pub key: String,
@@ -455,13 +459,53 @@ pub struct ParamState {
 }
 
 /// Header state for UI (including enabled/disabled state and header type)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderState {
     pub enabled: bool,
     pub key: String,
     pub value: String,
     pub header_type: HeaderType,
     pub predefined: Option<PredefinedHeader>,
+}
+
+/// A request persisted inside a collection. The request payload and the
+/// complete editor row state are stored separately so disabled headers/params
+/// survive a save/load round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedRequest {
+    pub id: i64,
+    pub collection_id: i64,
+    pub folder_id: Option<i64>,
+    pub name: String,
+    pub request: RequestData,
+    pub params_state: Vec<ParamState>,
+    pub headers_state: Vec<HeaderState>,
+    pub position: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A folder node in a collection tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionFolder {
+    pub id: i64,
+    pub collection_id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub position: i64,
+    pub folders: Vec<CollectionFolder>,
+    pub requests: Vec<SavedRequest>,
+}
+
+/// A top-level request collection. Requests may live directly under the
+/// collection or inside any nested folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: i64,
+    pub name: String,
+    pub position: i64,
+    pub folders: Vec<CollectionFolder>,
+    pub requests: Vec<SavedRequest>,
 }
 
 /// A named environment holding a set of variables.

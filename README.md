@@ -1,8 +1,9 @@
 # Poopman — API Client
 
 A Postman-like desktop API client built in Rust with the [GPUI](https://www.gpui.rs/)
-framework and the `gpui-component` library. Classic Postman layout: history on the
-left, request editor on the top-right, response viewer on the bottom-right.
+framework and the `gpui-component` library. The left sidebar switches between
+collections and history; the request editor is on the top-right and the response
+viewer is on the bottom-right.
 
 ## Features
 
@@ -23,6 +24,12 @@ left, request editor on the top-right, response viewer on the bottom-right.
   Go (net/http)**, with Copy. Raw and multipart form-data bodies both export.
 - **Tabs** — work on multiple requests at once.
 - **History** — every sent request is stored in SQLite; click to reload, or clear all.
+- **Collections** — explicitly save requests into collections or nested folders;
+  create, rename, duplicate, search, and delete tree nodes with cascading deletion.
+- **Postman interoperability** — import and export **Postman Collection v2.1** JSON.
+  Request URLs, disabled query/header/form rows, raw/form-data/url-encoded bodies,
+  and Bearer/Basic/API-key auth are mapped where supported; unsupported fields are
+  reported as non-blocking import warnings.
 
 ## Requirements
 
@@ -50,6 +57,12 @@ cargo test                # unit tests (pure modules: code_gen, variables, url_p
    `{{name}}`.
 4. **Export code** — click the `</>` button next to Send, choose a language, and Copy.
 5. **History** — sent requests are saved automatically; click one to reload it, or Clear.
+6. **Collections** — switch the sidebar to **Collections**, create a collection or
+   folder, then click the bookmark button beside the request actions. New saves ask
+   for a request name and destination; clicking the bookmark on an existing saved
+   request updates it.
+7. **Postman** — use **Import** in the Collections sidebar, or use a collection's
+   context menu to export a v2.1 JSON file.
 
 ## Data Storage
 
@@ -75,6 +88,7 @@ src/
 ├── body_editor.rs         # Request body (Raw + multipart Form-data)
 ├── response_viewer.rs     # Response display (text / binary / headers)
 ├── history_panel.rs       # History list
+├── collections_panel.rs    # Collection/folder/request tree and Postman file actions
 ├── environment_manager.rs # Environment CRUD dialog
 ├── variables.rs           # Pure {{variable}} substitution
 ├── code_gen.rs            # Pure code-snippet generation (6 targets)
@@ -82,7 +96,8 @@ src/
 ├── tab_bar.rs             # Request tab strip
 ├── request_tab.rs         # Per-tab model
 ├── menu_bar.rs            # Edit menu (environment switching)
-├── url_params.rs          # Pure URL / query-param helpers
+├── postman.rs              # Pure Postman Collection v2.1 conversion
+├── url_params.rs           # Pure URL / query-param helpers
 ├── code_formatter.rs      # Pure JSON / XML formatting & validation
 ├── ui.rs                  # Shared visual primitives (cards, segmented pills)
 └── theme.rs               # Warm-light theme + layout dimensions
@@ -111,7 +126,7 @@ src/
 
 ## Possible Future Enhancements
 
-- [ ] Request collections / folders.
-- [ ] Authentication presets (Bearer, Basic, OAuth).
-- [ ] Export / import collections (Postman format).
+- [x] Request collections / folders.
+- [x] Authentication presets (Bearer, Basic, API key).
+- [x] Export / import collections (Postman Collection v2.1).
 - [ ] Search / filter in history.
