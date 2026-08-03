@@ -8,12 +8,16 @@
 //! construction and a panic inside one query can't poison a lock for the others.
 
 use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
-use crate::types::{AuthConfig, BodyType, Environment, EnvVar, HistoryItem, HttpMethod, RequestData};
+use crate::types::{
+    AuthConfig, BodyType, Collection, CollectionFolder, Environment, EnvVar, HeaderState,
+    HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
+};
 
 /// A unit of work executed on the database's owning thread.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -56,6 +60,298 @@ fn escape_like(query: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+#[derive(Debug, Clone)]
+struct FolderRow {
+    id: i64,
+    collection_id: i64,
+    parent_id: Option<i64>,
+    name: String,
+    position: i64,
+}
+
+#[derive(Debug, Clone)]
+struct SavedRequestRow {
+    id: i64,
+    collection_id: i64,
+    folder_id: Option<i64>,
+    name: String,
+    request_json: String,
+    params_json: String,
+    headers_json: String,
+    position: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+fn decode_saved_request(row: SavedRequestRow) -> Result<SavedRequest> {
+    Ok(SavedRequest {
+        id: row.id,
+        collection_id: row.collection_id,
+        folder_id: row.folder_id,
+        name: row.name,
+        request: serde_json::from_str(&row.request_json)?,
+        params_state: serde_json::from_str::<Vec<ParamState>>(&row.params_json)?,
+        headers_state: serde_json::from_str::<Vec<HeaderState>>(&row.headers_json)?,
+        position: row.position,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn build_folder(
+    id: i64,
+    folders: &HashMap<i64, FolderRow>,
+    requests: &mut HashMap<(i64, Option<i64>), Vec<SavedRequest>>,
+) -> Result<CollectionFolder> {
+    let row = folders
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| anyhow!("missing collection folder {}", id))?;
+
+    let mut child_ids: Vec<(i64, i64)> = folders
+        .values()
+        .filter(|child| child.collection_id == row.collection_id && child.parent_id == Some(id))
+        .map(|child| (child.position, child.id))
+        .collect();
+    child_ids.sort_by_key(|(position, child_id)| (*position, *child_id));
+
+    let child_folders = child_ids
+        .into_iter()
+        .map(|(_, child_id)| build_folder(child_id, folders, requests))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut child_requests = requests
+        .remove(&(row.collection_id, Some(id)))
+        .unwrap_or_default();
+    child_requests.sort_by_key(|request| (request.position, request.id));
+
+    Ok(CollectionFolder {
+        id: row.id,
+        collection_id: row.collection_id,
+        parent_id: row.parent_id,
+        name: row.name,
+        position: row.position,
+        folders: child_folders,
+        requests: child_requests,
+    })
+}
+
+fn build_collection_tree(
+    collection_rows: Vec<(i64, String, i64)>,
+    folder_rows: Vec<FolderRow>,
+    request_rows: Vec<SavedRequestRow>,
+) -> Result<Vec<Collection>> {
+    let folders: HashMap<i64, FolderRow> = folder_rows
+        .into_iter()
+        .map(|folder| (folder.id, folder))
+        .collect();
+    let mut requests: HashMap<(i64, Option<i64>), Vec<SavedRequest>> = HashMap::new();
+    for row in request_rows {
+        let request = decode_saved_request(row)?;
+        requests
+            .entry((request.collection_id, request.folder_id))
+            .or_default()
+            .push(request);
+    }
+
+    let mut collections = Vec::with_capacity(collection_rows.len());
+    for (id, name, position) in collection_rows {
+        let mut root_folder_ids: Vec<(i64, i64)> = folders
+            .values()
+            .filter(|folder| folder.collection_id == id && folder.parent_id.is_none())
+            .map(|folder| (folder.position, folder.id))
+            .collect();
+        root_folder_ids.sort_by_key(|(folder_position, folder_id)| (*folder_position, *folder_id));
+        let collection_folders = root_folder_ids
+            .into_iter()
+            .map(|(_, folder_id)| build_folder(folder_id, &folders, &mut requests))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut collection_requests = requests.remove(&(id, None)).unwrap_or_default();
+        collection_requests.sort_by_key(|request| (request.position, request.id));
+
+        collections.push(Collection {
+            id,
+            name,
+            position,
+            folders: collection_folders,
+            requests: collection_requests,
+        });
+    }
+    collections.sort_by_key(|collection| (collection.position, collection.id));
+    Ok(collections)
+}
+
+fn require_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("name cannot be empty"));
+    }
+    Ok(name.to_string())
+}
+
+fn copy_name(name: &str) -> String {
+    format!("{} (Copy)", name)
+}
+
+fn validate_folder_parent(
+    tx: &Transaction<'_>,
+    collection_id: i64,
+    folder_id: Option<i64>,
+) -> Result<()> {
+    if let Some(folder_id) = folder_id {
+        let folder_collection: i64 = tx.query_row(
+            "SELECT collection_id FROM collection_folders WHERE id = ?1",
+            [folder_id],
+            |row| row.get(0),
+        )?;
+        if folder_collection != collection_id {
+            return Err(anyhow!("folder {} does not belong to collection {}", folder_id, collection_id));
+        }
+    }
+    Ok(())
+}
+
+fn encode_saved_request(
+    request: &RequestData,
+    params_state: &[ParamState],
+    headers_state: &[HeaderState],
+) -> Result<(String, String, String)> {
+    Ok((
+        serde_json::to_string(request)?,
+        serde_json::to_string(params_state)?,
+        serde_json::to_string(headers_state)?,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_saved_request_tx(
+    tx: &Transaction<'_>,
+    collection_id: i64,
+    folder_id: Option<i64>,
+    name: &str,
+    request: &RequestData,
+    params_state: &[ParamState],
+    headers_state: &[HeaderState],
+    position: Option<i64>,
+) -> Result<i64> {
+    validate_folder_parent(tx, collection_id, folder_id)?;
+    let (request_json, params_json, headers_json) =
+        encode_saved_request(request, params_state, headers_state)?;
+    let position = match position {
+        Some(position) => position,
+        None => tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1
+             FROM saved_requests
+             WHERE collection_id = ?1 AND folder_id IS ?2",
+            params![collection_id, folder_id],
+            |row| row.get(0),
+        )?,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO saved_requests
+             (collection_id, folder_id, name, request_json, params_json, headers_json,
+              position, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![
+            collection_id,
+            folder_id,
+            name,
+            request_json,
+            params_json,
+            headers_json,
+            position,
+            now,
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+fn insert_folder_tree_tx(
+    tx: &Transaction<'_>,
+    collection_id: i64,
+    parent_id: Option<i64>,
+    folder: &CollectionFolder,
+) -> Result<i64> {
+    let position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1
+         FROM collection_folders
+         WHERE collection_id = ?1 AND parent_id IS ?2",
+        params![collection_id, parent_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO collection_folders (collection_id, parent_id, name, position)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![collection_id, parent_id, folder.name, position],
+    )?;
+    let folder_id = tx.last_insert_rowid();
+
+    for request in &folder.requests {
+        insert_saved_request_tx(
+            tx,
+            collection_id,
+            Some(folder_id),
+            &request.name,
+            &request.request,
+            &request.params_state,
+            &request.headers_state,
+            None,
+        )?;
+    }
+    for child in &folder.folders {
+        insert_folder_tree_tx(tx, collection_id, Some(folder_id), child)?;
+    }
+    Ok(folder_id)
+}
+
+fn insert_collection_tree_tx(
+    tx: &Transaction<'_>,
+    collection: &Collection,
+    name: &str,
+) -> Result<i64> {
+    let position: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM collections",
+        [],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO collections (name, position) VALUES (?1, ?2)",
+        params![name, position],
+    )?;
+    let collection_id = tx.last_insert_rowid();
+
+    for request in &collection.requests {
+        insert_saved_request_tx(
+            tx,
+            collection_id,
+            None,
+            &request.name,
+            &request.request,
+            &request.params_state,
+            &request.headers_state,
+            None,
+        )?;
+    }
+    for folder in &collection.folders {
+        insert_folder_tree_tx(tx, collection_id, None, folder)?;
+    }
+    Ok(collection_id)
+}
+
+fn find_folder(folders: &[CollectionFolder], id: i64) -> Option<&CollectionFolder> {
+    for folder in folders {
+        if folder.id == id {
+            return Some(folder);
+        }
+        if let Some(found) = find_folder(&folder.folders, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Handle to the database thread. Cloneable senders make this cheap to share
@@ -152,7 +448,35 @@ impl Database {
              CREATE TABLE IF NOT EXISTS app_meta (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS collections (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL,
+                 position INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS collection_folders (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                 parent_id INTEGER REFERENCES collection_folders(id) ON DELETE CASCADE,
+                 name TEXT NOT NULL,
+                 position INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS idx_collection_folders_parent
+                 ON collection_folders(collection_id, parent_id, position, id);
+             CREATE TABLE IF NOT EXISTS saved_requests (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                 folder_id INTEGER REFERENCES collection_folders(id) ON DELETE CASCADE,
+                 name TEXT NOT NULL,
+                 request_json TEXT NOT NULL,
+                 params_json TEXT NOT NULL,
+                 headers_json TEXT NOT NULL,
+                 position INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_saved_requests_parent
+                 ON saved_requests(collection_id, folder_id, position, id);",
         )?;
         Self::migrate_add_request_auth(conn)?;
         Ok(())
@@ -273,6 +597,317 @@ impl Database {
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))?;
             Ok(count as usize)
         })
+    }
+
+    // ===== Collections =====
+
+    /// Load the complete collection/folder/request tree in display order.
+    pub fn load_collections(&self) -> Result<Vec<Collection>> {
+        self.call(|conn| {
+            let collection_rows = conn
+                .prepare("SELECT id, name, position FROM collections ORDER BY position, id")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<(i64, String, i64)>>>()?;
+
+            let folder_rows = conn
+                .prepare(
+                    "SELECT id, collection_id, parent_id, name, position
+                     FROM collection_folders
+                     ORDER BY collection_id, parent_id, position, id",
+                )?
+                .query_map([], |row| {
+                    Ok(FolderRow {
+                        id: row.get(0)?,
+                        collection_id: row.get(1)?,
+                        parent_id: row.get(2)?,
+                        name: row.get(3)?,
+                        position: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            let request_rows = conn
+                .prepare(
+                    "SELECT id, collection_id, folder_id, name, request_json,
+                            params_json, headers_json, position, created_at, updated_at
+                     FROM saved_requests
+                     ORDER BY collection_id, folder_id, position, id",
+                )?
+                .query_map([], |row| {
+                    Ok(SavedRequestRow {
+                        id: row.get(0)?,
+                        collection_id: row.get(1)?,
+                        folder_id: row.get(2)?,
+                        name: row.get(3)?,
+                        request_json: row.get(4)?,
+                        params_json: row.get(5)?,
+                        headers_json: row.get(6)?,
+                        position: row.get(7)?,
+                        created_at: row.get(8)?,
+                        updated_at: row.get(9)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            build_collection_tree(collection_rows, folder_rows, request_rows)
+        })
+    }
+
+    /// Create an empty top-level collection.
+    pub fn create_collection(&self, name: &str) -> Result<i64> {
+        let name = require_name(name)?;
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO collections (name, position)
+                 VALUES (?1, (SELECT COALESCE(MAX(position), -1) + 1 FROM collections))",
+                params![name],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Create a folder under a collection or another folder.
+    pub fn create_folder(
+        &self,
+        collection_id: i64,
+        parent_id: Option<i64>,
+        name: &str,
+    ) -> Result<i64> {
+        let name = require_name(name)?;
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            validate_folder_parent(&tx, collection_id, parent_id)?;
+            let position: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1
+                 FROM collection_folders
+                 WHERE collection_id = ?1 AND parent_id IS ?2",
+                params![collection_id, parent_id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO collection_folders (collection_id, parent_id, name, position)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![collection_id, parent_id, name, position],
+            )?;
+            let id = tx.last_insert_rowid();
+            tx.commit()?;
+            Ok(id)
+        })
+    }
+
+    /// Insert a saved request and return its ID.
+    pub fn insert_saved_request(
+        &self,
+        collection_id: i64,
+        folder_id: Option<i64>,
+        name: &str,
+        request: &RequestData,
+        params_state: &[ParamState],
+        headers_state: &[HeaderState],
+    ) -> Result<i64> {
+        let name = require_name(name)?;
+        let request = request.clone();
+        let params_state = params_state.to_vec();
+        let headers_state = headers_state.to_vec();
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let id = insert_saved_request_tx(
+                &tx,
+                collection_id,
+                folder_id,
+                &name,
+                &request,
+                &params_state,
+                &headers_state,
+                None,
+            )?;
+            tx.commit()?;
+            Ok(id)
+        })
+    }
+
+    /// Update a saved request, including moving it to another folder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_saved_request(
+        &self,
+        id: i64,
+        collection_id: i64,
+        folder_id: Option<i64>,
+        name: &str,
+        request: &RequestData,
+        params_state: &[ParamState],
+        headers_state: &[HeaderState],
+    ) -> Result<()> {
+        let name = require_name(name)?;
+        let request = request.clone();
+        let params_state = params_state.to_vec();
+        let headers_state = headers_state.to_vec();
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            validate_folder_parent(&tx, collection_id, folder_id)?;
+            let (request_json, params_json, headers_json) =
+                encode_saved_request(&request, &params_state, &headers_state)?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let changed = tx.execute(
+                "UPDATE saved_requests
+                 SET collection_id = ?1, folder_id = ?2, name = ?3,
+                     request_json = ?4, params_json = ?5, headers_json = ?6,
+                     updated_at = ?7
+                 WHERE id = ?8",
+                params![
+                    collection_id,
+                    folder_id,
+                    name,
+                    request_json,
+                    params_json,
+                    headers_json,
+                    now,
+                    id,
+                ],
+            )?;
+            if changed == 0 {
+                return Err(anyhow!("saved request {} does not exist", id));
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn load_saved_request(&self, id: i64) -> Result<Option<SavedRequest>> {
+        self.call(move |conn| {
+            let raw = conn
+                .query_row(
+                    "SELECT id, collection_id, folder_id, name, request_json,
+                            params_json, headers_json, position, created_at, updated_at
+                     FROM saved_requests WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok(SavedRequestRow {
+                            id: row.get(0)?,
+                            collection_id: row.get(1)?,
+                            folder_id: row.get(2)?,
+                            name: row.get(3)?,
+                            request_json: row.get(4)?,
+                            params_json: row.get(5)?,
+                            headers_json: row.get(6)?,
+                            position: row.get(7)?,
+                            created_at: row.get(8)?,
+                            updated_at: row.get(9)?,
+                        })
+                    },
+                )
+                .optional()?;
+            raw.map(decode_saved_request).transpose()
+        })
+    }
+
+    pub fn rename_collection(&self, id: i64, name: &str) -> Result<()> {
+        let name = require_name(name)?;
+        self.call(move |conn| {
+            let changed = conn.execute("UPDATE collections SET name = ?1 WHERE id = ?2", params![name, id])?;
+            if changed == 0 { return Err(anyhow!("collection {} does not exist", id)); }
+            Ok(())
+        })
+    }
+
+    pub fn rename_folder(&self, id: i64, name: &str) -> Result<()> {
+        let name = require_name(name)?;
+        self.call(move |conn| {
+            let changed = conn.execute("UPDATE collection_folders SET name = ?1 WHERE id = ?2", params![name, id])?;
+            if changed == 0 { return Err(anyhow!("folder {} does not exist", id)); }
+            Ok(())
+        })
+    }
+
+    pub fn rename_saved_request(&self, id: i64, name: &str) -> Result<()> {
+        let name = require_name(name)?;
+        self.call(move |conn| {
+            let changed = conn.execute(
+                "UPDATE saved_requests SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![name, chrono::Utc::now().to_rfc3339(), id],
+            )?;
+            if changed == 0 { return Err(anyhow!("saved request {} does not exist", id)); }
+            Ok(())
+        })
+    }
+
+    pub fn delete_collection(&self, id: i64) -> Result<()> {
+        self.call(move |conn| {
+            conn.execute("DELETE FROM collections WHERE id = ?1", [id])?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_folder(&self, id: i64) -> Result<()> {
+        self.call(move |conn| {
+            conn.execute("DELETE FROM collection_folders WHERE id = ?1", [id])?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_saved_request(&self, id: i64) -> Result<()> {
+        self.call(move |conn| {
+            conn.execute("DELETE FROM saved_requests WHERE id = ?1", [id])?;
+            Ok(())
+        })
+    }
+
+    /// Import or copy a complete collection tree in one transaction.
+    pub fn insert_collection_tree(&self, collection: &Collection, name: &str) -> Result<i64> {
+        let name = require_name(name)?;
+        let collection = collection.clone();
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let id = insert_collection_tree_tx(&tx, &collection, &name)?;
+            tx.commit()?;
+            Ok(id)
+        })
+    }
+
+    pub fn duplicate_collection(&self, id: i64) -> Result<i64> {
+        let collections = self.load_collections()?;
+        let collection = collections
+            .iter()
+            .find(|collection| collection.id == id)
+            .cloned()
+            .ok_or_else(|| anyhow!("collection {} does not exist", id))?;
+        let name = copy_name(&collection.name);
+        self.insert_collection_tree(&collection, &name)
+    }
+
+    pub fn duplicate_folder(&self, id: i64) -> Result<i64> {
+        let collections = self.load_collections()?;
+        let folder = collections
+            .iter()
+            .find_map(|collection| find_folder(&collection.folders, id))
+            .cloned()
+            .ok_or_else(|| anyhow!("folder {} does not exist", id))?;
+        let collection_id = folder.collection_id;
+        let parent_id = folder.parent_id;
+        let name = copy_name(&folder.name);
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let mut copy = folder.clone();
+            copy.name = name;
+            let new_id = insert_folder_tree_tx(&tx, collection_id, parent_id, &copy)?;
+            tx.commit()?;
+            Ok(new_id)
+        })
+    }
+
+    pub fn duplicate_saved_request(&self, id: i64) -> Result<i64> {
+        let request = self
+            .load_saved_request(id)?
+            .ok_or_else(|| anyhow!("saved request {} does not exist", id))?;
+        let name = copy_name(&request.name);
+        self.insert_saved_request(
+            request.collection_id,
+            request.folder_id,
+            &name,
+            &request.request,
+            &request.params_state,
+            &request.headers_state,
+        )
     }
 
     // ===== Environments =====
@@ -546,5 +1181,161 @@ mod tests {
             .unwrap();
         let r = db.search_history("", 10).unwrap();
         assert_eq!(r.len(), 1);
+    }
+
+    fn saved_request_fixture(name: &str, url: &str) -> (RequestData, Vec<ParamState>, Vec<HeaderState>) {
+        let request = RequestData {
+            method: HttpMethod::POST,
+            url: url.to_string(),
+            headers: vec![("X-Enabled".into(), "yes".into())],
+            body: BodyType::Raw {
+                content: "{\"ok\":true}".into(),
+                subtype: crate::types::RawSubtype::Json,
+            },
+            auth: AuthConfig {
+                auth_type: AuthType::Bearer,
+                bearer_token: "token".into(),
+                ..Default::default()
+            },
+        };
+        let params = vec![
+            ParamState { enabled: true, key: "page".into(), value: "1".into() },
+            ParamState { enabled: false, key: "debug".into(), value: "true".into() },
+        ];
+        let headers = vec![
+            HeaderState {
+                enabled: true,
+                key: "X-Enabled".into(),
+                value: "yes".into(),
+                header_type: crate::types::HeaderType::Custom,
+                predefined: None,
+            },
+            HeaderState {
+                enabled: false,
+                key: "X-Disabled".into(),
+                value: "no".into(),
+                header_type: crate::types::HeaderType::Custom,
+                predefined: None,
+            },
+        ];
+        let _ = name;
+        (request, params, headers)
+    }
+
+    #[test]
+    fn collections_roundtrip_nested_tree_and_editor_state() {
+        let db = mem_db();
+        let collection_id = db.create_collection("Demo").unwrap();
+        let root_folder_id = db.create_folder(collection_id, None, "Root").unwrap();
+        let child_folder_id = db.create_folder(collection_id, Some(root_folder_id), "Child").unwrap();
+        let (request, params, headers) = saved_request_fixture("Nested", "https://api.test/items?page=1");
+        let root_request_id = db
+            .insert_saved_request(collection_id, None, "Root request", &request, &params, &headers)
+            .unwrap();
+        let nested_request_id = db
+            .insert_saved_request(collection_id, Some(child_folder_id), "Nested", &request, &params, &headers)
+            .unwrap();
+
+        let collections = db.load_collections().unwrap();
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].requests[0].id, root_request_id);
+        assert_eq!(collections[0].folders[0].name, "Root");
+        assert_eq!(collections[0].folders[0].folders[0].name, "Child");
+        let saved = &collections[0].folders[0].folders[0].requests[0];
+        assert_eq!(saved.id, nested_request_id);
+        assert_eq!(saved.request, request);
+        assert_eq!(saved.params_state, params);
+        assert_eq!(saved.headers_state, headers);
+    }
+
+    #[test]
+    fn collection_update_duplicate_and_cascade_delete() {
+        let db = mem_db();
+        let collection_id = db.create_collection("Demo").unwrap();
+        let folder_id = db.create_folder(collection_id, None, "Folder").unwrap();
+        let (request, params, headers) = saved_request_fixture("Request", "https://api.test/a");
+        let request_id = db
+            .insert_saved_request(collection_id, Some(folder_id), "Request", &request, &params, &headers)
+            .unwrap();
+
+        let mut changed = request.clone();
+        changed.url = "https://api.test/b".into();
+        db.update_saved_request(
+            request_id,
+            collection_id,
+            Some(folder_id),
+            "Updated",
+            &changed,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let updated = db.load_saved_request(request_id).unwrap().unwrap();
+        assert_eq!(updated.name, "Updated");
+        assert_eq!(updated.request.url, "https://api.test/b");
+        assert!(updated.params_state.is_empty());
+
+        let copied_request_id = db.duplicate_saved_request(request_id).unwrap();
+        assert_eq!(db.load_saved_request(copied_request_id).unwrap().unwrap().name, "Updated (Copy)");
+        let copied_folder_id = db.duplicate_folder(folder_id).unwrap();
+        let copied_tree = db.load_collections().unwrap();
+        assert!(copied_tree[0].folders.iter().any(|folder| folder.id == copied_folder_id));
+
+        // Folder deletion cascades to both the original and its copied request;
+        // the unrelated root collection remains intact.
+        db.delete_folder(folder_id).unwrap();
+        assert!(db.load_saved_request(request_id).unwrap().is_none());
+        assert!(db.load_collections().unwrap()[0].folders.iter().all(|folder| folder.id != folder_id));
+        db.delete_collection(collection_id).unwrap();
+        assert!(db.load_collections().unwrap().is_empty());
+    }
+
+    #[test]
+    fn inserting_a_collection_tree_rebuilds_real_parent_ids_transactionally() {
+        let db = mem_db();
+        let (request, params, headers) = saved_request_fixture("Imported", "https://api.test/imported");
+        let imported = Collection {
+            id: 0,
+            name: "Imported".into(),
+            position: 0,
+            requests: vec![],
+            folders: vec![CollectionFolder {
+                id: 999,
+                collection_id: 0,
+                parent_id: None,
+                name: "Outer".into(),
+                position: 0,
+                requests: vec![],
+                folders: vec![CollectionFolder {
+                    id: 1000,
+                    collection_id: 0,
+                    parent_id: Some(999),
+                    name: "Inner".into(),
+                    position: 0,
+                    requests: vec![SavedRequest {
+                        id: 0,
+                        collection_id: 0,
+                        folder_id: Some(1000),
+                        name: "Imported".into(),
+                        request,
+                        params_state: params,
+                        headers_state: headers,
+                        position: 0,
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                    }],
+                    folders: vec![],
+                }],
+            }],
+        };
+        let collection_id = db.insert_collection_tree(&imported, "Imported").unwrap();
+        let tree = db.load_collections().unwrap();
+        assert_eq!(tree[0].id, collection_id);
+        let outer = &tree[0].folders[0];
+        let inner = &outer.folders[0];
+        assert_eq!(outer.collection_id, collection_id);
+        assert_eq!(inner.parent_id, Some(outer.id));
+        assert_eq!(inner.requests[0].collection_id, collection_id);
+        assert_eq!(inner.requests[0].folder_id, Some(inner.id));
     }
 }

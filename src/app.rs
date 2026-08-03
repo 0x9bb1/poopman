@@ -1,16 +1,24 @@
 use gpui::*;
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme as _, Root, TitleBar, WindowExt,
+    button::{Button, ButtonVariants},
+    h_flex, input::{Input, InputState}, select::{Select, SelectState}, v_flex,
+    ActiveTheme as _, IndexPath, Root, Sizable as _, TitleBar, WindowExt,
     resizable::{h_resizable, resizable_panel, v_resizable},
 };
 use gpui::px;
 use std::sync::Arc;
 
 use crate::code_snippet_panel::CodeSnippetPanel;
+use crate::collections_panel::{
+    CollectionTarget, CollectionsChanged, CollectionsPanel, NewRequestRequested,
+    SavedRequestClicked,
+};
 use crate::db::Database;
 use crate::environment_manager::{EnvironmentManager, EnvironmentsChanged};
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
-use crate::request_editor::{OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor};
+use crate::request_editor::{
+    OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor, SaveRequestRequested,
+};
 use crate::request_tab::RequestTab;
 use crate::response_viewer::ResponseViewer;
 use crate::tab_bar::{NewTabClicked, TabBar, TabClicked, TabCloseClicked};
@@ -19,6 +27,12 @@ use crate::theme::{
 };
 
 actions!(poopman, [SendRequest, NewTab, CloseTab, NextTab, PrevTab, FocusUrl, Quit]);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SidebarView {
+    Collections,
+    History,
+}
 
 /// Main application view
 pub struct PoopmanApp {
@@ -37,6 +51,8 @@ pub struct PoopmanApp {
     focus_handle: FocusHandle,
     db: Arc<Database>,
     history_panel: Entity<HistoryPanel>,
+    collections_panel: Entity<CollectionsPanel>,
+    sidebar_view: SidebarView,
     request_editor: Entity<RequestEditor>,
     response_viewer: Entity<ResponseViewer>,
     tab_bar: Entity<TabBar>,
@@ -63,6 +79,7 @@ impl PoopmanApp {
         let request_editor = cx.new(|cx| RequestEditor::new(window, cx));
         let response_viewer = cx.new(|cx| ResponseViewer::new(window, cx));
         let history_panel = cx.new(|cx| HistoryPanel::new(db.clone(), window, cx));
+        let collections_panel = cx.new(|cx| CollectionsPanel::new(db.clone(), window, cx));
         let tab_bar = cx.new(|cx| TabBar::new(window, cx));
         let env_manager = cx.new(|cx| EnvironmentManager::new(db.clone(), window, cx));
         let code_panel = cx.new(|cx| CodeSnippetPanel::new(window, cx));
@@ -75,6 +92,7 @@ impl PoopmanApp {
         let request_tabs = vec![RequestTab::new_empty(0)];
         let active_tab_index = 0;
         let next_tab_id = 1;
+        let sidebar_view = SidebarView::Collections;
 
         // Subscribe to request completion events
         let db_clone = db.clone();
@@ -99,11 +117,13 @@ impl PoopmanApp {
                     viewer.set_response(event.response.clone(), window, cx);
                 });
 
-                // Update current tab data with the completed request and response (always)
+                // Keep the editor's unresolved request in the tab. The event
+                // request is the wire form (environment variables substituted),
+                // which must not overwrite a saved `{{variable}}` expression.
                 if let Some(tab) = this.request_tabs.get_mut(this.active_tab_index) {
-                    tab.request = event.request.clone();
+                    tab.request = this.request_editor.read(cx).get_current_request_data(cx);
                     tab.response = Some(event.response.clone());
-                    tab.update_title();
+                    tab.update_title_from_saved_name();
                     this.update_tab_bar(cx);
                 }
             },
@@ -115,6 +135,38 @@ impl PoopmanApp {
             window,
             move |this, _, event: &HistoryItemClicked, window, cx| {
                 this.open_history_in_new_tab(&event.item, window, cx);
+            },
+        );
+
+        // Open a persisted collection request in a new tab (or reuse a blank
+        // scratch tab), keeping collection metadata attached to the tab.
+        let collections_sub = cx.subscribe_in(
+            &collections_panel,
+            window,
+            move |this, _, event: &SavedRequestClicked, window, cx| {
+                this.open_saved_request_in_new_tab(&event.request, window, cx);
+            },
+        );
+
+        let new_collection_request_sub = cx.subscribe_in(
+            &collections_panel,
+            window,
+            move |this, _, event: &NewRequestRequested, window, cx| {
+                this.collections_panel.update(cx, |panel, cx| {
+                    panel.select_target(&event.target, cx);
+                });
+                this.create_new_tab(window, cx);
+            },
+        );
+
+        // Collection tree mutations can rename or remove rows while their
+        // requests are open. Refresh tab metadata without replacing unsaved
+        // editor contents.
+        let collections_changed_sub = cx.subscribe_in(
+            &collections_panel,
+            window,
+            move |this, _, event: &CollectionsChanged, _window, cx| {
+                this.reconcile_collection_tabs(&event.deleted_request_ids, cx);
             },
         );
 
@@ -191,6 +243,14 @@ impl PoopmanApp {
             },
         );
 
+        let save_request_sub = cx.subscribe_in(
+            &request_editor,
+            window,
+            move |this, _, _event: &SaveRequestRequested, window, cx| {
+                this.save_request_requested(window, cx);
+            },
+        );
+
         // Push the initial tab into the tab bar so the first request shows as a
         // tab immediately (the TabBar entity starts empty; without this the bar
         // would show only the "+" until the first tab action).
@@ -208,6 +268,8 @@ impl PoopmanApp {
             focus_handle,
             db,
             history_panel,
+            collections_panel,
+            sidebar_view,
             request_editor,
             response_viewer,
             tab_bar,
@@ -221,12 +283,16 @@ impl PoopmanApp {
             _subscriptions: vec![
                 request_sub,
                 history_sub,
+                collections_sub,
+                new_collection_request_sub,
+                collections_changed_sub,
                 tab_clicked_sub,
                 new_tab_sub,
                 close_tab_sub,
                 env_changed_sub,
                 open_code_sub,
                 cancel_sub,
+                save_request_sub,
             ],
         }
     }
@@ -330,7 +396,7 @@ impl PoopmanApp {
             tab.response = response;
             tab.params_state = Some(params_state);
             tab.headers_state = Some(headers_state);
-            tab.update_title();
+            tab.update_title_from_saved_name();
         }
     }
 
@@ -348,23 +414,7 @@ impl PoopmanApp {
 
         // Load new tab data into editor
         if let Some(tab) = self.request_tabs.get(index).cloned() {
-            self.request_editor.update(cx, |editor, cx| {
-                // Load basic request data first
-                editor.load_request(&tab.request, window, cx);
-
-                // If we have saved UI state, load it (overrides parsed state from URL)
-                if let Some(params_state) = &tab.params_state
-                    && !params_state.is_empty()
-                {
-                    editor.load_params_state(params_state, window, cx);
-                }
-
-                if let Some(headers_state) = &tab.headers_state
-                    && !headers_state.is_empty()
-                {
-                    editor.load_headers_state(headers_state, window, cx);
-                }
-            });
+            self.load_tab_into_editor(&tab, window, cx);
 
             // Load response data
             self.response_viewer.update(cx, |viewer, cx| {
@@ -441,9 +491,7 @@ impl PoopmanApp {
 
             // Load the new active tab
             if let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() {
-                self.request_editor.update(cx, |editor, cx| {
-                    editor.load_request(&tab.request, window, cx);
-                });
+                self.load_tab_into_editor(&tab, window, cx);
 
                 // Load response for the new active tab
                 self.response_viewer.update(cx, |viewer, cx| {
@@ -516,6 +564,309 @@ impl PoopmanApp {
 
         self.update_tab_bar(cx);
         cx.notify();
+    }
+
+    /// Open a saved collection request in a tab, reusing a pristine scratch tab
+    /// when possible. The persisted row name remains the tab title even after
+    /// the URL or method is edited.
+    fn open_saved_request_in_new_tab(
+        &mut self,
+        saved: &crate::types::SavedRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing_index) = self
+            .request_tabs
+            .iter()
+            .position(|tab| tab.saved_request_id == Some(saved.id))
+        {
+            self.switch_to_tab(existing_index, window, cx);
+            return;
+        }
+
+        self.save_current_tab_state(cx);
+        let new_tab = if self
+            .request_tabs
+            .get(self.active_tab_index)
+            .is_some_and(RequestTab::is_blank)
+        {
+            let id = self.request_tabs[self.active_tab_index].id;
+            let tab = RequestTab::from_saved_request(id, saved);
+            self.request_tabs[self.active_tab_index] = tab.clone();
+            tab
+        } else {
+            let tab = RequestTab::from_saved_request(self.next_tab_id, saved);
+            self.next_tab_id += 1;
+            self.request_tabs.push(tab.clone());
+            self.active_tab_index = self.request_tabs.len() - 1;
+            tab
+        };
+
+        self.load_tab_into_editor(&new_tab, window, cx);
+        self.response_viewer.update(cx, |viewer, cx| {
+            viewer.clear_response(window, cx);
+        });
+        self.update_tab_bar(cx);
+        cx.notify();
+    }
+
+    fn load_tab_into_editor(
+        &mut self,
+        tab: &RequestTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_editor.update(cx, |editor, cx| {
+            editor.load_request(&tab.request, window, cx);
+            if let Some(params_state) = &tab.params_state
+                && !params_state.is_empty()
+            {
+                editor.load_params_state(params_state, window, cx);
+            }
+            if let Some(headers_state) = &tab.headers_state
+                && !headers_state.is_empty()
+            {
+                editor.load_headers_state(headers_state, window, cx);
+            }
+        });
+    }
+
+    /// Keep tab metadata synchronized with collection-side rename/delete
+    /// actions, while deliberately leaving the current editor values alone.
+    fn reconcile_collection_tabs(&mut self, deleted_ids: &[i64], cx: &mut Context<Self>) {
+        for tab in &mut self.request_tabs {
+            let Some(saved_id) = tab.saved_request_id else {
+                continue;
+            };
+            if deleted_ids.contains(&saved_id) {
+                tab.saved_request_id = None;
+                tab.collection_id = None;
+                tab.folder_id = None;
+                tab.saved_name = None;
+                tab.update_title();
+                continue;
+            }
+            match self.db.load_saved_request(saved_id) {
+                Ok(Some(saved)) => {
+                    tab.collection_id = Some(saved.collection_id);
+                    tab.folder_id = saved.folder_id;
+                    tab.saved_name = Some(saved.name);
+                    tab.update_title_from_saved_name();
+                }
+                Ok(None) => {
+                    tab.saved_request_id = None;
+                    tab.collection_id = None;
+                    tab.folder_id = None;
+                    tab.saved_name = None;
+                    tab.update_title();
+                }
+                Err(error) => log::error!("Failed to refresh saved request metadata: {}", error),
+            }
+        }
+        self.update_tab_bar(cx);
+        cx.notify();
+    }
+
+    fn save_request_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_current_tab_state(cx);
+        let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() else {
+            return;
+        };
+        let params_state = tab.params_state.clone().unwrap_or_default();
+        let headers_state = tab.headers_state.clone().unwrap_or_default();
+
+        if let (Some(saved_id), Some(collection_id), Some(name)) =
+            (tab.saved_request_id, tab.collection_id, tab.saved_name.clone())
+        {
+            match self.db.update_saved_request(
+                saved_id,
+                collection_id,
+                tab.folder_id,
+                &name,
+                &tab.request,
+                &params_state,
+                &headers_state,
+            ) {
+                Ok(()) => {
+                    self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
+                    cx.notify();
+                }
+                Err(error) => app_notice(window, cx, "Save failed", error.to_string()),
+            }
+            return;
+        }
+
+        let mut targets = self.collections_panel.read(cx).request_targets();
+        if targets.is_empty() {
+            match self.db.create_collection("My Collection") {
+                Ok(_) => {
+                    self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
+                    targets = self.collections_panel.read(cx).request_targets();
+                }
+                Err(error) => {
+                    app_notice(window, cx, "Save failed", error.to_string());
+                    return;
+                }
+            }
+        }
+        let selected = self.collections_panel.read(cx).selected_target();
+        let initial_name = if tab.title.trim().is_empty() || tab.title == "New Request" {
+            format!("{} request", tab.request.method.as_str())
+        } else {
+            tab.title.clone()
+        };
+        self.open_new_save_dialog(
+            tab.id,
+            initial_name,
+            tab.request,
+            params_state,
+            headers_state,
+            targets,
+            selected,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_new_save_dialog(
+        &mut self,
+        tab_id: usize,
+        initial_name: String,
+        request: crate::types::RequestData,
+        params_state: Vec<crate::types::ParamState>,
+        headers_state: Vec<crate::types::HeaderState>,
+        targets: Vec<CollectionTarget>,
+        selected: Option<CollectionTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name_input = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("Request name");
+            input.set_value(&initial_name, window, cx);
+            input
+        });
+        let labels = targets
+            .iter()
+            .map(|target| target.label.clone())
+            .collect::<Vec<_>>();
+        let selected_index = selected
+            .as_ref()
+            .and_then(|selected| targets.iter().position(|target| target == selected))
+            .unwrap_or(0);
+        let target_select = cx.new(|cx| {
+            SelectState::new(
+                labels,
+                Some(IndexPath::default().row(selected_index)),
+                window,
+                cx,
+            )
+        });
+        // Dialogs are absolutely positioned by gpui-component. Without a
+        // viewport-relative bound, the fixed 520px dialog can extend past a
+        // compact window and its footer gets clipped by the window edge.
+        let viewport = window.viewport_size();
+        let max_dialog_width = (viewport.width - px(32.)).max(px(360.));
+        let max_dialog_height = (viewport.height - px(32.)).max(px(220.));
+        let app = cx.entity();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let name_input_for_ok = name_input.clone();
+            let target_select_for_ok = target_select.clone();
+            let targets_for_ok = targets.clone();
+            let request_for_ok = request.clone();
+            let params_for_ok = params_state.clone();
+            let headers_for_ok = headers_state.clone();
+            let app = app.clone();
+            dialog
+                .title(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .child("Save request"),
+                )
+                .w(px(520.))
+                .max_w(max_dialog_width)
+                .max_h(max_dialog_height)
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(v_flex().gap_1().child(div().text_sm().child("Request name")).child(Input::new(&name_input)))
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_sm().child("Collection / folder"))
+                                .child(Select::new(&target_select)),
+                        ),
+                )
+                .confirm()
+                .on_ok(move |_, window, cx: &mut App| {
+                    let name = name_input_for_ok.read(cx).value().trim().to_string();
+                    if name.is_empty() {
+                        return false;
+                    }
+                    let index = target_select_for_ok
+                        .read(cx)
+                        .selected_index(cx)
+                        .map(|index| index.row)
+                        .unwrap_or(0);
+                    let Some(target) = targets_for_ok.get(index).cloned() else {
+                        return false;
+                    };
+                    let mut succeeded = false;
+                    app.update(cx, |app, cx| {
+                        succeeded = app.persist_new_saved_request(
+                            tab_id,
+                            &name,
+                            target,
+                            &request_for_ok,
+                            &params_for_ok,
+                            &headers_for_ok,
+                            window,
+                            cx,
+                        );
+                    });
+                    succeeded
+                })
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_new_saved_request(
+        &mut self,
+        tab_id: usize,
+        name: &str,
+        target: CollectionTarget,
+        request: &crate::types::RequestData,
+        params_state: &[crate::types::ParamState],
+        headers_state: &[crate::types::HeaderState],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let id = match self.db.insert_saved_request(
+            target.collection_id,
+            target.folder_id,
+            name,
+            request,
+            params_state,
+            headers_state,
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                app_notice(window, cx, "Save failed", error.to_string());
+                return false;
+            }
+        };
+        if let Some(tab) = self.request_tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.saved_request_id = Some(id);
+            tab.collection_id = Some(target.collection_id);
+            tab.folder_id = target.folder_id;
+            tab.saved_name = Some(name.to_string());
+            tab.update_title_from_saved_name();
+        }
+        self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
+        self.update_tab_bar(cx);
+        cx.notify();
+        true
     }
 
     /// Update tab bar with current tabs
@@ -611,7 +962,57 @@ impl Render for PoopmanApp {
                                         crate::ui::card_panel(theme)
                                             .size_full()
                                             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                            .child(self.history_panel.clone()),
+                                            .child(
+                                                v_flex()
+                                                    .size_full()
+                                                    .child(
+                                                    div()
+                                                        .w_full()
+                                                        .border_b_1()
+                                                        .border_color(theme.border)
+                                                        .child(
+                                                            h_flex()
+                                                                .w_full()
+                                                                .gap_1()
+                                                                .p_2()
+                                                                .child(
+                                                                    sidebar_switch(
+                                                                        "Collections",
+                                                                        self.sidebar_view == SidebarView::Collections,
+                                                                        cx.listener(|this, _, _, cx| {
+                                                                            this.sidebar_view = SidebarView::Collections;
+                                                                            cx.notify();
+                                                                        }),
+                                                                    ),
+                                                                )
+                                                                .child(
+                                                                    sidebar_switch(
+                                                                        "History",
+                                                                        self.sidebar_view == SidebarView::History,
+                                                                        cx.listener(|this, _, _, cx| {
+                                                                            this.sidebar_view = SidebarView::History;
+                                                                            cx.notify();
+                                                                        }),
+                                                                    ),
+                                                                ),
+                                                        ),
+                                                    )
+                                                    .child(if self.sidebar_view == SidebarView::Collections {
+                                                        div()
+                                                            .flex_1()
+                                                            .min_h_0()
+                                                            .min_w_0()
+                                                            .child(self.collections_panel.clone())
+                                                            .into_any_element()
+                                                    } else {
+                                                        div()
+                                                            .flex_1()
+                                                            .min_h_0()
+                                                            .min_w_0()
+                                                            .child(self.history_panel.clone())
+                                                            .into_any_element()
+                                                    }),
+                                            ),
                                     ),
                             )
                             .child(
@@ -683,6 +1084,42 @@ impl Render for PoopmanApp {
             // by the app's root view; embed the dialog overlay here.
             .children(Root::render_dialog_layer(window, cx))
     }
+}
+
+fn sidebar_switch<F>(
+    label: &'static str,
+    active: bool,
+    on_click: F,
+) -> impl IntoElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let button = Button::new(label)
+        .small()
+        .label(label)
+        .on_click(on_click);
+    if active {
+        button.primary()
+    } else {
+        button.ghost()
+    }
+}
+
+fn app_notice(window: &mut Window, cx: &mut App, title: impl Into<String>, message: impl Into<String>) {
+    let title = title.into();
+    let message = message.into();
+    window.open_dialog(cx, move |dialog, _window, cx| {
+        dialog
+            .title(div().text_lg().font_weight(FontWeight::BOLD).child(title.clone()))
+            .w(px(520.))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(message.clone()),
+            )
+            .alert()
+    });
 }
 
 /// Next (`forward`) or previous tab index, wrapping at both ends.

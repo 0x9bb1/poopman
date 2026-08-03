@@ -15,6 +15,13 @@ pub struct RequestTab {
     pub headers_state: Option<Vec<HeaderState>>,
     /// Associated history item ID (if opened from history)
     pub history_id: Option<i64>,
+    /// Associated collection request ID, if this tab was opened from a saved
+    /// request. Collection saves are explicit, so edits remain in the tab
+    /// until the user presses the save action.
+    pub saved_request_id: Option<i64>,
+    pub collection_id: Option<i64>,
+    pub folder_id: Option<i64>,
+    pub saved_name: Option<String>,
 }
 
 impl RequestTab {
@@ -34,6 +41,10 @@ impl RequestTab {
             params_state: None,
             headers_state: None,
             history_id: None,
+            saved_request_id: None,
+            collection_id: None,
+            folder_id: None,
+            saved_name: None,
         }
     }
 
@@ -47,6 +58,27 @@ impl RequestTab {
             params_state: None,
             headers_state: None,
             history_id: Some(item.id),
+            saved_request_id: None,
+            collection_id: None,
+            folder_id: None,
+            saved_name: None,
+        }
+    }
+
+    /// Create a request tab from a persisted collection request.
+    pub fn from_saved_request(id: usize, saved: &crate::types::SavedRequest) -> Self {
+        Self {
+            id,
+            title: saved.name.clone(),
+            request: saved.request.clone(),
+            response: None,
+            params_state: Some(saved.params_state.clone()),
+            headers_state: Some(saved.headers_state.clone()),
+            history_id: None,
+            saved_request_id: Some(saved.id),
+            collection_id: Some(saved.collection_id),
+            folder_id: saved.folder_id,
+            saved_name: Some(saved.name.clone()),
         }
     }
 
@@ -68,12 +100,24 @@ impl RequestTab {
             .filter(|s| !s.is_empty())
             .unwrap_or("Untitled");
 
-        format!("{} {}", request.method.as_str(), path)
+        // The tab bar renders the HTTP method in its own colored label. Keep
+        // the title to the request path so a scratch/history tab does not
+        // become `GET GET /path`.
+        path.to_string()
     }
 
     /// Update title based on current request data
     pub fn update_title(&mut self) {
         self.title = Self::generate_title(&self.request);
+    }
+
+    /// Keep a collection request's explicit name when the editor changes.
+    pub fn update_title_from_saved_name(&mut self) {
+        if let Some(name) = &self.saved_name {
+            self.title = name.clone();
+        } else {
+            self.update_title();
+        }
     }
 
     /// A pristine scratch tab — the default tab at startup, or an untouched
@@ -87,6 +131,7 @@ impl RequestTab {
     /// been opened from history.
     pub fn is_blank(&self) -> bool {
         self.history_id.is_none()
+            && self.saved_request_id.is_none()
             && self.response.is_none()
             && self.request.url.trim().is_empty()
             && match &self.request.body {
@@ -152,6 +197,16 @@ mod tests {
             subtype: RawSubtype::Json,
         };
         assert!(!tab.is_blank());
+    }
+
+    #[test]
+    fn generated_tab_title_leaves_method_to_tab_bar() {
+        let mut request = empty_request();
+        request.method = HttpMethod::POST;
+        request.url = "https://example.com/items?draft=true".to_string();
+        let item = HistoryItem::new(8, "t".to_string(), request, None);
+
+        assert_eq!(RequestTab::from_history(1, &item).title, "items");
     }
 
     #[test]

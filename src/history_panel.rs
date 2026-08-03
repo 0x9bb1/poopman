@@ -194,15 +194,30 @@ impl Render for HistoryPanel {
                 // Header
                 h_flex()
                     .items_center()
-                    .justify_between()
-                    .p_3()
+                    .w_full()
+                    .gap_1()
+                    .px_2()
+                    .py_2()
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
                         div()
+                            .flex_shrink_0()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("History")
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                Input::new(&self.search)
+                                    .small()
+                                    .w_full()
+                                    .cleanable(true)
+                                    .prefix(Icon::empty().path("icons/search.svg")),
+                            ),
                     )
                     .child(
                         Button::new("clear-btn")
@@ -210,20 +225,6 @@ impl Render for HistoryPanel {
                             .ghost()
                             .label("Clear")
                             .on_click(cx.listener(Self::clear_history)),
-                    ),
-            )
-            .child(
-                // Search row (always visible, like Postman)
-                div()
-                    .px_2()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        Input::new(&self.search)
-                            .small()
-                            .cleanable(true)
-                            .prefix(Icon::empty().path("icons/search.svg")),
                     ),
             )
             .when(self.history.is_empty(), |this| {

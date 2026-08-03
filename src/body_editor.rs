@@ -24,6 +24,7 @@ fn get_placeholder_for_subtype(subtype: RawSubtype) -> &'static str {
         RawSubtype::Xml => r#"<root><element>value</element></root>"#,
         RawSubtype::Text => "Enter plain text here...",
         RawSubtype::JavaScript => "console.log('Hello, world!');",
+        RawSubtype::UrlEncoded => "key=value&another=value",
     }
 }
 
@@ -39,6 +40,9 @@ pub struct BodyEditor {
     formdata_input_states: Vec<FormDataRowInputs>,
     formdata_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
+    // Subscriptions owned by the current form-data rows. The raw subtype
+    // subscription lives in `_subscriptions` and must survive loading tabs.
+    _formdata_subscriptions: Vec<Subscription>,
     // Format/validation state
     validation_message: Option<String>,
     validation_error: bool,
@@ -75,7 +79,7 @@ impl BodyEditor {
         // Create Select for Raw subtypes
         let raw_subtype_select = cx.new(|cx| {
             SelectState::new(
-                vec!["JSON", "XML", "Text", "JavaScript"],
+                vec!["JSON", "XML", "Text", "JavaScript", "URL-encoded"],
                 Some(IndexPath::default()), // Default to JSON
                 window,
                 cx,
@@ -104,6 +108,7 @@ impl BodyEditor {
             formdata_input_states: vec![],
             formdata_scroll_handle: ScrollHandle::new(),
             _subscriptions: vec![],
+            _formdata_subscriptions: vec![],
             validation_message: None,
             validation_error: false,
         };
@@ -213,9 +218,11 @@ impl BodyEditor {
             BodyType::FormData(rows) => {
                 self.body_type_index = 2;
                 self.formdata_rows = rows.clone();
-                // Clear existing input states and subscriptions
+                // Clear existing input states and subscriptions. Keep the raw
+                // subtype subscription alive; otherwise loading a saved
+                // form-data request makes the raw selector stop emitting.
                 self.formdata_input_states.clear();
-                self._subscriptions.clear();
+                self._formdata_subscriptions.clear();
 
                 // Create new input states for each row
                 for (row_index, row) in rows.iter().enumerate() {
@@ -249,17 +256,17 @@ impl BodyEditor {
                         )
                     });
 
-                    self._subscriptions.push(
+                    self._formdata_subscriptions.push(
                         cx.subscribe(&key_input, Self::handle_input_event)
                     );
-                    self._subscriptions.push(
+                    self._formdata_subscriptions.push(
                         cx.subscribe(&value_input, Self::handle_input_event)
                     );
 
                     // Subscribe to type selector changes (subscribe_in for `window`,
                     // so the value field's placeholder updates on Text <-> File).
                     let value_input_for_type = value_input.clone();
-                    self._subscriptions.push(
+                    self._formdata_subscriptions.push(
                         cx.subscribe_in(&type_select, window, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
                             if let SelectEvent::Confirm(Some(selected_value)) = event {
                                 let should_be_file = *selected_value == "File";
@@ -395,18 +402,18 @@ impl BodyEditor {
                 }
             }
         });
-        self._subscriptions.push(auto_add_sub);
+        self._formdata_subscriptions.push(auto_add_sub);
 
         // Subscribe to inputs for data model updates
-        self._subscriptions
+        self._formdata_subscriptions
             .push(cx.subscribe(&key_input, Self::handle_input_event));
-        self._subscriptions
+        self._formdata_subscriptions
             .push(cx.subscribe(&value_input, Self::handle_input_event));
 
         // Subscribe to type selector changes (subscribe_in so we have `window` to
         // refresh the value field's placeholder when toggling Text <-> File).
         let value_input_for_type = value_input.clone();
-        self._subscriptions.push(
+        self._formdata_subscriptions.push(
             cx.subscribe_in(&type_select, window, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
                 if let SelectEvent::Confirm(Some(selected_value)) = event {
                     let should_be_file = *selected_value == "File";
