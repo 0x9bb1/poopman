@@ -17,7 +17,8 @@ use crate::db::Database;
 use crate::environment_manager::{EnvironmentManager, EnvironmentsChanged};
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
 use crate::request_editor::{
-    OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor, SaveRequestRequested,
+    OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor,
+    ToggleRequestBookmarkRequested,
 };
 use crate::request_tab::RequestTab;
 use crate::response_viewer::ResponseViewer;
@@ -243,11 +244,11 @@ impl PoopmanApp {
             },
         );
 
-        let save_request_sub = cx.subscribe_in(
+        let bookmark_toggle_sub = cx.subscribe_in(
             &request_editor,
             window,
-            move |this, _, _event: &SaveRequestRequested, window, cx| {
-                this.save_request_requested(window, cx);
+            move |this, _, _event: &ToggleRequestBookmarkRequested, window, cx| {
+                this.toggle_request_bookmark(window, cx);
             },
         );
 
@@ -292,7 +293,7 @@ impl PoopmanApp {
                 env_changed_sub,
                 open_code_sub,
                 cancel_sub,
-                save_request_sub,
+                bookmark_toggle_sub,
             ],
         }
     }
@@ -442,9 +443,7 @@ impl PoopmanApp {
         self.active_tab_index = self.request_tabs.len() - 1;
 
         // Load new tab into editor
-        self.request_editor.update(cx, |editor, cx| {
-            editor.load_request(&new_tab.request, window, cx);
-        });
+        self.load_tab_into_editor(&new_tab, window, cx);
 
         // Clear response for new tab
         self.response_viewer.update(cx, |viewer, cx| {
@@ -463,9 +462,8 @@ impl PoopmanApp {
             self.next_tab_id += 1;
             self.active_tab_index = 0;
 
-            self.request_editor.update(cx, |editor, cx| {
-                editor.load_request(&self.request_tabs[0].request, window, cx);
-            });
+            let reset_tab = self.request_tabs[0].clone();
+            self.load_tab_into_editor(&reset_tab, window, cx);
 
             // Clear response for reset tab
             self.response_viewer.update(cx, |viewer, cx| {
@@ -549,9 +547,7 @@ impl PoopmanApp {
         };
 
         // Load into editor
-        self.request_editor.update(cx, |editor, cx| {
-            editor.load_request(&new_tab.request, window, cx);
-        });
+        self.load_tab_into_editor(&new_tab, window, cx);
 
         // Load response from history
         self.response_viewer.update(cx, |viewer, cx| {
@@ -618,6 +614,7 @@ impl PoopmanApp {
     ) {
         self.request_editor.update(cx, |editor, cx| {
             editor.load_request(&tab.request, window, cx);
+            editor.set_is_saved_request(tab.saved_request_id.is_some(), cx);
             if let Some(params_state) = &tab.params_state
                 && !params_state.is_empty()
             {
@@ -663,11 +660,18 @@ impl PoopmanApp {
                 Err(error) => log::error!("Failed to refresh saved request metadata: {}", error),
             }
         }
+        let active_is_saved = self
+            .request_tabs
+            .get(self.active_tab_index)
+            .is_some_and(|tab| tab.saved_request_id.is_some());
+        self.request_editor.update(cx, |editor, cx| {
+            editor.set_is_saved_request(active_is_saved, cx);
+        });
         self.update_tab_bar(cx);
         cx.notify();
     }
 
-    fn save_request_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_request_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.save_current_tab_state(cx);
         let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() else {
             return;
@@ -675,23 +679,26 @@ impl PoopmanApp {
         let params_state = tab.params_state.clone().unwrap_or_default();
         let headers_state = tab.headers_state.clone().unwrap_or_default();
 
-        if let (Some(saved_id), Some(collection_id), Some(name)) =
-            (tab.saved_request_id, tab.collection_id, tab.saved_name.clone())
-        {
-            match self.db.update_saved_request(
-                saved_id,
-                collection_id,
-                tab.folder_id,
-                &name,
-                &tab.request,
-                &params_state,
-                &headers_state,
-            ) {
+        if let Some(saved_id) = tab.saved_request_id {
+            match self.db.delete_saved_request(saved_id) {
                 Ok(()) => {
+                    if let Some(active_tab) = self.request_tabs.get_mut(self.active_tab_index) {
+                        active_tab.saved_request_id = None;
+                        active_tab.collection_id = None;
+                        active_tab.folder_id = None;
+                        active_tab.saved_name = None;
+                        active_tab.update_title();
+                    }
+                    self.request_editor.update(cx, |editor, cx| {
+                        editor.set_is_saved_request(false, cx);
+                    });
                     self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
+                    self.update_tab_bar(cx);
                     cx.notify();
                 }
-                Err(error) => app_notice(window, cx, "Save failed", error.to_string()),
+                Err(error) => {
+                    app_notice(window, cx, "Remove bookmark failed", error.to_string())
+                }
             }
             return;
         }
@@ -862,6 +869,15 @@ impl PoopmanApp {
             tab.folder_id = target.folder_id;
             tab.saved_name = Some(name.to_string());
             tab.update_title_from_saved_name();
+        }
+        let active_is_saved = self
+            .request_tabs
+            .get(self.active_tab_index)
+            .is_some_and(|tab| tab.id == tab_id && tab.saved_request_id.is_some());
+        if active_is_saved {
+            self.request_editor.update(cx, |editor, cx| {
+                editor.set_is_saved_request(true, cx);
+            });
         }
         self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
         self.update_tab_bar(cx);

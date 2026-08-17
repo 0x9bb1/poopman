@@ -31,10 +31,10 @@ pub struct OpenCodeSnippet;
 #[derive(Clone)]
 pub struct RequestCancelled;
 
-/// Emitted when the user explicitly saves the current request to a collection.
-/// The app decides whether this is a new save or an update to an existing row.
+/// Emitted when the user toggles the current request's collection bookmark.
+/// The app saves an unbookmarked request or removes an existing bookmark.
 #[derive(Clone)]
-pub struct SaveRequestRequested;
+pub struct ToggleRequestBookmarkRequested;
 
 /// Create a header-name input carrying the standard-header typeahead.
 ///
@@ -101,6 +101,9 @@ pub struct RequestEditor {
     _row_subscriptions: Vec<Subscription>,   // Header/param row subscriptions; rebuilt on load
     /// Active environment variables, pushed by PoopmanApp; used at send time.
     env_vars: std::collections::HashMap<String, String>,
+    /// Whether the active tab is associated with a request in a collection.
+    /// Saved requests use a filled bookmark in the request bar.
+    is_saved_request: bool,
 }
 
 impl RequestEditor {
@@ -141,6 +144,7 @@ impl RequestEditor {
             _subscriptions: vec![],
             _row_subscriptions: vec![],
             env_vars: std::collections::HashMap::new(),
+            is_saved_request: false,
         };
 
         // Subscribe to URL input changes: a pasted `curl …` command imports the
@@ -173,6 +177,14 @@ impl RequestEditor {
         editor.add_param_row(window, cx);
 
         editor
+    }
+
+    /// Update the collection state represented by the bookmark button.
+    pub fn set_is_saved_request(&mut self, is_saved: bool, cx: &mut Context<Self>) {
+        if self.is_saved_request != is_saved {
+            self.is_saved_request = is_saved;
+            cx.notify();
+        }
     }
 
     /// Initialize all predefined headers
@@ -1178,7 +1190,7 @@ impl RequestEditor {
 impl EventEmitter<RequestCompleted> for RequestEditor {}
 impl EventEmitter<OpenCodeSnippet> for RequestEditor {}
 impl EventEmitter<RequestCancelled> for RequestEditor {}
-impl EventEmitter<SaveRequestRequested> for RequestEditor {}
+impl EventEmitter<ToggleRequestBookmarkRequested> for RequestEditor {}
 
 impl Render for RequestEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1218,16 +1230,23 @@ impl Render for RequestEditor {
                                 .child(Input::new(&self.url_input)),
                         )
                         .child(
-                            // Explicit collection save. The bookmark icon keeps
-                            // the request bar compact; the tooltip explains the
-                            // action without repeating the old "Saved" status.
+                            // Collection bookmark toggle. A filled icon means
+                            // clicking it removes the request from its collection.
                             div().flex_shrink_0().child(
                                 Button::new("save-request-btn")
                                     .ghost()
-                                    .icon(Icon::empty().path("icons/bookmark.svg"))
-                                    .tooltip("Save request")
+                                    .icon(Icon::empty().path(if self.is_saved_request {
+                                        "icons/bookmark-filled.svg"
+                                    } else {
+                                        "icons/bookmark.svg"
+                                    }))
+                                    .tooltip(if self.is_saved_request {
+                                        "Remove from collection"
+                                    } else {
+                                        "Save request"
+                                    })
                                     .on_click(cx.listener(|_this, _ev, _window, cx| {
-                                        cx.emit(SaveRequestRequested);
+                                        cx.emit(ToggleRequestBookmarkRequested);
                                     })),
                             ),
                         )

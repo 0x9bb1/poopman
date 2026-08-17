@@ -59,8 +59,8 @@ cargo test                # unit tests (pure modules: code_gen, variables, url_p
 5. **History** — sent requests are saved automatically; click one to reload it, or Clear.
 6. **Collections** — switch the sidebar to **Collections**, create a collection or
    folder, then click the bookmark button beside the request actions. New saves ask
-   for a request name and destination; clicking the bookmark on an existing saved
-   request updates it.
+   for a request name and destination; clicking the filled bookmark on a saved
+   request removes it from the collection while keeping the current tab open.
 7. **Postman** — use **Import** in the Collections sidebar, or use a collection's
    context menu to export a v2.1 JSON file.
 
