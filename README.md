@@ -46,6 +46,21 @@ cargo build --release     # optimized binary at target/release/poopman[.exe]
 cargo test                # unit tests (pure modules: code_gen, variables, url_params, db, …)
 ```
 
+### Profiling
+
+Poopman has an opt-in Tracy profiling feature. It enables both the application's
+hot-path spans and GPUI's existing layout/render/frame instrumentation. Use the
+optimized profiling build so timings are representative while native debug
+symbols remain available:
+
+```bash
+cargo run --profile profiling --features profile
+```
+
+Start the Tracy profiler before or after launching Poopman and connect to the
+running process. The default build does not compile in the Tracy backend or the
+application profiling spans.
+
 ## Usage
 
 1. **Send a request** — pick a method, enter a URL (e.g. `https://api.github.com/zen`),

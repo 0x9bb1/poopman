@@ -1,19 +1,18 @@
 use gpui::prelude::FluentBuilder as _;
-use gpui::*;
 use gpui::px;
-use gpui_component::{
-    button::*, checkbox::Checkbox, input::*,
-    scroll::ScrollableElement as _,
-    select::*, v_flex, ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _,
-};
+use gpui::*;
 use gpui_component::input::InputEvent;
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, button::*,
+    checkbox::Checkbox, input::*, scroll::ScrollableElement as _, select::*, v_flex,
+};
 
 use crate::auth_editor::AuthEditor;
 use crate::body_editor::{BodyEditor, BodyTypeChanged};
 use crate::header_completion::HeaderCompletionProvider;
+use crate::theme::METHOD_SELECT_WIDTH;
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
 use crate::url_params::{self, QueryParam};
-use crate::theme::METHOD_SELECT_WIDTH;
 
 /// Event emitted when a request is sent and response is received.
 /// The response is `Arc`-shared so subscribers can store it without copying the body.
@@ -97,8 +96,8 @@ pub struct RequestEditor {
     /// generation and bail out if it no longer matches, so a stale task can
     /// never clobber state owned by a newer send.
     send_generation: u64,
-    _subscriptions: Vec<Subscription>,       // Permanent: URL input + body editor subscriptions
-    _row_subscriptions: Vec<Subscription>,   // Header/param row subscriptions; rebuilt on load
+    _subscriptions: Vec<Subscription>, // Permanent: URL input + body editor subscriptions
+    _row_subscriptions: Vec<Subscription>, // Header/param row subscriptions; rebuilt on load
     /// Active environment variables, pushed by PoopmanApp; used at send time.
     env_vars: std::collections::HashMap<String, String>,
     /// Whether the active tab is associated with a request in a collection.
@@ -124,9 +123,13 @@ impl RequestEditor {
         let auth_editor = cx.new(|cx| AuthEditor::new(window, cx));
 
         // Subscribe to body type changes to auto-update Content-Type header
-        let body_sub = cx.subscribe_in(&body_editor, window, |this: &mut RequestEditor, _, event: &BodyTypeChanged, window, cx| {
-            this.update_content_type_from_body(&event.content_type, window, cx);
-        });
+        let body_sub = cx.subscribe_in(
+            &body_editor,
+            window,
+            |this: &mut RequestEditor, _, event: &BodyTypeChanged, window, cx| {
+                this.update_content_type_from_body(&event.content_type, window, cx);
+            },
+        );
 
         let mut editor = Self {
             url_input: url_input.clone(),
@@ -149,21 +152,25 @@ impl RequestEditor {
 
         // Subscribe to URL input changes: a pasted `curl …` command imports the
         // whole request; anything else just re-parses query params.
-        let url_sub = cx.subscribe_in(&url_input, window, |this, _, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::Change) {
-                let value = this.url_input.read(cx).value().to_string();
-                if value.trim_start().starts_with("curl ")
-                    && let Some(request) = crate::curl_import::parse_curl(&value)
-                {
-                    // load_request rewrites the URL input, which re-fires
-                    // Change — the new value no longer starts with "curl",
-                    // so there is no loop.
-                    this.load_request(&request, window, cx);
-                    return;
+        let url_sub = cx.subscribe_in(
+            &url_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = this.url_input.read(cx).value().to_string();
+                    if value.trim_start().starts_with("curl ")
+                        && let Some(request) = crate::curl_import::parse_curl(&value)
+                    {
+                        // load_request rewrites the URL input, which re-fires
+                        // Change — the new value no longer starts with "curl",
+                        // so there is no loop.
+                        this.load_request(&request, window, cx);
+                        return;
+                    }
                 }
-            }
-            this.parse_url_to_params(window, cx);
-        });
+                this.parse_url_to_params(window, cx);
+            },
+        );
         editor._subscriptions.push(url_sub);
         editor._subscriptions.push(body_sub);
 
@@ -310,7 +317,9 @@ impl RequestEditor {
         let content_type = match &request.body {
             crate::types::BodyType::None => None,
             crate::types::BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
-            crate::types::BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
+            crate::types::BodyType::FormData(_) => {
+                Some("multipart/form-data; boundary=<auto>".to_string())
+            }
         };
         self.update_content_type_from_body(&content_type, window, cx);
 
@@ -331,9 +340,13 @@ impl RequestEditor {
         let method_index = self
             .method_select
             .read(cx)
-            .selected_index(cx).map(|idx| idx.row)
+            .selected_index(cx)
+            .map(|idx| idx.row)
             .unwrap_or(0);
-        let method = HttpMethod::all().get(method_index).copied().unwrap_or(HttpMethod::GET);
+        let method = HttpMethod::all()
+            .get(method_index)
+            .copied()
+            .unwrap_or(HttpMethod::GET);
 
         // Get headers (only enabled ones, excluding empty custom headers)
         let mut headers = Vec::new();
@@ -403,7 +416,12 @@ impl RequestEditor {
     }
 
     /// Load params state (including disabled params)
-    pub fn load_params_state(&mut self, state: &[crate::types::ParamState], window: &mut Window, cx: &mut Context<Self>) {
+    pub fn load_params_state(
+        &mut self,
+        state: &[crate::types::ParamState],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Clear existing params and subscriptions related to params
         self.params.clear();
 
@@ -424,12 +442,20 @@ impl RequestEditor {
             };
 
             // Subscribe to changes for syncing back to URL
-            let sub1 = cx.subscribe_in(&param_row.key_input, window, |this, _, _event: &InputEvent, window, cx| {
-                this.sync_params_to_url(window, cx);
-            });
-            let sub2 = cx.subscribe_in(&param_row.value_input, window, |this, _, _event: &InputEvent, window, cx| {
-                this.sync_params_to_url(window, cx);
-            });
+            let sub1 = cx.subscribe_in(
+                &param_row.key_input,
+                window,
+                |this, _, _event: &InputEvent, window, cx| {
+                    this.sync_params_to_url(window, cx);
+                },
+            );
+            let sub2 = cx.subscribe_in(
+                &param_row.value_input,
+                window,
+                |this, _, _event: &InputEvent, window, cx| {
+                    this.sync_params_to_url(window, cx);
+                },
+            );
 
             self._row_subscriptions.push(sub1);
             self._row_subscriptions.push(sub2);
@@ -443,7 +469,12 @@ impl RequestEditor {
     }
 
     /// Load headers state (including disabled headers)
-    pub fn load_headers_state(&mut self, state: &[crate::types::HeaderState], window: &mut Window, cx: &mut Context<Self>) {
+    pub fn load_headers_state(
+        &mut self,
+        state: &[crate::types::HeaderState],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Clear existing headers and subscriptions
         self.headers.clear();
 
@@ -478,19 +509,24 @@ impl RequestEditor {
             if matches!(header_state.header_type, HeaderType::Custom) {
                 let key_input = header_row.key_input.clone();
                 let key_input_for_closure = key_input.clone();
-                let sub = cx.subscribe_in(&key_input, window, move |this, emitter, _event: &InputEvent, window, cx| {
-                    this.maybe_advance_after_completion(emitter, window, cx);
+                let sub = cx.subscribe_in(
+                    &key_input,
+                    window,
+                    move |this, emitter, _event: &InputEvent, window, cx| {
+                        this.maybe_advance_after_completion(emitter, window, cx);
 
-                    if let Some(last) = this.headers.last() {
-                        let has_key = !last.key_input.read(cx).value().is_empty();
-                        if has_key
-                            && matches!(last.header_type, HeaderType::Custom)
-                            && this.headers.last().map(|h| Entity::entity_id(&h.key_input)) == Some(Entity::entity_id(&key_input_for_closure))
-                        {
-                            this.add_custom_header_row(window, cx);
+                        if let Some(last) = this.headers.last() {
+                            let has_key = !last.key_input.read(cx).value().is_empty();
+                            if has_key
+                                && matches!(last.header_type, HeaderType::Custom)
+                                && this.headers.last().map(|h| Entity::entity_id(&h.key_input))
+                                    == Some(Entity::entity_id(&key_input_for_closure))
+                            {
+                                this.add_custom_header_row(window, cx);
+                            }
                         }
-                    }
-                });
+                    },
+                );
                 self._row_subscriptions.push(sub);
             }
 
@@ -560,60 +596,75 @@ impl RequestEditor {
         // Subscribe to the key input change
         let key_input = new_row.key_input.clone();
         let key_input_for_closure = key_input.clone();
-        let sub = cx.subscribe_in(&key_input, window, move |this, emitter, _event: &InputEvent, window, cx| {
-            this.maybe_advance_after_completion(emitter, window, cx);
+        let sub = cx.subscribe_in(
+            &key_input,
+            window,
+            move |this, emitter, _event: &InputEvent, window, cx| {
+                this.maybe_advance_after_completion(emitter, window, cx);
 
-            // Check if this was the last row and it now has content
-            if let Some(last) = this.headers.last() {
-                let has_key = !last.key_input.read(cx).value().is_empty();
-                // Only auto-add if the last row is a custom row
-                if has_key
-                    && matches!(last.header_type, HeaderType::Custom)
-                    && this.headers.last().map(|h| Entity::entity_id(&h.key_input)) == Some(Entity::entity_id(&key_input_for_closure))
-                {
-                    this.add_custom_header_row(window, cx);
+                // Check if this was the last row and it now has content
+                if let Some(last) = this.headers.last() {
+                    let has_key = !last.key_input.read(cx).value().is_empty();
+                    // Only auto-add if the last row is a custom row
+                    if has_key
+                        && matches!(last.header_type, HeaderType::Custom)
+                        && this.headers.last().map(|h| Entity::entity_id(&h.key_input))
+                            == Some(Entity::entity_id(&key_input_for_closure))
+                    {
+                        this.add_custom_header_row(window, cx);
 
-                    // Scroll to bottom after adding new row
-                    let scroll_handle = this.headers_scroll_handle.clone();
-                    cx.spawn_in(window, async move |_this, cx| {
-                        // Wait for layout to stabilize by checking max_offset changes
-                        let mut last_offset = px(0.);
-                        let mut stable_count = 0;
+                        // Scroll to bottom after adding new row
+                        let scroll_handle = this.headers_scroll_handle.clone();
+                        cx.spawn_in(window, async move |_this, cx| {
+                            // Wait for layout to stabilize by checking max_offset changes
+                            let mut last_offset = px(0.);
+                            let mut stable_count = 0;
 
-                        for _ in 0..20 {  // Max 20 attempts (~20ms)
-                            cx.background_executor().timer(std::time::Duration::from_millis(1)).await;
+                            for _ in 0..20 {
+                                // Max 20 attempts (~20ms)
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(1))
+                                    .await;
 
-                            let current = scroll_handle.max_offset().height;
-                            if (current - last_offset).abs() < px(0.1) {
-                                stable_count += 1;
-                                if stable_count >= 2 {
-                                    // Offset stable for 2 checks, layout likely complete
-                                    break;
+                                let current = scroll_handle.max_offset().height;
+                                if (current - last_offset).abs() < px(0.1) {
+                                    stable_count += 1;
+                                    if stable_count >= 2 {
+                                        // Offset stable for 2 checks, layout likely complete
+                                        break;
+                                    }
+                                } else {
+                                    stable_count = 0;
                                 }
-                            } else {
-                                stable_count = 0;
+                                last_offset = current;
                             }
-                            last_offset = current;
-                        }
 
-                        // Scroll to bottom
-                        let _ = cx.update(|_, _cx| {
-                            let max_offset = scroll_handle.max_offset();
-                            scroll_handle.set_offset(point(px(0.), -max_offset.height));
-                        });
-                    }).detach();
+                            // Scroll to bottom
+                            let _ = cx.update(|_, _cx| {
+                                let max_offset = scroll_handle.max_offset();
+                                scroll_handle.set_offset(point(px(0.), -max_offset.height));
+                            });
+                        })
+                        .detach();
 
-                    cx.notify();
+                        cx.notify();
+                    }
                 }
-            }
-        });
+            },
+        );
 
         self._row_subscriptions.push(sub);
         self.headers.push(new_row);
         cx.notify();
     }
 
-    fn toggle_header(&mut self, index: usize, _checked: &bool, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_header(
+        &mut self,
+        index: usize,
+        _checked: &bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(header) = self.headers.get_mut(index) {
             // Cannot disable mandatory headers (e.g., Cache-Control)
             if !matches!(header.header_type, HeaderType::Mandatory) {
@@ -637,7 +688,10 @@ impl RequestEditor {
             self.headers.remove(index);
 
             // Check if there are any custom headers left
-            let has_custom_headers = self.headers.iter().any(|h| matches!(h.header_type, HeaderType::Custom));
+            let has_custom_headers = self
+                .headers
+                .iter()
+                .any(|h| matches!(h.header_type, HeaderType::Custom));
 
             // If no custom headers remain, add an empty one
             if !has_custom_headers {
@@ -666,7 +720,12 @@ impl RequestEditor {
     }
 
     /// Update Content-Type header to match body type
-    fn update_content_type_from_body(&mut self, content_type: &Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    fn update_content_type_from_body(
+        &mut self,
+        content_type: &Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Find Content-Type header and update it
         let new_value = content_type.clone().unwrap_or_default();
         for header in &mut self.headers {
@@ -706,6 +765,7 @@ impl RequestEditor {
     /// Used by the focus-gated `parse_url_to_params` wrapper (live URL edits) and
     /// directly by `load_request`, where the URL is set programmatically and never
     /// holds focus — so it must populate params unconditionally.
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn rebuild_params_from_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url_str = self.url_input.read(cx).value().to_string();
         let new_params = url_params::parse_query_params(&url_str);
@@ -776,12 +836,20 @@ impl RequestEditor {
         };
 
         // Subscribe to changes for syncing back to URL
-        let sub1 = cx.subscribe_in(&param_row.key_input, window, |this, _, _event: &InputEvent, window, cx| {
-            this.sync_params_to_url(window, cx);
-        });
-        let sub2 = cx.subscribe_in(&param_row.value_input, window, |this, _, _event: &InputEvent, window, cx| {
-            this.sync_params_to_url(window, cx);
-        });
+        let sub1 = cx.subscribe_in(
+            &param_row.key_input,
+            window,
+            |this, _, _event: &InputEvent, window, cx| {
+                this.sync_params_to_url(window, cx);
+            },
+        );
+        let sub2 = cx.subscribe_in(
+            &param_row.value_input,
+            window,
+            |this, _, _event: &InputEvent, window, cx| {
+                this.sync_params_to_url(window, cx);
+            },
+        );
 
         self._row_subscriptions.push(sub1);
         self._row_subscriptions.push(sub2);
@@ -813,6 +881,7 @@ impl RequestEditor {
     /// and directly by button callbacks (toggle/remove), where no text input holds
     /// focus. The resulting `set_value` emits InputEvent::Change, but the URL input
     /// is not focused, so `parse_url_to_params` short-circuits — no loop.
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn rebuild_url_from_params(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current_url = self.url_input.read(cx).value().to_string();
         let new_url = self.rebuild_url_with_params(&current_url, cx);
@@ -831,13 +900,16 @@ impl RequestEditor {
         let base = url_params::extract_base_url(url_str);
 
         // Collect params as QueryParam structs
-        let params: Vec<QueryParam> = self.params
+        let params: Vec<QueryParam> = self
+            .params
             .iter()
-            .map(|p| QueryParam::new(
-                p.key_input.read(cx).value().to_string(),
-                p.value_input.read(cx).value().to_string(),
-                p.enabled,
-            ))
+            .map(|p| {
+                QueryParam::new(
+                    p.key_input.read(cx).value().to_string(),
+                    p.value_input.read(cx).value().to_string(),
+                    p.enabled,
+                )
+            })
             .collect();
 
         // Build URL using pure function
@@ -858,54 +930,66 @@ impl RequestEditor {
         // Subscribe to key input change for auto-add
         let key_input = new_row.key_input.clone();
         let key_input_for_closure = key_input.clone();
-        let sub_key = cx.subscribe_in(&key_input, window, move |this, _, _event: &InputEvent, window, cx| {
-            // Sync to URL
-            this.sync_params_to_url(window, cx);
+        let sub_key = cx.subscribe_in(
+            &key_input,
+            window,
+            move |this, _, _event: &InputEvent, window, cx| {
+                // Sync to URL
+                this.sync_params_to_url(window, cx);
 
-            // Auto-add new row if this is the last one and has content
-            if let Some(last) = this.params.last() {
-                let has_key = !last.key_input.read(cx).value().is_empty();
-                if has_key
-                    && this.params.last().map(|p| Entity::entity_id(&p.key_input)) == Some(Entity::entity_id(&key_input_for_closure))
-                {
-                    this.add_param_row(window, cx);
+                // Auto-add new row if this is the last one and has content
+                if let Some(last) = this.params.last() {
+                    let has_key = !last.key_input.read(cx).value().is_empty();
+                    if has_key
+                        && this.params.last().map(|p| Entity::entity_id(&p.key_input))
+                            == Some(Entity::entity_id(&key_input_for_closure))
+                    {
+                        this.add_param_row(window, cx);
 
-                    // Scroll to bottom
-                    let scroll_handle = this.params_scroll_handle.clone();
-                    cx.spawn_in(window, async move |_this, cx| {
-                        let mut last_offset = px(0.);
-                        let mut stable_count = 0;
+                        // Scroll to bottom
+                        let scroll_handle = this.params_scroll_handle.clone();
+                        cx.spawn_in(window, async move |_this, cx| {
+                            let mut last_offset = px(0.);
+                            let mut stable_count = 0;
 
-                        for _ in 0..20 {
-                            cx.background_executor().timer(std::time::Duration::from_millis(1)).await;
+                            for _ in 0..20 {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(1))
+                                    .await;
 
-                            let current = scroll_handle.max_offset().height;
-                            if (current - last_offset).abs() < px(0.1) {
-                                stable_count += 1;
-                                if stable_count >= 2 {
-                                    break;
+                                let current = scroll_handle.max_offset().height;
+                                if (current - last_offset).abs() < px(0.1) {
+                                    stable_count += 1;
+                                    if stable_count >= 2 {
+                                        break;
+                                    }
+                                } else {
+                                    stable_count = 0;
                                 }
-                            } else {
-                                stable_count = 0;
+                                last_offset = current;
                             }
-                            last_offset = current;
-                        }
 
-                        let _ = cx.update(|_, _cx| {
-                            let max_offset = scroll_handle.max_offset();
-                            scroll_handle.set_offset(point(px(0.), -max_offset.height));
-                        });
-                    }).detach();
+                            let _ = cx.update(|_, _cx| {
+                                let max_offset = scroll_handle.max_offset();
+                                scroll_handle.set_offset(point(px(0.), -max_offset.height));
+                            });
+                        })
+                        .detach();
 
-                    cx.notify();
+                        cx.notify();
+                    }
                 }
-            }
-        });
+            },
+        );
 
         // Subscribe to value input change for syncing
-        let sub_value = cx.subscribe_in(&new_row.value_input, window, |this, _, _event: &InputEvent, window, cx| {
-            this.sync_params_to_url(window, cx);
-        });
+        let sub_value = cx.subscribe_in(
+            &new_row.value_input,
+            window,
+            |this, _, _event: &InputEvent, window, cx| {
+                this.sync_params_to_url(window, cx);
+            },
+        );
 
         self._row_subscriptions.push(sub_key);
         self._row_subscriptions.push(sub_value);
@@ -977,7 +1061,8 @@ impl RequestEditor {
     /// is `pub(super)` in gpui-component and unreachable from this crate; the
     /// `SelectAll` action itself is public.
     pub fn focus_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.url_input.update(cx, |input, cx| input.focus(window, cx));
+        self.url_input
+            .update(cx, |input, cx| input.focus(window, cx));
         window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
     }
 
@@ -988,7 +1073,13 @@ impl RequestEditor {
         if self.loading {
             return;
         }
-        let mut url = self.url_input.read(cx).value().to_string().trim().to_string();
+        let mut url = self
+            .url_input
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_string();
         if url.is_empty() {
             log::warn!("Cannot send request: URL is empty");
             return;
@@ -1075,7 +1166,9 @@ impl RequestEditor {
                         row.key = crate::variables::substitute(&row.key, env);
                         row.value = match row.value {
                             crate::types::FormDataValue::Text(t) => {
-                                crate::types::FormDataValue::Text(crate::variables::substitute(&t, env))
+                                crate::types::FormDataValue::Text(crate::variables::substitute(
+                                    &t, env,
+                                ))
                             }
                             other => other, // file path left as-is
                         };
@@ -1089,7 +1182,8 @@ impl RequestEditor {
         // Resolve auth {{vars}} and compute the wire header. The saved request
         // keeps manual headers + the auth config; only the wire gets the merged
         // header set (auth wins over a manual same-name header).
-        let resolved_auth = crate::variables::substitute_auth(&self.auth_editor.read(cx).get_auth(cx), env);
+        let resolved_auth =
+            crate::variables::substitute_auth(&self.auth_editor.read(cx).get_auth(cx), env);
 
         let request = RequestData {
             method,
@@ -1118,7 +1212,9 @@ impl RequestEditor {
             let response = match inflight.wait().await {
                 Ok(r) => r,
                 Err(e) => {
-                    if e.downcast_ref::<crate::http_client::RequestCanceled>().is_some() {
+                    if e.downcast_ref::<crate::http_client::RequestCanceled>()
+                        .is_some()
+                    {
                         // cancel_request() already reset the UI and bumped the
                         // generation; nothing left to do.
                         return Ok(());
@@ -1155,10 +1251,18 @@ impl RequestEditor {
             let duration = start.elapsed();
             let status = response.status;
 
-            log::debug!("Request completed with status {} in {}ms", status, duration.as_millis());
+            log::debug!(
+                "Request completed with status {} in {}ms",
+                status,
+                duration.as_millis()
+            );
 
             let is_text = crate::types::is_text_response(&response.headers, &response.body);
-            log::debug!("Response body size: {} bytes (text={})", response.body.len(), is_text);
+            log::debug!(
+                "Response body size: {} bytes (text={})",
+                response.body.len(),
+                is_text
+            );
 
             let response_data = ResponseData {
                 status: Some(status),
@@ -1193,6 +1297,7 @@ impl EventEmitter<RequestCancelled> for RequestEditor {}
 impl EventEmitter<ToggleRequestBookmarkRequested> for RequestEditor {}
 
 impl Render for RequestEditor {
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
@@ -1557,4 +1662,3 @@ impl Render for RequestEditor {
         )
     }
 }
-

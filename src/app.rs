@@ -1,11 +1,14 @@
+use gpui::px;
 use gpui::*;
 use gpui_component::{
-    button::{Button, ButtonVariants},
-    h_flex, input::{Input, InputState}, select::{Select, SelectState}, v_flex,
     ActiveTheme as _, IndexPath, Root, Sizable as _, TitleBar, WindowExt,
+    button::{Button, ButtonVariants},
+    h_flex,
+    input::{Input, InputState},
     resizable::{h_resizable, resizable_panel, v_resizable},
+    select::{Select, SelectState},
+    v_flex,
 };
-use gpui::px;
 use std::sync::Arc;
 
 use crate::code_snippet_panel::CodeSnippetPanel;
@@ -27,12 +30,51 @@ use crate::theme::{
     REQUEST_INITIAL_HEIGHT, REQUEST_MAX, REQUEST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, SIDEBAR_WIDTH,
 };
 
-actions!(poopman, [SendRequest, NewTab, CloseTab, NextTab, PrevTab, FocusUrl, Quit]);
+actions!(
+    poopman,
+    [
+        SendRequest,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        FocusUrl,
+        Quit
+    ]
+);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarView {
     Collections,
     History,
+}
+
+/// Data loaded before the first window is opened. Startup disk and SQLite work
+/// is performed on GPUI's background executor, so even schema migration cannot
+/// stall an already-running UI event loop.
+pub(crate) struct AppInitialState {
+    db: Arc<Database>,
+    environments: Vec<crate::types::Environment>,
+    active_environment_id: Option<i64>,
+    history: Vec<crate::types::HistoryItem>,
+    collections: Vec<crate::types::Collection>,
+}
+
+impl AppInitialState {
+    pub(crate) fn load() -> anyhow::Result<Self> {
+        let db = Arc::new(Database::new()?);
+        let environments = db.load_environments()?;
+        let active_environment_id = db.get_active_environment_id()?;
+        let history = db.load_recent_history(crate::history_panel::HISTORY_LIMIT)?;
+        let collections = db.load_collections()?;
+        Ok(Self {
+            db,
+            environments,
+            active_environment_id,
+            history,
+            collections,
+        })
+    }
 }
 
 /// Main application view
@@ -64,25 +106,38 @@ pub struct PoopmanApp {
     active_environment_id: Option<i64>,
     env_manager: Entity<EnvironmentManager>,
     code_panel: Entity<CodeSnippetPanel>,
+    collections_reconcile_generation: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 impl PoopmanApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Initialize database
-        let db = Arc::new(Database::new().expect("Failed to initialize database"));
-
-        // Load environments + active selection
-        let environments = db.load_environments().unwrap_or_default();
-        let active_environment_id = db.get_active_environment_id().unwrap_or(None);
+    pub fn new(initial: AppInitialState, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let AppInitialState {
+            db,
+            environments,
+            active_environment_id,
+            history,
+            collections,
+        } = initial;
+        db.register_ui_thread();
 
         // Create components
         let request_editor = cx.new(|cx| RequestEditor::new(window, cx));
         let response_viewer = cx.new(|cx| ResponseViewer::new(window, cx));
-        let history_panel = cx.new(|cx| HistoryPanel::new(db.clone(), window, cx));
-        let collections_panel = cx.new(|cx| CollectionsPanel::new(db.clone(), window, cx));
+        let history_panel = cx.new(|cx| HistoryPanel::new(db.clone(), history, window, cx));
+        let collections_panel =
+            cx.new(|cx| CollectionsPanel::new(db.clone(), collections, window, cx));
         let tab_bar = cx.new(|cx| TabBar::new(window, cx));
-        let env_manager = cx.new(|cx| EnvironmentManager::new(db.clone(), window, cx));
+        let manager_environments = environments.clone();
+        let env_manager = cx.new(|cx| {
+            EnvironmentManager::new(
+                db.clone(),
+                manager_environments,
+                active_environment_id,
+                window,
+                cx,
+            )
+        });
         let code_panel = cx.new(|cx| CodeSnippetPanel::new(window, cx));
 
         // Push the active environment's variables into the request editor.
@@ -103,17 +158,12 @@ impl PoopmanApp {
             &request_editor,
             window,
             move |this, _, event: &RequestCompleted, window, cx| {
-                // Postman behavior: every send is logged to History, including a
-                // re-send of a request opened from history (so edits like added
-                // auth are captured as a new entry).
-                if let Err(e) = Self::persist_send(&db_clone, &event.request) {
-                    log::error!("Failed to save history: {}", e);
-                }
-                history_panel_clone.update(cx, |panel, cx| {
-                    panel.reload(window, cx);
-                });
+                #[cfg(feature = "profile")]
+                profiling::scope!("handle request completed");
 
-                // Update response viewer (always)
+                // Paint the response first. Persistence is intentionally not on
+                // this callback's critical path: Telegram-style UI work submits
+                // storage work and receives completion back on the main loop.
                 response_viewer_clone.update(cx, |viewer, cx| {
                     viewer.set_response(event.response.clone(), window, cx);
                 });
@@ -127,6 +177,26 @@ impl PoopmanApp {
                     tab.update_title_from_saved_name();
                     this.update_tab_bar(cx);
                 }
+
+                // Postman behavior: every send is logged to History, including a
+                // re-send of a request opened from history. Database::call is
+                // synchronous by design, so run it only on GPUI's background
+                // executor and refresh the panel after the write has completed.
+                let db = db_clone.clone();
+                let request = event.request.clone();
+                let history_panel = history_panel_clone.clone();
+                let persist = cx.background_spawn(async move { Self::persist_send(&db, &request) });
+                cx.spawn_in(window, async move |_this, cx| {
+                    match persist.await {
+                        Ok(_) => {
+                            history_panel
+                                .update_in(cx, |panel, window, cx| panel.reload(window, cx))?;
+                        }
+                        Err(error) => log::error!("Failed to save history: {}", error),
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .detach();
             },
         );
 
@@ -166,8 +236,8 @@ impl PoopmanApp {
         let collections_changed_sub = cx.subscribe_in(
             &collections_panel,
             window,
-            move |this, _, event: &CollectionsChanged, _window, cx| {
-                this.reconcile_collection_tabs(&event.deleted_request_ids, cx);
+            move |this, _, event: &CollectionsChanged, window, cx| {
+                this.reconcile_collection_tabs(&event.deleted_request_ids, window, cx);
             },
         );
 
@@ -200,8 +270,8 @@ impl PoopmanApp {
         let env_changed_sub = cx.subscribe_in(
             &env_manager,
             window,
-            move |this, _, _e: &EnvironmentsChanged, _window, cx| {
-                this.reload_environments(cx);
+            move |this, _, event: &EnvironmentsChanged, _window, cx| {
+                this.apply_environment_state(event.environments.clone(), event.active_id, cx);
             },
         );
 
@@ -213,7 +283,8 @@ impl PoopmanApp {
             window,
             move |this, editor, _e: &OpenCodeSnippet, window, cx| {
                 let req = editor.read(cx).resolved_request_data(cx);
-                this.code_panel.update(cx, |panel, cx| panel.set_request(req, window, cx));
+                this.code_panel
+                    .update(cx, |panel, cx| panel.set_request(req, window, cx));
                 let panel = code_panel_for_sub.clone();
                 window.open_dialog(cx, move |dialog, _window, cx| {
                     let theme = cx.theme();
@@ -281,6 +352,7 @@ impl PoopmanApp {
             active_environment_id,
             env_manager,
             code_panel,
+            collections_reconcile_generation: 0,
             _subscriptions: vec![
                 request_sub,
                 history_sub,
@@ -333,13 +405,19 @@ impl PoopmanApp {
         )
     }
 
-    /// Reload environments + active selection from the DB and push the active
-    /// variable map to the request editor.
-    fn reload_environments(&mut self, cx: &mut Context<Self>) {
-        self.environments = self.db.load_environments().unwrap_or_default();
-        self.active_environment_id = self.db.get_active_environment_id().unwrap_or(None);
+    /// Apply the environment manager's in-memory state immediately. Persistence
+    /// is asynchronous; reflecting an edit never requires a DB read-back.
+    fn apply_environment_state(
+        &mut self,
+        environments: Vec<crate::types::Environment>,
+        active_environment_id: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.environments = environments;
+        self.active_environment_id = active_environment_id;
         let vars = Self::active_env_vars(&self.environments, self.active_environment_id);
-        self.request_editor.update(cx, |editor, _| editor.set_env_vars(vars));
+        self.request_editor
+            .update(cx, |editor, _| editor.set_env_vars(vars));
         cx.notify();
     }
 
@@ -373,15 +451,14 @@ impl PoopmanApp {
 
     /// Switch the active environment (or clear it) from the Edit menu, then
     /// reload + refresh the request editor's variable map.
-    pub(crate) fn set_active_environment(&mut self, id: Option<i64>, cx: &mut Context<Self>) {
-        if let Err(e) = self.db.set_active_environment_id(id) {
-            log::error!("Failed to set active environment: {}", e);
-            return;
-        }
-        self.reload_environments(cx);
-        self.env_manager.update(cx, |mgr, cx| {
-            mgr.reload();
-            cx.notify();
+    pub(crate) fn set_active_environment(
+        &mut self,
+        id: Option<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.env_manager.update(cx, |manager, cx| {
+            manager.set_active(id, window, cx);
         });
     }
 
@@ -402,6 +479,7 @@ impl PoopmanApp {
     }
 
     /// Switch to a different tab
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn switch_to_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.request_tabs.len() || index == self.active_tab_index {
             return;
@@ -606,6 +684,7 @@ impl PoopmanApp {
         cx.notify();
     }
 
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn load_tab_into_editor(
         &mut self,
         tab: &RequestTab,
@@ -630,7 +709,15 @@ impl PoopmanApp {
 
     /// Keep tab metadata synchronized with collection-side rename/delete
     /// actions, while deliberately leaving the current editor values alone.
-    fn reconcile_collection_tabs(&mut self, deleted_ids: &[i64], cx: &mut Context<Self>) {
+    fn reconcile_collection_tabs(
+        &mut self,
+        deleted_ids: &[i64],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.collections_reconcile_generation =
+            self.collections_reconcile_generation.wrapping_add(1);
+        let generation = self.collections_reconcile_generation;
         for tab in &mut self.request_tabs {
             let Some(saved_id) = tab.saved_request_id else {
                 continue;
@@ -641,25 +728,67 @@ impl PoopmanApp {
                 tab.folder_id = None;
                 tab.saved_name = None;
                 tab.update_title();
-                continue;
-            }
-            match self.db.load_saved_request(saved_id) {
-                Ok(Some(saved)) => {
-                    tab.collection_id = Some(saved.collection_id);
-                    tab.folder_id = saved.folder_id;
-                    tab.saved_name = Some(saved.name);
-                    tab.update_title_from_saved_name();
-                }
-                Ok(None) => {
-                    tab.saved_request_id = None;
-                    tab.collection_id = None;
-                    tab.folder_id = None;
-                    tab.saved_name = None;
-                    tab.update_title();
-                }
-                Err(error) => log::error!("Failed to refresh saved request metadata: {}", error),
             }
         }
+        self.refresh_saved_tab_ui(cx);
+
+        let mut saved_ids = self
+            .request_tabs
+            .iter()
+            .filter_map(|tab| tab.saved_request_id)
+            .collect::<Vec<_>>();
+        saved_ids.sort_unstable();
+        saved_ids.dedup();
+        if saved_ids.is_empty() {
+            return;
+        }
+        let db = self.db.clone();
+        let task = cx.background_spawn(async move {
+            saved_ids
+                .into_iter()
+                .map(|id| db.load_saved_request(id).map(|saved| (id, saved)))
+                .collect::<anyhow::Result<Vec<_>>>()
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            match task.await {
+                Ok(saved_rows) => {
+                    this.update(cx, |this, cx| {
+                        if this.collections_reconcile_generation != generation {
+                            return;
+                        }
+                        for (saved_id, saved) in saved_rows {
+                            for tab in this
+                                .request_tabs
+                                .iter_mut()
+                                .filter(|tab| tab.saved_request_id == Some(saved_id))
+                            {
+                                if let Some(saved) = &saved {
+                                    tab.collection_id = Some(saved.collection_id);
+                                    tab.folder_id = saved.folder_id;
+                                    tab.saved_name = Some(saved.name.clone());
+                                    tab.update_title_from_saved_name();
+                                } else {
+                                    tab.saved_request_id = None;
+                                    tab.collection_id = None;
+                                    tab.folder_id = None;
+                                    tab.saved_name = None;
+                                    tab.update_title();
+                                }
+                            }
+                        }
+                        this.refresh_saved_tab_ui(cx);
+                    })?;
+                }
+                Err(error) => {
+                    log::error!("Failed to refresh saved request metadata: {}", error)
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    fn refresh_saved_tab_ui(&mut self, cx: &mut Context<Self>) {
         let active_is_saved = self
             .request_tabs
             .get(self.active_tab_index)
@@ -680,41 +809,81 @@ impl PoopmanApp {
         let headers_state = tab.headers_state.clone().unwrap_or_default();
 
         if let Some(saved_id) = tab.saved_request_id {
-            match self.db.delete_saved_request(saved_id) {
-                Ok(()) => {
-                    if let Some(active_tab) = self.request_tabs.get_mut(self.active_tab_index) {
-                        active_tab.saved_request_id = None;
-                        active_tab.collection_id = None;
-                        active_tab.folder_id = None;
-                        active_tab.saved_name = None;
-                        active_tab.update_title();
+            let db = self.db.clone();
+            let task = cx.background_spawn(async move { db.delete_saved_request(saved_id) });
+            cx.spawn_in(window, async move |this, cx| {
+                match task.await {
+                    Ok(()) => {
+                        this.update_in(cx, |this, window, cx| {
+                            for tab in &mut this.request_tabs {
+                                if tab.saved_request_id == Some(saved_id) {
+                                    tab.saved_request_id = None;
+                                    tab.collection_id = None;
+                                    tab.folder_id = None;
+                                    tab.saved_name = None;
+                                    tab.update_title();
+                                }
+                            }
+                            this.refresh_saved_tab_ui(cx);
+                            this.collections_panel
+                                .update(cx, |panel, cx| panel.reload(window, cx));
+                        })?;
                     }
-                    self.request_editor.update(cx, |editor, cx| {
-                        editor.set_is_saved_request(false, cx);
-                    });
-                    self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
-                    self.update_tab_bar(cx);
-                    cx.notify();
+                    Err(error) => {
+                        cx.update(|window, cx| {
+                            app_notice(window, cx, "Remove bookmark failed", error.to_string())
+                        })?;
+                    }
                 }
-                Err(error) => {
-                    app_notice(window, cx, "Remove bookmark failed", error.to_string())
-                }
-            }
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
             return;
         }
 
-        let mut targets = self.collections_panel.read(cx).request_targets();
+        let targets = self.collections_panel.read(cx).request_targets();
         if targets.is_empty() {
-            match self.db.create_collection("My Collection") {
-                Ok(_) => {
-                    self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
-                    targets = self.collections_panel.read(cx).request_targets();
+            let db = self.db.clone();
+            let selected = self.collections_panel.read(cx).selected_target();
+            let initial_name = if tab.title.trim().is_empty() || tab.title == "New Request" {
+                format!("{} request", tab.request.method.as_str())
+            } else {
+                tab.title.clone()
+            };
+            let task = cx.background_spawn(async move { db.create_collection("My Collection") });
+            cx.spawn_in(window, async move |this, cx| {
+                match task.await {
+                    Ok(collection_id) => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.collections_panel
+                                .update(cx, |panel, cx| panel.reload(window, cx));
+                            this.open_new_save_dialog(
+                                tab.id,
+                                initial_name,
+                                tab.request,
+                                params_state,
+                                headers_state,
+                                vec![CollectionTarget {
+                                    collection_id,
+                                    folder_id: None,
+                                    label: "My Collection".to_string(),
+                                }],
+                                selected,
+                                window,
+                                cx,
+                            );
+                        })?;
+                    }
+                    Err(error) => {
+                        cx.update(|window, cx| {
+                            app_notice(window, cx, "Save failed", error.to_string())
+                        })?;
+                    }
                 }
-                Err(error) => {
-                    app_notice(window, cx, "Save failed", error.to_string());
-                    return;
-                }
-            }
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+            return;
         }
         let selected = self.collections_panel.read(cx).selected_target();
         let initial_name = if tab.title.trim().is_empty() || tab.title == "New Request" {
@@ -797,7 +966,12 @@ impl PoopmanApp {
                 .child(
                     v_flex()
                         .gap_3()
-                        .child(v_flex().gap_1().child(div().text_sm().child("Request name")).child(Input::new(&name_input)))
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_sm().child("Request name"))
+                                .child(Input::new(&name_input)),
+                        )
                         .child(
                             v_flex()
                                 .gap_1()
@@ -819,9 +993,8 @@ impl PoopmanApp {
                     let Some(target) = targets_for_ok.get(index).cloned() else {
                         return false;
                     };
-                    let mut succeeded = false;
                     app.update(cx, |app, cx| {
-                        succeeded = app.persist_new_saved_request(
+                        app.persist_new_saved_request(
                             tab_id,
                             &name,
                             target,
@@ -832,7 +1005,7 @@ impl PoopmanApp {
                             cx,
                         );
                     });
-                    succeeded
+                    true
                 })
         });
     }
@@ -848,44 +1021,55 @@ impl PoopmanApp {
         headers_state: &[crate::types::HeaderState],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let id = match self.db.insert_saved_request(
-            target.collection_id,
-            target.folder_id,
-            name,
-            request,
-            params_state,
-            headers_state,
-        ) {
-            Ok(id) => id,
-            Err(error) => {
-                app_notice(window, cx, "Save failed", error.to_string());
-                return false;
+    ) {
+        let db = self.db.clone();
+        let collection_id = target.collection_id;
+        let folder_id = target.folder_id;
+        let name = name.to_string();
+        let request = request.clone();
+        let params_state = params_state.to_vec();
+        let headers_state = headers_state.to_vec();
+        let name_for_db = name.clone();
+        let task = cx.background_spawn(async move {
+            db.insert_saved_request(
+                collection_id,
+                folder_id,
+                &name_for_db,
+                &request,
+                &params_state,
+                &headers_state,
+            )
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            match task.await {
+                Ok(id) => {
+                    this.update_in(cx, |this, window, cx| {
+                        if let Some(tab) = this.request_tabs.iter_mut().find(|tab| tab.id == tab_id)
+                        {
+                            tab.saved_request_id = Some(id);
+                            tab.collection_id = Some(collection_id);
+                            tab.folder_id = folder_id;
+                            tab.saved_name = Some(name);
+                            tab.update_title_from_saved_name();
+                        }
+                        this.refresh_saved_tab_ui(cx);
+                        this.collections_panel
+                            .update(cx, |panel, cx| panel.reload(window, cx));
+                    })?;
+                }
+                Err(error) => {
+                    cx.update(|window, cx| {
+                        app_notice(window, cx, "Save failed", error.to_string())
+                    })?;
+                }
             }
-        };
-        if let Some(tab) = self.request_tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.saved_request_id = Some(id);
-            tab.collection_id = Some(target.collection_id);
-            tab.folder_id = target.folder_id;
-            tab.saved_name = Some(name.to_string());
-            tab.update_title_from_saved_name();
-        }
-        let active_is_saved = self
-            .request_tabs
-            .get(self.active_tab_index)
-            .is_some_and(|tab| tab.id == tab_id && tab.saved_request_id.is_some());
-        if active_is_saved {
-            self.request_editor.update(cx, |editor, cx| {
-                editor.set_is_saved_request(true, cx);
-            });
-        }
-        self.collections_panel.update(cx, |panel, cx| panel.reload(cx));
-        self.update_tab_bar(cx);
-        cx.notify();
-        true
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     /// Update tab bar with current tabs
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn update_tab_bar(&mut self, cx: &mut Context<Self>) {
         self.tab_bar.update(cx, |tab_bar, cx| {
             tab_bar.update_tabs(self.request_tabs.clone(), self.active_tab_index, cx);
@@ -894,6 +1078,7 @@ impl PoopmanApp {
 }
 
 impl Render for PoopmanApp {
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
@@ -1102,18 +1287,11 @@ impl Render for PoopmanApp {
     }
 }
 
-fn sidebar_switch<F>(
-    label: &'static str,
-    active: bool,
-    on_click: F,
-) -> impl IntoElement
+fn sidebar_switch<F>(label: &'static str, active: bool, on_click: F) -> impl IntoElement
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
-    let button = Button::new(label)
-        .small()
-        .label(label)
-        .on_click(on_click);
+    let button = Button::new(label).small().label(label).on_click(on_click);
     if active {
         button.primary()
     } else {
@@ -1121,12 +1299,22 @@ where
     }
 }
 
-fn app_notice(window: &mut Window, cx: &mut App, title: impl Into<String>, message: impl Into<String>) {
+fn app_notice(
+    window: &mut Window,
+    cx: &mut App,
+    title: impl Into<String>,
+    message: impl Into<String>,
+) {
     let title = title.into();
     let message = message.into();
     window.open_dialog(cx, move |dialog, _window, cx| {
         dialog
-            .title(div().text_lg().font_weight(FontWeight::BOLD).child(title.clone()))
+            .title(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::BOLD)
+                    .child(title.clone()),
+            )
             .w(px(520.))
             .child(
                 div()

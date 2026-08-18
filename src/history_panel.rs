@@ -1,18 +1,21 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex,
+    ActiveTheme as _, Icon, Sizable as _,
+    button::*,
+    h_flex,
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
-    v_flex, ActiveTheme as _, Icon, Sizable as _,
+    v_flex,
 };
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::db::Database;
 use crate::types::HistoryItem;
 
 /// Maximum number of history rows loaded/searched at a time.
-const HISTORY_LIMIT: usize = 100;
+pub(crate) const HISTORY_LIMIT: usize = 100;
 
 /// Event emitted when a history item is clicked
 #[derive(Clone)]
@@ -27,16 +30,22 @@ pub struct HistoryPanel {
     selected_id: Option<i64>,
     search: Entity<InputState>,
     query: String,
+    /// Invalidates stale search/reload completions. Database work is serialized,
+    /// but foreground tasks may resume after a newer query has been entered.
+    refresh_generation: u64,
     list_scroll_handle: ScrollHandle,
 }
 
 impl HistoryPanel {
-    pub fn new(db: Arc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Load initial history from database
-        let history = db.load_recent_history(HISTORY_LIMIT).unwrap_or_default();
-
+    pub fn new(
+        db: Arc<Database>,
+        history: Vec<HistoryItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search history"));
-        cx.subscribe(&search, Self::on_search_change).detach();
+        cx.subscribe_in(&search, window, Self::on_search_change)
+            .detach();
 
         Self {
             db,
@@ -44,38 +53,76 @@ impl HistoryPanel {
             selected_id: None,
             search,
             query: String::new(),
+            refresh_generation: 0,
             list_scroll_handle: ScrollHandle::new(),
         }
     }
 
-    /// Re-query the list to honor the current query: recent when empty,
-    /// search otherwise. Shared by typing and by `reload`.
-    fn refresh_list(&mut self) {
-        let q = self.query.trim();
-        self.history = if q.is_empty() {
-            self.db.load_recent_history(HISTORY_LIMIT).unwrap_or_default()
-        } else {
-            self.db.search_history(q, HISTORY_LIMIT).unwrap_or_default()
-        };
+    /// Re-query without ever waiting for SQLite on the UI thread.
+    ///
+    /// Search changes are coalesced for a short interval, matching the pattern
+    /// used by Telegram Desktop for delayed storage writes: rapid UI changes
+    /// produce one useful database operation instead of a queue of stale work.
+    fn refresh_list(&mut self, debounce: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        let generation = self.refresh_generation;
+        let query = self.query.trim().to_string();
+        let db = self.db.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            if debounce {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let is_current = this
+                    .update(cx, |this, _| this.refresh_generation == generation)
+                    .unwrap_or(false);
+                if !is_current {
+                    return Ok(());
+                }
+            }
+
+            let query_for_db = query.clone();
+            let task = cx.background_spawn(async move {
+                if query_for_db.is_empty() {
+                    db.load_recent_history(HISTORY_LIMIT)
+                } else {
+                    db.search_history(&query_for_db, HISTORY_LIMIT)
+                }
+            });
+            let result = task.await;
+
+            this.update(cx, |this, cx| {
+                if this.refresh_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(history) => this.history = history,
+                    Err(error) => log::error!("Failed to refresh history: {}", error),
+                }
+                cx.notify();
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     fn on_search_change(
         &mut self,
-        _state: Entity<InputState>,
+        _state: &Entity<InputState>,
         event: &InputEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if matches!(event, InputEvent::Change) {
             self.query = self.search.read(cx).value().to_string();
-            self.refresh_list();
-            cx.notify();
+            self.refresh_list(true, window, cx);
         }
     }
 
     /// Reload history from database, honoring the active search query.
-    pub fn reload(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_list();
-        cx.notify();
+    pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_list(false, window, cx);
     }
 
     fn on_item_click(&mut self, item: &HistoryItem, _window: &mut Window, cx: &mut Context<Self>) {
@@ -90,17 +137,25 @@ impl HistoryPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(e) = self.db.clear_all_history() {
-            log::error!("Failed to clear history: {}", e);
-            return;
-        }
-
+        self.refresh_generation = self.refresh_generation.wrapping_add(1);
         self.history.clear();
         self.selected_id = None;
         self.query = String::new();
         self.search
             .update(cx, |state, cx| state.set_value("", window, cx));
         cx.notify();
+
+        let db = self.db.clone();
+        let task = cx.background_spawn(async move { db.clear_all_history() });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = task.await {
+                log::error!("Failed to clear history: {}", error);
+                // Restore authoritative state if the optimistic clear failed.
+                this.update_in(cx, |this, window, cx| this.refresh_list(false, window, cx))?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     /// Render one history row. Split out of `render` so the list body stays
@@ -185,6 +240,7 @@ impl HistoryPanel {
 impl EventEmitter<HistoryItemClicked> for HistoryPanel {}
 
 impl Render for HistoryPanel {
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
@@ -205,19 +261,16 @@ impl Render for HistoryPanel {
                             .flex_shrink_0()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child("History")
+                            .child("History"),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                Input::new(&self.search)
-                                    .small()
-                                    .w_full()
-                                    .cleanable(true)
-                                    .prefix(Icon::empty().path("icons/search.svg")),
-                            ),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.search)
+                                .small()
+                                .w_full()
+                                .cleanable(true)
+                                .prefix(Icon::empty().path("icons/search.svg")),
+                        ),
                     )
                     .child(
                         Button::new("clear-btn")

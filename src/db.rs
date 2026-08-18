@@ -7,15 +7,19 @@
 //! the connection has exactly one owner, so data races are impossible by
 //! construction and a panic inside one query can't poison a lock for the others.
 
-use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use anyhow::{Result, anyhow};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Sender};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+    mpsc::{self, Sender},
+};
 use std::thread;
 
 use crate::types::{
-    AuthConfig, BodyType, Collection, CollectionFolder, Environment, EnvVar, HeaderState,
+    AuthConfig, BodyType, Collection, CollectionFolder, EnvVar, Environment, HeaderState,
     HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
 };
 
@@ -35,8 +39,7 @@ fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let request_body: String = row.get(5)?;
     let request_auth: Option<String> = row.get(6)?;
 
-    let headers: Vec<(String, String)> =
-        serde_json::from_str(&request_headers).unwrap_or_default();
+    let headers: Vec<(String, String)> = serde_json::from_str(&request_headers).unwrap_or_default();
     let body: BodyType = serde_json::from_str(&request_body).unwrap_or_default();
     let auth: crate::types::AuthConfig = request_auth
         .as_deref()
@@ -208,7 +211,11 @@ fn validate_folder_parent(
             |row| row.get(0),
         )?;
         if folder_collection != collection_id {
-            return Err(anyhow!("folder {} does not belong to collection {}", folder_id, collection_id));
+            return Err(anyhow!(
+                "folder {} does not belong to collection {}",
+                folder_id,
+                collection_id
+            ));
         }
     }
     Ok(())
@@ -358,6 +365,7 @@ fn find_folder(folders: &[CollectionFolder], id: i64) -> Option<&CollectionFolde
 /// (wrapped in `Arc` by the app); dropping every handle stops the thread.
 pub struct Database {
     tx: Sender<Job>,
+    ui_thread: OnceLock<thread::ThreadId>,
 }
 
 impl Database {
@@ -379,13 +387,21 @@ impl Database {
     fn spawn(mut conn: Connection) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         thread::spawn(move || {
+            #[cfg(feature = "profile")]
+            profiling::register_thread!("database");
+
             // Run jobs until every handle (and thus every Sender) is dropped, at
             // which point recv() errors and the thread exits cleanly.
             while let Ok(job) = rx.recv() {
+                #[cfg(feature = "profile")]
+                profiling::scope!("database job");
                 job(&mut conn);
             }
         });
-        Self { tx }
+        Self {
+            tx,
+            ui_thread: OnceLock::new(),
+        }
     }
 
     /// Test-only: an in-memory database with the schema initialized. Shared by
@@ -398,11 +414,21 @@ impl Database {
     }
 
     /// Send `f` to the owning thread and block until it returns a result.
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn call<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
+        if self
+            .ui_thread
+            .get()
+            .is_some_and(|ui_thread| *ui_thread == thread::current().id())
+        {
+            return Err(anyhow!(
+                "blocking database operation attempted on the GPUI thread"
+            ));
+        }
         let (reply_tx, reply_rx) = mpsc::channel();
         self.tx
             .send(Box::new(move |conn| {
@@ -412,6 +438,12 @@ impl Database {
         reply_rx
             .recv()
             .map_err(|_| anyhow!("database thread dropped the response"))?
+    }
+
+    /// Permanently identify the GPUI thread so a future call site cannot
+    /// accidentally reintroduce a synchronous `recv()` into an event handler.
+    pub(crate) fn register_ui_thread(&self) {
+        let _ = self.ui_thread.set(thread::current().id());
     }
 
     /// Create all tables + indexes if missing. Shared by the real DB and tests
@@ -532,6 +564,7 @@ impl Database {
     }
 
     /// Load recent history items (request only, no response - aligned with Postman)
+    #[cfg_attr(feature = "profile", profiling::function)]
     pub fn load_recent_history(&self, limit: usize) -> Result<Vec<HistoryItem>> {
         self.call(move |conn| {
             let mut stmt = conn.prepare(
@@ -554,6 +587,7 @@ impl Database {
 
     /// Search history by URL or method (case-insensitive substring), newest
     /// first, up to `limit` rows. An empty query matches everything.
+    #[cfg_attr(feature = "profile", profiling::function)]
     pub fn search_history(&self, query: &str, limit: usize) -> Result<Vec<HistoryItem>> {
         let pattern = format!("%{}%", escape_like(query));
         self.call(move |conn| {
@@ -594,7 +628,8 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_history_count(&self) -> Result<usize> {
         self.call(|conn| {
-            let count: i64 = conn.query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))?;
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))?;
             Ok(count as usize)
         })
     }
@@ -602,6 +637,7 @@ impl Database {
     // ===== Collections =====
 
     /// Load the complete collection/folder/request tree in display order.
+    #[cfg_attr(feature = "profile", profiling::function)]
     pub fn load_collections(&self) -> Result<Vec<Collection>> {
         self.call(|conn| {
             let collection_rows = conn
@@ -805,8 +841,13 @@ impl Database {
     pub fn rename_collection(&self, id: i64, name: &str) -> Result<()> {
         let name = require_name(name)?;
         self.call(move |conn| {
-            let changed = conn.execute("UPDATE collections SET name = ?1 WHERE id = ?2", params![name, id])?;
-            if changed == 0 { return Err(anyhow!("collection {} does not exist", id)); }
+            let changed = conn.execute(
+                "UPDATE collections SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
+            if changed == 0 {
+                return Err(anyhow!("collection {} does not exist", id));
+            }
             Ok(())
         })
     }
@@ -814,8 +855,13 @@ impl Database {
     pub fn rename_folder(&self, id: i64, name: &str) -> Result<()> {
         let name = require_name(name)?;
         self.call(move |conn| {
-            let changed = conn.execute("UPDATE collection_folders SET name = ?1 WHERE id = ?2", params![name, id])?;
-            if changed == 0 { return Err(anyhow!("folder {} does not exist", id)); }
+            let changed = conn.execute(
+                "UPDATE collection_folders SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
+            if changed == 0 {
+                return Err(anyhow!("folder {} does not exist", id));
+            }
             Ok(())
         })
     }
@@ -827,7 +873,9 @@ impl Database {
                 "UPDATE saved_requests SET name = ?1, updated_at = ?2 WHERE id = ?3",
                 params![name, chrono::Utc::now().to_rfc3339(), id],
             )?;
-            if changed == 0 { return Err(anyhow!("saved request {} does not exist", id)); }
+            if changed == 0 {
+                return Err(anyhow!("saved request {} does not exist", id));
+            }
             Ok(())
         })
     }
@@ -938,7 +986,11 @@ impl Database {
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                result.push(Environment { id, name, variables });
+                result.push(Environment {
+                    id,
+                    name,
+                    variables,
+                });
             }
             Ok(result)
         })
@@ -957,10 +1009,14 @@ impl Database {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn rename_environment(&self, id: i64, name: &str) -> Result<()> {
         let name = name.to_string();
         self.call(move |conn| {
-            conn.execute("UPDATE environments SET name = ?1 WHERE id = ?2", params![name, id])?;
+            conn.execute(
+                "UPDATE environments SET name = ?1 WHERE id = ?2",
+                params![name, id],
+            )?;
             Ok(())
         })
     }
@@ -974,6 +1030,7 @@ impl Database {
     }
 
     /// Replace all variables of an environment in a single transaction.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn replace_variables(&self, environment_id: i64, vars: &[EnvVar]) -> Result<()> {
         let vars = vars.to_vec();
         self.call(move |conn| {
@@ -986,7 +1043,58 @@ impl Database {
                 tx.execute(
                     "INSERT INTO env_variables (environment_id, enabled, key, value, position)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![environment_id, v.enabled as i64, v.key, v.value, position as i64],
+                    params![
+                        environment_id,
+                        v.enabled as i64,
+                        v.key,
+                        v.value,
+                        position as i64
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Persist one editor snapshot in a transaction, but only if it is still
+    /// current when the serialized database thread reaches this job.
+    pub fn save_environment_if_current(
+        &self,
+        environment_id: i64,
+        name: &str,
+        vars: &[EnvVar],
+        epoch: Arc<AtomicU64>,
+        generation: u64,
+    ) -> Result<()> {
+        let name = name.to_string();
+        let vars = vars.to_vec();
+        self.call(move |conn| {
+            if epoch.load(Ordering::Acquire) != generation {
+                return Ok(());
+            }
+            let tx = conn.transaction()?;
+            if !name.is_empty() {
+                tx.execute(
+                    "UPDATE environments SET name = ?1 WHERE id = ?2",
+                    params![name, environment_id],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM env_variables WHERE environment_id = ?1",
+                params![environment_id],
+            )?;
+            for (position, variable) in vars.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO env_variables (environment_id, enabled, key, value, position)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        environment_id,
+                        variable.enabled as i64,
+                        variable.key,
+                        variable.value,
+                        position as i64
+                    ],
                 )?;
             }
             tx.commit()?;
@@ -1019,7 +1127,10 @@ impl Database {
                     )?;
                 }
                 None => {
-                    conn.execute("DELETE FROM app_meta WHERE key = 'active_environment_id'", [])?;
+                    conn.execute(
+                        "DELETE FROM app_meta WHERE key = 'active_environment_id'",
+                        [],
+                    )?;
                 }
             }
             Ok(())
@@ -1035,6 +1146,60 @@ mod tests {
 
     fn mem_db() -> Database {
         Database::new_in_memory()
+    }
+
+    #[test]
+    fn registered_ui_thread_cannot_wait_for_database() {
+        let db = mem_db();
+        db.register_ui_thread();
+
+        let error = db
+            .load_recent_history(1)
+            .expect_err("UI-thread database calls must fail before recv");
+        assert!(
+            error
+                .to_string()
+                .contains("blocking database operation attempted on the GPUI thread")
+        );
+    }
+
+    #[test]
+    fn stale_environment_snapshot_is_not_persisted() {
+        let db = mem_db();
+        let id = db.create_environment("original").unwrap();
+        let epoch = Arc::new(AtomicU64::new(2));
+
+        db.save_environment_if_current(
+            id,
+            "stale",
+            &[EnvVar {
+                enabled: true,
+                key: "token".into(),
+                value: "old".into(),
+            }],
+            epoch.clone(),
+            1,
+        )
+        .unwrap();
+        let environment = db.load_environments().unwrap().remove(0);
+        assert_eq!(environment.name, "original");
+        assert!(environment.variables.is_empty());
+
+        db.save_environment_if_current(
+            id,
+            "current",
+            &[EnvVar {
+                enabled: true,
+                key: "token".into(),
+                value: "new".into(),
+            }],
+            epoch,
+            2,
+        )
+        .unwrap();
+        let environment = db.load_environments().unwrap().remove(0);
+        assert_eq!(environment.name, "current");
+        assert_eq!(environment.variables[0].value, "new");
     }
 
     #[test]
@@ -1076,7 +1241,8 @@ mod tests {
             bearer_token: "abc".into(),
             ..Default::default()
         };
-        db.insert_history("GET", "https://x", "[]", &BodyType::None, &auth).unwrap();
+        db.insert_history("GET", "https://x", "[]", &BodyType::None, &auth)
+            .unwrap();
         let items = db.load_recent_history(10).unwrap();
         assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);
         assert_eq!(items[0].request.auth.bearer_token, "abc");
@@ -1089,8 +1255,16 @@ mod tests {
         db.replace_variables(
             id,
             &[
-                EnvVar { enabled: true, key: "baseUrl".into(), value: "http://x".into() },
-                EnvVar { enabled: false, key: "token".into(), value: "abc".into() },
+                EnvVar {
+                    enabled: true,
+                    key: "baseUrl".into(),
+                    value: "http://x".into(),
+                },
+                EnvVar {
+                    enabled: false,
+                    key: "token".into(),
+                    value: "abc".into(),
+                },
             ],
         )
         .unwrap();
@@ -1118,8 +1292,14 @@ mod tests {
     #[test]
     fn history_roundtrip() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/x", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
+        db.insert_history(
+            "GET",
+            "https://api.test/x",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
         let items = db.load_recent_history(10).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].request.url, "https://api.test/x");
@@ -1130,12 +1310,30 @@ mod tests {
     #[test]
     fn search_history_matches_url_and_method_newest_first() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
-        db.insert_history("POST", "https://api.test/login", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
-        db.insert_history("DELETE", "https://api.test/orders/1", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
+        db.insert_history(
+            "GET",
+            "https://api.test/users",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
+        db.insert_history(
+            "POST",
+            "https://api.test/login",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
+        db.insert_history(
+            "DELETE",
+            "https://api.test/orders/1",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
 
         // URL substring
         let r = db.search_history("login", 10).unwrap();
@@ -1156,12 +1354,30 @@ mod tests {
     #[test]
     fn search_history_escapes_wildcards() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/a%b", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
-        db.insert_history("GET", "https://api.test/a_b", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
-        db.insert_history("GET", "https://api.test/axb", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
+        db.insert_history(
+            "GET",
+            "https://api.test/a%b",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
+        db.insert_history(
+            "GET",
+            "https://api.test/a_b",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
+        db.insert_history(
+            "GET",
+            "https://api.test/axb",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
 
         // '%' must be treated literally: matches only the URL with a literal '%'
         let r = db.search_history("a%b", 10).unwrap();
@@ -1178,13 +1394,22 @@ mod tests {
     #[test]
     fn search_history_empty_query_matches_all() {
         let db = mem_db();
-        db.insert_history("GET", "https://api.test/users", "[]", &crate::types::BodyType::None, &crate::types::AuthConfig::default())
-            .unwrap();
+        db.insert_history(
+            "GET",
+            "https://api.test/users",
+            "[]",
+            &crate::types::BodyType::None,
+            &crate::types::AuthConfig::default(),
+        )
+        .unwrap();
         let r = db.search_history("", 10).unwrap();
         assert_eq!(r.len(), 1);
     }
 
-    fn saved_request_fixture(name: &str, url: &str) -> (RequestData, Vec<ParamState>, Vec<HeaderState>) {
+    fn saved_request_fixture(
+        name: &str,
+        url: &str,
+    ) -> (RequestData, Vec<ParamState>, Vec<HeaderState>) {
         let request = RequestData {
             method: HttpMethod::POST,
             url: url.to_string(),
@@ -1200,8 +1425,16 @@ mod tests {
             },
         };
         let params = vec![
-            ParamState { enabled: true, key: "page".into(), value: "1".into() },
-            ParamState { enabled: false, key: "debug".into(), value: "true".into() },
+            ParamState {
+                enabled: true,
+                key: "page".into(),
+                value: "1".into(),
+            },
+            ParamState {
+                enabled: false,
+                key: "debug".into(),
+                value: "true".into(),
+            },
         ];
         let headers = vec![
             HeaderState {
@@ -1228,13 +1461,30 @@ mod tests {
         let db = mem_db();
         let collection_id = db.create_collection("Demo").unwrap();
         let root_folder_id = db.create_folder(collection_id, None, "Root").unwrap();
-        let child_folder_id = db.create_folder(collection_id, Some(root_folder_id), "Child").unwrap();
-        let (request, params, headers) = saved_request_fixture("Nested", "https://api.test/items?page=1");
+        let child_folder_id = db
+            .create_folder(collection_id, Some(root_folder_id), "Child")
+            .unwrap();
+        let (request, params, headers) =
+            saved_request_fixture("Nested", "https://api.test/items?page=1");
         let root_request_id = db
-            .insert_saved_request(collection_id, None, "Root request", &request, &params, &headers)
+            .insert_saved_request(
+                collection_id,
+                None,
+                "Root request",
+                &request,
+                &params,
+                &headers,
+            )
             .unwrap();
         let nested_request_id = db
-            .insert_saved_request(collection_id, Some(child_folder_id), "Nested", &request, &params, &headers)
+            .insert_saved_request(
+                collection_id,
+                Some(child_folder_id),
+                "Nested",
+                &request,
+                &params,
+                &headers,
+            )
             .unwrap();
 
         let collections = db.load_collections().unwrap();
@@ -1256,7 +1506,14 @@ mod tests {
         let folder_id = db.create_folder(collection_id, None, "Folder").unwrap();
         let (request, params, headers) = saved_request_fixture("Request", "https://api.test/a");
         let request_id = db
-            .insert_saved_request(collection_id, Some(folder_id), "Request", &request, &params, &headers)
+            .insert_saved_request(
+                collection_id,
+                Some(folder_id),
+                "Request",
+                &request,
+                &params,
+                &headers,
+            )
             .unwrap();
 
         let mut changed = request.clone();
@@ -1277,16 +1534,32 @@ mod tests {
         assert!(updated.params_state.is_empty());
 
         let copied_request_id = db.duplicate_saved_request(request_id).unwrap();
-        assert_eq!(db.load_saved_request(copied_request_id).unwrap().unwrap().name, "Updated (Copy)");
+        assert_eq!(
+            db.load_saved_request(copied_request_id)
+                .unwrap()
+                .unwrap()
+                .name,
+            "Updated (Copy)"
+        );
         let copied_folder_id = db.duplicate_folder(folder_id).unwrap();
         let copied_tree = db.load_collections().unwrap();
-        assert!(copied_tree[0].folders.iter().any(|folder| folder.id == copied_folder_id));
+        assert!(
+            copied_tree[0]
+                .folders
+                .iter()
+                .any(|folder| folder.id == copied_folder_id)
+        );
 
         // Folder deletion cascades to both the original and its copied request;
         // the unrelated root collection remains intact.
         db.delete_folder(folder_id).unwrap();
         assert!(db.load_saved_request(request_id).unwrap().is_none());
-        assert!(db.load_collections().unwrap()[0].folders.iter().all(|folder| folder.id != folder_id));
+        assert!(
+            db.load_collections().unwrap()[0]
+                .folders
+                .iter()
+                .all(|folder| folder.id != folder_id)
+        );
         db.delete_collection(collection_id).unwrap();
         assert!(db.load_collections().unwrap().is_empty());
     }
@@ -1294,7 +1567,8 @@ mod tests {
     #[test]
     fn inserting_a_collection_tree_rebuilds_real_parent_ids_transactionally() {
         let db = mem_db();
-        let (request, params, headers) = saved_request_fixture("Imported", "https://api.test/imported");
+        let (request, params, headers) =
+            saved_request_fixture("Imported", "https://api.test/imported");
         let imported = Collection {
             id: 0,
             name: "Imported".into(),
