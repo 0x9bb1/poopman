@@ -4,9 +4,9 @@
 
 use gpui::*;
 use gpui_component::{
+    Sizable as _,
     button::{Button, ButtonVariants as _},
     menu::{DropdownMenu as _, PopupMenuItem},
-    Sizable as _,
 };
 
 use crate::app::PoopmanApp;
@@ -32,9 +32,9 @@ pub fn edit_menu(
                 menu = menu.item(
                     PopupMenuItem::new(env.name.clone())
                         .checked(is_active)
-                        .on_click(move |_, _window, cx| {
+                        .on_click(move |_, window, cx| {
                             app.update(cx, |app, cx| {
-                                app.set_active_environment(Some(id), cx);
+                                app.set_active_environment(Some(id), window, cx);
                             });
                         }),
                 );
@@ -45,9 +45,9 @@ pub fn edit_menu(
                 menu = menu.item(
                     PopupMenuItem::new("No Environment")
                         .checked(active_id.is_none())
-                        .on_click(move |_, _window, cx| {
+                        .on_click(move |_, window, cx| {
                             app.update(cx, |app, cx| {
-                                app.set_active_environment(None, cx);
+                                app.set_active_environment(None, window, cx);
                             });
                         }),
                 );
@@ -57,15 +57,13 @@ pub fn edit_menu(
 
             {
                 let app = app.clone();
-                menu = menu.item(
-                    PopupMenuItem::new("Manage Environments\u{2026}").on_click(
-                        move |_, window, cx| {
-                            app.update(cx, |app, cx| {
-                                app.open_env_manager(window, cx);
-                            });
-                        },
-                    ),
-                );
+                menu = menu.item(PopupMenuItem::new("Manage Environments\u{2026}").on_click(
+                    move |_, window, cx| {
+                        app.update(cx, |app, cx| {
+                            app.open_env_manager(window, cx);
+                        });
+                    },
+                ));
             }
 
             menu

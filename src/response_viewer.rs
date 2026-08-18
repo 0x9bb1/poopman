@@ -1,15 +1,69 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    button::*, h_flex, input::*,
+    ActiveTheme as _,
+    button::*,
+    h_flex,
+    input::*,
     menu::{ContextMenuExt as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     text::{TextView, TextViewStyle},
-    v_flex, ActiveTheme as _,
+    v_flex,
 };
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::types::ResponseData;
+
+const BODY_CACHE_ENTRIES: usize = 6;
+const BODY_CACHE_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone)]
+struct PreparedBody {
+    text: Arc<str>,
+}
+
+fn decode_response_text(body: &[u8]) -> String {
+    #[cfg(feature = "profile")]
+    let profile_data = format!("{} bytes", body.len());
+    #[cfg(feature = "profile")]
+    profiling::scope!("response utf8 decode", profile_data.as_str());
+    String::from_utf8_lossy(body).into_owned()
+}
+
+/// Prepare response text away from the UI thread.
+///
+/// Decode, parse, and pretty-print the complete response here. `InputState`
+/// virtualizes visible-line layout, but it has no incremental data-source API,
+/// so the complete prepared text is handed to it in one update.
+#[cfg_attr(feature = "profile", profiling::function)]
+fn prepare_response_body(body: &[u8]) -> PreparedBody {
+    let text = decode_response_text(body);
+    let display = if let Ok(json) = {
+        #[cfg(feature = "profile")]
+        let profile_data = format!("{} bytes", text.len());
+        #[cfg(feature = "profile")]
+        profiling::scope!("response json parse", profile_data.as_str());
+        serde_json::from_str::<serde_json::Value>(&text)
+    } {
+        #[cfg(feature = "profile")]
+        let profile_data = format!("{} bytes", text.len());
+        #[cfg(feature = "profile")]
+        profiling::scope!("response json pretty serialize", profile_data.as_str());
+        crate::code_formatter::pretty_json_4(&json).unwrap_or(text)
+    } else {
+        text
+    };
+    PreparedBody {
+        text: display.into(),
+    }
+}
+
+#[derive(Clone)]
+struct CachedBody {
+    response: Arc<ResponseData>,
+    text: Arc<str>,
+    display_bytes: usize,
+}
 
 /// Render headers as `key: value` lines — what "Copy all" puts on the clipboard.
 /// No trailing newline, so pasting into a single-line field stays clean.
@@ -102,7 +156,17 @@ pub struct ResponseViewer {
     /// Pre-built preview for image responses (constructed once per response —
     /// `Image::from_bytes` hashes the body for its asset id, too costly per frame).
     preview_image: Option<Arc<gpui::Image>>,
+    /// One editor is created with the window and reused for every response.
+    /// Creating an InputState per response makes its first syntax/layout pass a
+    /// cold path (30 ms even for 1.7 KiB in the new2 Tracy capture).
     body_display: Entity<InputState>,
+    body_ready: bool,
+    body_loading: bool,
+    body_generation: u64,
+    /// Small LRU of complete, background-prepared text. An entry larger than
+    /// the byte budget remains as the sole entry so revisiting it does not
+    /// repeat decode/parse/pretty work.
+    body_cache: VecDeque<CachedBody>,
     active_tab: usize,
     headers_scroll_handle: ScrollHandle,
 }
@@ -114,20 +178,27 @@ impl ResponseViewer {
                 .code_editor("json")
                 .line_number(true)
                 .multi_line(true)
-                .tab_size(TabSize { tab_size: 4, hard_tabs: false })
+                .tab_size(TabSize {
+                    tab_size: 4,
+                    hard_tabs: false,
+                })
         });
-
         Self {
             response: None,
             canceled: false,
             preview_image: None,
             body_display,
+            body_ready: false,
+            body_loading: false,
+            body_generation: 0,
+            body_cache: VecDeque::new(),
             active_tab: 0,
             headers_scroll_handle: ScrollHandle::new(),
         }
     }
 
     /// Set response data
+    #[cfg_attr(feature = "profile", profiling::function)]
     pub fn set_response(
         &mut self,
         response: Arc<ResponseData>,
@@ -146,25 +217,140 @@ impl ResponseViewer {
                 .and_then(|(_, v)| image_format_for_content_type(v))
                 .map(|format| Arc::new(gpui::Image::from_bytes(format, response.body.clone())))
         };
-        // Only feed the text editor for text responses; binary is shown in a
-        // dedicated panel and never decoded to (lossy) text.
-        let display = if response.is_text {
-            let text = response.body_text();
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                crate::code_formatter::pretty_json_4(&json).unwrap_or_else(|_| text.to_string())
-            } else {
-                text.to_string()
-            }
-        } else {
-            String::new()
-        };
+        self.body_generation = self.body_generation.wrapping_add(1);
+        self.body_loading = false;
+        self.body_ready = false;
+        self.response = Some(response.clone());
+        self.active_tab = 0; // Reset to Body tab
 
-        self.body_display.update(cx, |input, cx| {
-            input.set_value(&display, window, cx);
+        // Binary responses use their dedicated preview. Text response metadata
+        // is visible immediately; its expensive display representation arrives
+        // asynchronously or is restored from the prepared-state cache.
+        if response.is_text {
+            if let Some(cached) = self.take_cached_body(&response) {
+                #[cfg(feature = "profile")]
+                profiling::scope!("response body cache hit");
+                self.body_loading = true;
+                self.start_cached_body_apply(cached, window, cx);
+            } else {
+                #[cfg(feature = "profile")]
+                profiling::scope!("response body cache miss");
+                self.body_loading = true;
+                self.start_body_prepare(response, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn take_cached_body(&mut self, response: &Arc<ResponseData>) -> Option<CachedBody> {
+        let index = self
+            .body_cache
+            .iter()
+            .position(|cached| Arc::ptr_eq(&cached.response, response))?;
+        self.body_cache.remove(index)
+    }
+
+    fn insert_cached_body(&mut self, cached: CachedBody) {
+        if let Some(index) = self
+            .body_cache
+            .iter()
+            .position(|entry| Arc::ptr_eq(&entry.response, &cached.response))
+        {
+            self.body_cache.remove(index);
+        }
+        self.body_cache.push_front(cached);
+
+        let mut display_bytes = self
+            .body_cache
+            .iter()
+            .map(|entry| entry.display_bytes)
+            .sum::<usize>();
+        while self.body_cache.len() > BODY_CACHE_ENTRIES
+            || (display_bytes > BODY_CACHE_DISPLAY_BYTES && self.body_cache.len() > 1)
+        {
+            if let Some(evicted) = self.body_cache.pop_back() {
+                display_bytes = display_bytes.saturating_sub(evicted.display_bytes);
+            }
+        }
+    }
+
+    fn start_cached_body_apply(
+        &mut self,
+        cached: CachedBody,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.body_generation;
+        let response = cached.response.clone();
+        let prepared = PreparedBody {
+            text: cached.text.clone(),
+        };
+        // Keep the entry available if another tab action supersedes this
+        // scheduled UI commit before it runs.
+        self.body_cache.push_front(cached);
+        cx.spawn_in(window, async move |this, cx| {
+            this.update_in(cx, |this, window, cx| {
+                this.apply_prepared_body(response, generation, prepared, window, cx)
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    fn start_body_prepare(
+        &mut self,
+        response: Arc<ResponseData>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.body_generation;
+        let response_for_task = response.clone();
+        let task =
+            cx.background_spawn(async move { prepare_response_body(&response_for_task.body) });
+        cx.spawn_in(window, async move |this, cx| {
+            let prepared = task.await;
+            this.update_in(cx, |this, window, cx| {
+                this.apply_prepared_body(response, generation, prepared, window, cx)
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    fn apply_prepared_body(
+        &mut self,
+        response: Arc<ResponseData>,
+        generation: u64,
+        prepared: PreparedBody,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let display_bytes = prepared.text.len();
+        self.insert_cached_body(CachedBody {
+            response: response.clone(),
+            text: prepared.text.clone(),
+            display_bytes,
         });
 
-        self.response = Some(response);
-        self.active_tab = 0; // Reset to Body tab
+        let is_current = self.body_generation == generation
+            && self
+                .response
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &response));
+        if !is_current {
+            return;
+        }
+
+        let display_text = prepared.text.clone();
+        self.body_display.update(cx, move |input, cx| {
+            #[cfg(feature = "profile")]
+            let profile_data = format!("{} bytes", display_bytes);
+            #[cfg(feature = "profile")]
+            profiling::scope!("response InputState::set_value", profile_data.as_str());
+            input.set_value(display_text.clone(), window, cx);
+        });
+        self.body_ready = true;
+        self.body_loading = false;
         cx.notify();
     }
 
@@ -174,13 +360,13 @@ impl ResponseViewer {
     }
 
     /// Clear response data
-    pub fn clear_response(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn clear_response(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.canceled = false;
+        self.body_generation = self.body_generation.wrapping_add(1);
         self.response = None;
         self.preview_image = None;
-        self.body_display.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-        });
+        self.body_ready = false;
+        self.body_loading = false;
         self.active_tab = 0;
         cx.notify();
     }
@@ -193,7 +379,12 @@ impl ResponseViewer {
     }
 
     /// Save the (binary) response body to a file chosen via the OS dialog.
-    fn save_binary(&mut self, _event: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_binary(
+        &mut self,
+        _event: &gpui::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(response) = self.response.clone() else {
             return;
         };
@@ -202,7 +393,13 @@ impl ResponseViewer {
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+            .map(|(_, v)| {
+                v.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
             .and_then(|ct| extension_for_content_type(&ct))
             .map(|ext| format!("response.{}", ext))
             .unwrap_or_else(|| "response.bin".to_string());
@@ -210,11 +407,14 @@ impl ResponseViewer {
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
-        cx.spawn_in(window, async move |_this, _cx| {
-            if let Ok(Ok(Some(path))) = rx.await
-                && let Err(e) = std::fs::write(&path, &response.body)
-            {
-                log::error!("Failed to save response to {:?}: {}", path, e);
+        cx.spawn_in(window, async move |_this, cx| {
+            if let Ok(Ok(Some(path))) = rx.await {
+                let path_for_log = path.clone();
+                let write =
+                    cx.background_spawn(async move { std::fs::write(&path, &response.body) });
+                if let Err(error) = write.await {
+                    log::error!("Failed to save response to {:?}: {}", path_for_log, error);
+                }
             }
         })
         .detach();
@@ -260,17 +460,15 @@ impl ResponseViewer {
                         .text_color(status_color)
                         .child(status_text),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .child(format!("Time: {}", crate::format::format_duration_ms(response.duration_ms))),
-                )
+                .child(div().text_sm().child(format!(
+                    "Time: {}",
+                    crate::format::format_duration_ms(response.duration_ms)
+                )))
                 .when(!response.is_network_error(), |this| {
-                    this.child(
-                        div()
-                            .text_sm()
-                            .child(format!("Size: {}", crate::format::format_size(response.body.len()))),
-                    )
+                    this.child(div().text_sm().child(format!(
+                        "Size: {}",
+                        crate::format::format_size(response.body.len())
+                    )))
                 })
         } else {
             h_flex()
@@ -279,7 +477,11 @@ impl ResponseViewer {
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .text_color(cx.theme().muted_foreground)
-                .child(if self.canceled { "Request canceled" } else { "No response yet" })
+                .child(if self.canceled {
+                    "Request canceled"
+                } else {
+                    "No response yet"
+                })
         }
     }
 
@@ -339,6 +541,7 @@ impl ResponseViewer {
 }
 
 impl Render for ResponseViewer {
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Built before `theme` borrows cx immutably -- TextView needs &mut App.
         // Only while the tab is showing, so the HTML is not parsed for nothing.
@@ -411,27 +614,49 @@ impl Render for ResponseViewer {
                         .when(self.active_tab == 0, |this| {
                             let resp_is_text = self.response.as_ref().is_none_or(|r| r.is_text);
                             if resp_is_text {
-                                let is_error = self
-                                    .response
-                                    .as_ref()
-                                    .is_some_and(|r| r.is_network_error());
+                                let is_error =
+                                    self.response.as_ref().is_some_and(|r| r.is_network_error());
+                                let body_display = self.body_display.clone();
+                                let has_body_display = self.body_ready;
+                                let body_loading = self.body_loading;
                                 this.child(
-                                    div()
+                                    v_flex()
                                         .flex()
                                         .flex_col()
                                         .flex_1()
+                                        .min_h_0()
                                         .w_full()
                                         .rounded(theme.radius_lg)
                                         .border_1()
                                         .border_color(theme.border)
                                         .bg(theme.popover)
-                                        .child(
-                                            Input::new(&self.body_display)
-                                                .disabled(is_error)
-                                                .rounded(theme.radius_lg)
-                                                .w_full()
-                                                .h_full(),
-                                        ),
+                                        .when(has_body_display, |this| {
+                                            this.child(
+                                                div().flex_1().min_h_0().w_full().child(
+                                                    Input::new(&body_display)
+                                                        .disabled(is_error)
+                                                        .rounded(theme.radius_lg)
+                                                        .w_full()
+                                                        .h_full(),
+                                                ),
+                                            )
+                                        })
+                                        .when(!has_body_display, |this| {
+                                            this.child(
+                                                div()
+                                                    .flex_1()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_sm()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(if body_loading {
+                                                        "Preparing response…"
+                                                    } else {
+                                                        "No response body"
+                                                    }),
+                                            )
+                                        }),
                                 )
                             } else {
                                 // Binary response: don't decode to lossy text — show info + Save.
@@ -444,7 +669,9 @@ impl Render for ResponseViewer {
                                             .iter()
                                             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                                             .map(|(_, v)| v.clone())
-                                            .unwrap_or_else(|| "application/octet-stream".to_string());
+                                            .unwrap_or_else(|| {
+                                                "application/octet-stream".to_string()
+                                            });
                                         (ct, r.body.len())
                                     })
                                     .unwrap_or_else(|| ("application/octet-stream".to_string(), 0));
@@ -538,18 +765,81 @@ mod tests {
     use super::headers_to_html;
     use super::headers_to_text;
     use super::image_format_for_content_type;
+    use super::prepare_response_body;
     use gpui::ImageFormat;
 
     #[test]
+    fn prepares_small_json_with_pretty_indentation() {
+        let prepared = prepare_response_body(br#"{"a":1}"#);
+        assert_eq!(prepared.text.as_ref(), "{\n    \"a\": 1\n}");
+    }
+
+    #[test]
+    fn preserves_non_json_text() {
+        let prepared = prepare_response_body(b"plain text");
+        assert_eq!(prepared.text.as_ref(), "plain text");
+    }
+
+    #[test]
+    fn preserves_complete_large_non_json_body() {
+        let body = vec![b'x'; 128 * 1024 + 1];
+        let prepared = prepare_response_body(&body);
+        assert_eq!(prepared.text.len(), body.len());
+        assert_eq!(prepared.text.as_bytes(), body.as_slice());
+    }
+
+    #[test]
+    fn formats_complete_large_minified_json() {
+        let item_count = 75_000;
+        let body = format!("[{}]", vec!["0"; item_count].join(","));
+        let prepared = prepare_response_body(body.as_bytes());
+        assert!(prepared.text.starts_with("[\n"));
+        assert!(prepared.text.ends_with("\n]"));
+        assert_eq!(
+            prepared
+                .text
+                .lines()
+                .filter(|line| line.trim() == "0,")
+                .count(),
+            item_count - 1
+        );
+        assert!(prepared.text.len() > body.len());
+    }
+
+    #[test]
     fn maps_supported_image_content_types() {
-        assert_eq!(image_format_for_content_type("image/png"), Some(ImageFormat::Png));
-        assert_eq!(image_format_for_content_type("image/jpeg"), Some(ImageFormat::Jpeg));
-        assert_eq!(image_format_for_content_type("image/jpg"), Some(ImageFormat::Jpeg));
-        assert_eq!(image_format_for_content_type("image/webp"), Some(ImageFormat::Webp));
-        assert_eq!(image_format_for_content_type("image/gif"), Some(ImageFormat::Gif));
-        assert_eq!(image_format_for_content_type("image/svg+xml"), Some(ImageFormat::Svg));
-        assert_eq!(image_format_for_content_type("image/bmp"), Some(ImageFormat::Bmp));
-        assert_eq!(image_format_for_content_type("image/tiff"), Some(ImageFormat::Tiff));
+        assert_eq!(
+            image_format_for_content_type("image/png"),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            image_format_for_content_type("image/jpeg"),
+            Some(ImageFormat::Jpeg)
+        );
+        assert_eq!(
+            image_format_for_content_type("image/jpg"),
+            Some(ImageFormat::Jpeg)
+        );
+        assert_eq!(
+            image_format_for_content_type("image/webp"),
+            Some(ImageFormat::Webp)
+        );
+        assert_eq!(
+            image_format_for_content_type("image/gif"),
+            Some(ImageFormat::Gif)
+        );
+        assert_eq!(
+            image_format_for_content_type("image/svg+xml"),
+            Some(ImageFormat::Svg)
+        );
+        assert_eq!(
+            image_format_for_content_type("image/bmp"),
+            Some(ImageFormat::Bmp)
+        );
+        assert_eq!(
+            image_format_for_content_type("image/tiff"),
+            Some(ImageFormat::Tiff)
+        );
     }
 
     #[test]
@@ -558,7 +848,10 @@ mod tests {
             image_format_for_content_type("Image/PNG; charset=binary"),
             Some(ImageFormat::Png)
         );
-        assert_eq!(image_format_for_content_type("  image/gif ; foo=bar"), Some(ImageFormat::Gif));
+        assert_eq!(
+            image_format_for_content_type("  image/gif ; foo=bar"),
+            Some(ImageFormat::Gif)
+        );
     }
 
     #[test]
@@ -572,7 +865,10 @@ mod tests {
     // ===== headers_to_text ("Copy all") =====
 
     fn hs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -596,7 +892,10 @@ mod tests {
 
     #[test]
     fn single_header_has_no_newline() {
-        assert_eq!(headers_to_text(&hs(&[("date", "Mon, 20 Jul 2026")])), "date: Mon, 20 Jul 2026");
+        assert_eq!(
+            headers_to_text(&hs(&[("date", "Mon, 20 Jul 2026")])),
+            "date: Mon, 20 Jul 2026"
+        );
     }
 
     #[test]

@@ -24,8 +24,8 @@ mod tab_bar;
 mod theme;
 mod types;
 mod ui;
-mod variables;
 mod url_params;
+mod variables;
 
 use gpui::*;
 use gpui_component::Root;
@@ -97,7 +97,8 @@ fn setup_logger() {
                 timestamp,
                 record.level(),
                 record.args()
-            ).ok();
+            )
+            .ok();
 
             Ok(())
         })
@@ -107,6 +108,9 @@ fn setup_logger() {
 }
 
 fn main() {
+    #[cfg(feature = "profile")]
+    profiling::register_thread!("main");
+
     // Initialize logger to write to both console and file
     setup_logger();
 
@@ -145,14 +149,16 @@ fn main() {
             items: vec![MenuItem::action("Quit Poopman", crate::app::Quit)],
         }]);
 
+        let initial = cx.background_spawn(async { crate::app::AppInitialState::load() });
         cx.spawn(async move |cx| {
+            let initial = initial.await?;
             let window_options = WindowOptions {
                 titlebar: Some(gpui_component::TitleBar::title_bar_options()),
                 window_min_size: Some(size(px(720.), px(480.))),
                 ..Default::default()
             };
             cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|cx| PoopmanApp::new(window, cx));
+                let view = cx.new(|cx| PoopmanApp::new(initial, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;
             Ok::<_, anyhow::Error>(())

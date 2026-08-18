@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -150,7 +150,7 @@ impl RawSubtype {
     pub fn as_str(&self) -> &'static str {
         match self {
             RawSubtype::Json => "json",
-            RawSubtype::Xml => "plain",  // XML not supported, fallback to plain
+            RawSubtype::Xml => "plain", // XML not supported, fallback to plain
             RawSubtype::Text => "plain",
             RawSubtype::JavaScript => "javascript",
             RawSubtype::UrlEncoded => "plain",
@@ -254,14 +254,18 @@ impl AuthConfig {
                 if self.bearer_token.is_empty() {
                     None
                 } else {
-                    Some(("Authorization".to_string(), format!("Bearer {}", self.bearer_token)))
+                    Some((
+                        "Authorization".to_string(),
+                        format!("Bearer {}", self.bearer_token),
+                    ))
                 }
             }
             AuthType::Basic => {
                 if self.basic_username.is_empty() && self.basic_password.is_empty() {
                     None
                 } else {
-                    let encoded = BASE64.encode(format!("{}:{}", self.basic_username, self.basic_password));
+                    let encoded =
+                        BASE64.encode(format!("{}:{}", self.basic_username, self.basic_password));
                     Some(("Authorization".to_string(), format!("Basic {}", encoded)))
                 }
             }
@@ -345,7 +349,13 @@ pub fn is_text_response(headers: &[(String, String)], body: &[u8]) -> bool {
     let content_type = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-        .map(|(_, v)| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase());
+        .map(|(_, v)| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        });
 
     if let Some(ct) = content_type.as_deref() {
         // Clearly text
@@ -379,11 +389,6 @@ pub fn is_text_response(headers: &[(String, String)], body: &[u8]) -> bool {
 }
 
 impl ResponseData {
-    /// Lossy text view of the body (for display when `is_text`).
-    pub fn body_text(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.body)
-    }
-
     pub fn status_text(&self) -> &'static str {
         match self.status {
             Some(200) => "OK",
@@ -544,7 +549,10 @@ mod tests {
     #[test]
     fn binary_content_types_are_binary() {
         assert!(!is_text_response(&h("image/png"), &[0x89, 0x50]));
-        assert!(!is_text_response(&h("application/octet-stream"), &[0, 1, 2]));
+        assert!(!is_text_response(
+            &h("application/octet-stream"),
+            &[0, 1, 2]
+        ));
         assert!(!is_text_response(&h("application/pdf"), b"%PDF"));
         assert!(!is_text_response(&h("application/zip"), &[0x50, 0x4b]));
     }
@@ -562,20 +570,37 @@ mod tests {
     fn compute_header_none_and_empty_fields_emit_nothing() {
         assert_eq!(AuthConfig::default().compute_header(), None);
         // Bearer with empty token → nothing (don't send a dangling "Bearer ")
-        let a = AuthConfig { auth_type: AuthType::Bearer, ..Default::default() };
+        let a = AuthConfig {
+            auth_type: AuthType::Bearer,
+            ..Default::default()
+        };
         assert_eq!(a.compute_header(), None);
         // Basic with both fields empty → nothing
-        let a = AuthConfig { auth_type: AuthType::Basic, ..Default::default() };
+        let a = AuthConfig {
+            auth_type: AuthType::Basic,
+            ..Default::default()
+        };
         assert_eq!(a.compute_header(), None);
         // ApiKey with empty name → nothing
-        let a = AuthConfig { auth_type: AuthType::ApiKey, api_key_value: "v".into(), ..Default::default() };
+        let a = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            api_key_value: "v".into(),
+            ..Default::default()
+        };
         assert_eq!(a.compute_header(), None);
     }
 
     #[test]
     fn compute_header_bearer() {
-        let a = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "t0ken".into(), ..Default::default() };
-        assert_eq!(a.compute_header(), Some(("Authorization".into(), "Bearer t0ken".into())));
+        let a = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "t0ken".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            a.compute_header(),
+            Some(("Authorization".into(), "Bearer t0ken".into()))
+        );
     }
 
     #[test]
@@ -587,14 +612,24 @@ mod tests {
             ..Default::default()
         };
         // base64("user:pass") == "dXNlcjpwYXNz"
-        assert_eq!(a.compute_header(), Some(("Authorization".into(), "Basic dXNlcjpwYXNz".into())));
+        assert_eq!(
+            a.compute_header(),
+            Some(("Authorization".into(), "Basic dXNlcjpwYXNz".into()))
+        );
     }
 
     #[test]
     fn compute_header_basic_username_only() {
-        let a = AuthConfig { auth_type: AuthType::Basic, basic_username: "user".into(), ..Default::default() };
+        let a = AuthConfig {
+            auth_type: AuthType::Basic,
+            basic_username: "user".into(),
+            ..Default::default()
+        };
         // base64("user:") == "dXNlcjo="
-        assert_eq!(a.compute_header(), Some(("Authorization".into(), "Basic dXNlcjo=".into())));
+        assert_eq!(
+            a.compute_header(),
+            Some(("Authorization".into(), "Basic dXNlcjo=".into()))
+        );
     }
 
     #[test]
@@ -605,7 +640,10 @@ mod tests {
             api_key_value: "secret".into(),
             ..Default::default()
         };
-        assert_eq!(a.compute_header(), Some(("X-API-Key".into(), "secret".into())));
+        assert_eq!(
+            a.compute_header(),
+            Some(("X-API-Key".into(), "secret".into()))
+        );
     }
 
     #[test]
@@ -618,7 +656,11 @@ mod tests {
     #[test]
     fn effective_headers_appends_auth() {
         let manual = vec![("Accept".to_string(), "*/*".to_string())];
-        let auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "t".into(), ..Default::default() };
+        let auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "t".into(),
+            ..Default::default()
+        };
         let out = effective_wire_headers(&manual, &auth);
         assert_eq!(
             out,
@@ -636,7 +678,11 @@ mod tests {
             ("Accept".to_string(), "*/*".to_string()),
             ("authorization".to_string(), "Bearer OLD".to_string()),
         ];
-        let auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "NEW".into(), ..Default::default() };
+        let auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "NEW".into(),
+            ..Default::default()
+        };
         let out = effective_wire_headers(&manual, &auth);
         assert_eq!(
             out,

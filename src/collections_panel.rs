@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::db::Database;
-use crate::postman::{self, ImportResult, PostmanWarning};
+use crate::postman::{self, ImportResult};
 use crate::theme::method_color;
 use crate::types::{Collection, CollectionFolder, SavedRequest};
 
@@ -76,6 +76,7 @@ pub struct CollectionsPanel {
     expanded_folders: HashSet<i64>,
     search: Entity<InputState>,
     query: String,
+    reload_generation: u64,
     list_scroll_handle: ScrollHandle,
 }
 
@@ -84,8 +85,12 @@ impl EventEmitter<NewRequestRequested> for CollectionsPanel {}
 impl EventEmitter<CollectionsChanged> for CollectionsPanel {}
 
 impl CollectionsPanel {
-    pub fn new(db: Arc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let collections = db.load_collections().unwrap_or_default();
+    pub fn new(
+        db: Arc<Database>,
+        collections: Vec<Collection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let expanded_collections = collections.iter().map(|collection| collection.id).collect();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search collections"));
         cx.subscribe(&search, Self::on_search_change).detach();
@@ -98,12 +103,35 @@ impl CollectionsPanel {
             expanded_folders: HashSet::new(),
             search,
             query: String::new(),
+            reload_generation: 0,
             list_scroll_handle: ScrollHandle::new(),
         }
     }
 
-    pub fn reload(&mut self, cx: &mut Context<Self>) {
-        self.collections = self.db.load_collections().unwrap_or_default();
+    #[cfg_attr(feature = "profile", profiling::function)]
+    pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_generation = self.reload_generation.wrapping_add(1);
+        let generation = self.reload_generation;
+        let db = self.db.clone();
+        let task = cx.background_spawn(async move { db.load_collections() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if this.reload_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(collections) => this.apply_loaded_collections(collections, cx),
+                    Err(error) => log::error!("Failed to reload collections: {}", error),
+                }
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    fn apply_loaded_collections(&mut self, collections: Vec<Collection>, cx: &mut Context<Self>) {
+        self.collections = collections;
         let collection_ids: HashSet<i64> = self.collections.iter().map(|c| c.id).collect();
         self.expanded_collections
             .retain(|id| collection_ids.contains(id));
@@ -340,16 +368,15 @@ impl CollectionsPanel {
                 .w(px(420.))
                 .child(v_flex().gap_2().child(Input::new(&input)))
                 .confirm()
-                .on_ok(move |_, _window, cx: &mut App| {
+                .on_ok(move |_, window, cx: &mut App| {
                     let name = input_for_ok.read(cx).value().trim().to_string();
                     if name.is_empty() {
                         return false;
                     }
-                    let mut succeeded = false;
                     panel.update(cx, |panel, cx| {
-                        succeeded = panel.apply_name_action(action.clone(), &name, cx);
+                        panel.apply_name_action(action.clone(), &name, window, cx);
                     });
-                    succeeded
+                    true
                 })
         });
     }
@@ -358,40 +385,54 @@ impl CollectionsPanel {
         &mut self,
         action: NameAction,
         name: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let result = match action {
-            NameAction::CreateCollection => self.db.create_collection(name).map(|id| {
-                self.selected = Some(NodeRef::Collection(id));
-            }),
-            NameAction::CreateFolder {
-                collection_id,
-                parent_id,
-            } => self
-                .db
-                .create_folder(collection_id, parent_id, name)
-                .map(|id| {
-                    self.selected = Some(NodeRef::Folder(id));
-                    self.expanded_collections.insert(collection_id);
-                    if let Some(parent_id) = parent_id {
-                        self.expanded_folders.insert(parent_id);
-                    }
-                }),
-            NameAction::RenameCollection(id) => self.db.rename_collection(id, name),
-            NameAction::RenameFolder(id) => self.db.rename_folder(id, name),
-            NameAction::RenameRequest(id) => self.db.rename_saved_request(id, name),
-        };
-        match result {
-            Ok(()) => {
-                self.reload(cx);
-                cx.emit(CollectionsChanged::default());
-                true
+    ) {
+        let db = self.db.clone();
+        let name = name.to_string();
+        let action_for_ui = action.clone();
+        let task = cx.background_spawn(async move {
+            match action {
+                NameAction::CreateCollection => db
+                    .create_collection(&name)
+                    .map(|id| Some(NodeRef::Collection(id))),
+                NameAction::CreateFolder {
+                    collection_id,
+                    parent_id,
+                } => db
+                    .create_folder(collection_id, parent_id, &name)
+                    .map(|id| Some(NodeRef::Folder(id))),
+                NameAction::RenameCollection(id) => db.rename_collection(id, &name).map(|()| None),
+                NameAction::RenameFolder(id) => db.rename_folder(id, &name).map(|()| None),
+                NameAction::RenameRequest(id) => db.rename_saved_request(id, &name).map(|()| None),
             }
-            Err(error) => {
-                log::error!("Failed to update collection tree: {}", error);
-                false
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            match task.await {
+                Ok(selected) => {
+                    this.update_in(cx, |this, window, cx| {
+                        if let Some(selected) = selected {
+                            this.selected = Some(selected);
+                            if let NameAction::CreateFolder {
+                                collection_id,
+                                parent_id,
+                            } = action_for_ui
+                            {
+                                this.expanded_collections.insert(collection_id);
+                                if let Some(parent_id) = parent_id {
+                                    this.expanded_folders.insert(parent_id);
+                                }
+                            }
+                        }
+                        this.reload(window, cx);
+                        cx.emit(CollectionsChanged::default());
+                    })?;
+                }
+                Err(error) => log::error!("Failed to update collection tree: {}", error),
             }
-        }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     fn request_ids_in_folder(folder: &CollectionFolder, ids: &mut Vec<i64>) {
@@ -460,85 +501,93 @@ impl CollectionsPanel {
                         ),
                 )
                 .confirm()
-                .on_ok(move |_, _window, cx: &mut App| {
-                    let mut succeeded = false;
+                .on_ok(move |_, window, cx: &mut App| {
                     panel.update(cx, |panel, cx| {
-                        succeeded = panel.delete_node(node, cx);
+                        panel.delete_node(node, window, cx);
                     });
-                    succeeded
+                    true
                 })
         });
     }
 
-    fn delete_node(&mut self, node: NodeRef, cx: &mut Context<Self>) -> bool {
-        let (result, deleted_request_ids) = match node {
-            NodeRef::Collection(id) => {
-                let ids = self
-                    .collections
-                    .iter()
-                    .find(|collection| collection.id == id)
-                    .map(Self::request_ids_in_collection)
-                    .unwrap_or_default();
-                (self.db.delete_collection(id), ids)
-            }
-            NodeRef::Folder(id) => {
-                let ids = self
-                    .find_folder(id)
-                    .map(|folder| {
-                        let mut ids = Vec::new();
-                        Self::request_ids_in_folder(folder, &mut ids);
-                        ids
-                    })
-                    .unwrap_or_default();
-                (self.db.delete_folder(id), ids)
-            }
-            NodeRef::Request(id) => (self.db.delete_saved_request(id), vec![id]),
+    fn delete_node(&mut self, node: NodeRef, window: &mut Window, cx: &mut Context<Self>) {
+        let deleted_request_ids = match node {
+            NodeRef::Collection(id) => self
+                .collections
+                .iter()
+                .find(|collection| collection.id == id)
+                .map(Self::request_ids_in_collection)
+                .unwrap_or_default(),
+            NodeRef::Folder(id) => self
+                .find_folder(id)
+                .map(|folder| {
+                    let mut ids = Vec::new();
+                    Self::request_ids_in_folder(folder, &mut ids);
+                    ids
+                })
+                .unwrap_or_default(),
+            NodeRef::Request(id) => vec![id],
         };
-        match result {
-            Ok(()) => {
-                if self.selected == Some(node) {
-                    self.selected = None;
+        let db = self.db.clone();
+        let task = cx.background_spawn(async move {
+            match node {
+                NodeRef::Collection(id) => db.delete_collection(id),
+                NodeRef::Folder(id) => db.delete_folder(id),
+                NodeRef::Request(id) => db.delete_saved_request(id),
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            match task.await {
+                Ok(()) => {
+                    this.update_in(cx, |this, window, cx| {
+                        if this.selected == Some(node) {
+                            this.selected = None;
+                        }
+                        this.reload(window, cx);
+                        cx.emit(CollectionsChanged {
+                            deleted_request_ids,
+                        });
+                    })?;
                 }
-                self.reload(cx);
-                cx.emit(CollectionsChanged {
-                    deleted_request_ids,
-                });
-                true
+                Err(error) => log::error!("Failed to delete collection item: {}", error),
             }
-            Err(error) => {
-                log::error!("Failed to delete collection item: {}", error);
-                false
-            }
-        }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
-    fn duplicate_node(&mut self, node: NodeRef, cx: &mut Context<Self>) {
-        let result = match node {
-            NodeRef::Collection(id) => self.db.duplicate_collection(id),
-            NodeRef::Folder(id) => self.db.duplicate_folder(id),
-            NodeRef::Request(id) => self.db.duplicate_saved_request(id),
-        };
-        match result {
-            Ok(id) => {
-                self.selected = Some(match node {
-                    NodeRef::Collection(_) => NodeRef::Collection(id),
-                    NodeRef::Folder(_) => NodeRef::Folder(id),
-                    NodeRef::Request(_) => NodeRef::Request(id),
-                });
-                self.reload(cx);
-                cx.emit(CollectionsChanged::default());
+    fn duplicate_node(&mut self, node: NodeRef, window: &mut Window, cx: &mut Context<Self>) {
+        let db = self.db.clone();
+        let task = cx.background_spawn(async move {
+            match node {
+                NodeRef::Collection(id) => db.duplicate_collection(id),
+                NodeRef::Folder(id) => db.duplicate_folder(id),
+                NodeRef::Request(id) => db.duplicate_saved_request(id),
             }
-            Err(error) => log::error!("Failed to duplicate collection item: {}", error),
-        }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            match task.await {
+                Ok(id) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.selected = Some(match node {
+                            NodeRef::Collection(_) => NodeRef::Collection(id),
+                            NodeRef::Folder(_) => NodeRef::Folder(id),
+                            NodeRef::Request(_) => NodeRef::Request(id),
+                        });
+                        this.reload(window, cx);
+                        cx.emit(CollectionsChanged::default());
+                    })?;
+                }
+                Err(error) => log::error!("Failed to duplicate collection item: {}", error),
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
-    // The actual import implementation is kept separate from the file picker
-    // callback so it is easy to exercise and so one file read is sufficient.
-    fn import_data(
-        &mut self,
-        imported: ImportResult,
-        cx: &mut Context<Self>,
-    ) -> Result<(String, Vec<PostmanWarning>)> {
+    // The actual import implementation is kept separate from the file picker.
+    // Both parsing and SQLite insertion run away from the UI thread.
+    fn import_data(&mut self, imported: ImportResult, window: &mut Window, cx: &mut Context<Self>) {
         let base_name = if imported.collection.name.trim().is_empty() {
             "Imported Collection".to_string()
         } else {
@@ -554,47 +603,28 @@ impl CollectionsPanel {
             base_name
         };
         let warnings = imported.warnings.clone();
-        let id = self
-            .db
-            .insert_collection_tree(&imported.collection, &name)?;
-        self.reload(cx);
-        self.selected = Some(NodeRef::Collection(id));
-        self.expanded_collections.insert(id);
-        cx.emit(CollectionsChanged::default());
-        Ok((name, warnings))
-    }
-
-    fn start_import(&mut self, _event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Import Postman collection".into()),
+        let db = self.db.clone();
+        let name_for_db = name.clone();
+        let task = cx.background_spawn(async move {
+            db.insert_collection_tree(&imported.collection, &name_for_db)
         });
-        let panel = cx.entity();
-        cx.spawn_in(window, async move |_, window| {
-            let result: Result<Option<ImportResult>> = async {
-                let paths = receiver.await??;
-                let Some(path) = paths.and_then(|paths| paths.into_iter().next()) else {
-                    return Ok(None);
-                };
-                let text = std::fs::read_to_string(path)?;
-                Ok(Some(postman::import_collection(&text)?))
-            }
-            .await;
-            let _ = window.update(|window, cx| match result {
-                Ok(Some(imported)) => {
-                    let outcome = panel.update(cx, |panel, cx| panel.import_data(imported, cx));
-                    match outcome {
-                        Ok((name, warnings)) if warnings.is_empty() => {
+        cx.spawn_in(window, async move |this, cx| {
+            match task.await {
+                Ok(id) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.selected = Some(NodeRef::Collection(id));
+                        this.expanded_collections.insert(id);
+                        this.reload(window, cx);
+                        cx.emit(CollectionsChanged::default());
+
+                        if warnings.is_empty() {
                             panel_notice(
                                 window,
                                 cx,
                                 "Collection imported",
                                 format!("Imported {}.", name),
                             );
-                        }
-                        Ok((name, warnings)) => {
+                        } else {
                             let details = warnings
                                 .iter()
                                 .take(8)
@@ -608,12 +638,48 @@ impl CollectionsPanel {
                                 format!("Imported {}.\n\n{}", name, details),
                             );
                         }
-                        Err(error) => panel_notice(window, cx, "Import failed", error.to_string()),
-                    }
+                    })?;
                 }
-                Ok(None) => {}
-                Err(error) => panel_notice(window, cx, "Import failed", error.to_string()),
+                Err(error) => {
+                    cx.update(|window, cx| {
+                        panel_notice(window, cx, "Import failed", error.to_string())
+                    })?;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    fn start_import(&mut self, _event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import Postman collection".into()),
+        });
+        let panel = cx.entity();
+        cx.spawn_in(window, async move |_, cx| {
+            let paths = receiver.await??;
+            let Some(path) = paths.and_then(|paths| paths.into_iter().next()) else {
+                return Ok(());
+            };
+            let parse = cx.background_spawn(async move {
+                let text = std::fs::read_to_string(path)?;
+                Ok::<_, anyhow::Error>(postman::import_collection(&text)?)
             });
+            match parse.await {
+                Ok(imported) => {
+                    panel.update_in(cx, |panel, window, cx| {
+                        panel.import_data(imported, window, cx)
+                    })?;
+                }
+                Err(error) => {
+                    cx.update(|window, cx| {
+                        panel_notice(window, cx, "Import failed", error.to_string())
+                    })?;
+                }
+            }
             Ok::<_, anyhow::Error>(())
         })
         .detach();
@@ -637,16 +703,19 @@ impl CollectionsPanel {
         };
         let suggested = format!("{}.json", safe_filename(&collection.name));
         let receiver = cx.prompt_for_new_path(Path::new(""), Some(&suggested));
-        cx.spawn_in(window, async move |_, window| {
-            let result: Result<()> = async {
-                if let Some(path) = receiver.await?? {
-                    std::fs::write(path, json)?;
+        cx.spawn_in(window, async move |_, cx| {
+            let result: Result<()> = match receiver.await?? {
+                Some(path) => {
+                    cx.background_spawn(async move {
+                        std::fs::write(path, json)?;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await
                 }
-                Ok(())
-            }
-            .await;
+                None => Ok(()),
+            };
             if let Err(error) = result {
-                let _ = window.update(|window, cx| {
+                let _ = cx.update(|window, cx| {
                     panel_notice(window, cx, "Export failed", error.to_string())
                 });
             }
@@ -909,6 +978,7 @@ impl CollectionsPanel {
 }
 
 impl Render for CollectionsPanel {
+    #[cfg_attr(feature = "profile", profiling::function)]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let owner = cx.entity();
@@ -937,16 +1007,13 @@ impl Render for CollectionsPanel {
                             .child("Collections"),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                Input::new(&self.search)
-                                    .small()
-                                    .w_full()
-                                    .cleanable(true)
-                                    .prefix(Icon::empty().path("icons/search.svg")),
-                            ),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.search)
+                                .small()
+                                .w_full()
+                                .cleanable(true)
+                                .prefix(Icon::empty().path("icons/search.svg")),
+                        ),
                     )
                     .child(
                         h_flex()
@@ -1116,11 +1183,13 @@ fn collection_menu(
             );
         });
     }))
-    .item(PopupMenuItem::new("Duplicate").on_click(move |_, _, cx| {
-        duplicate_panel.update(cx, |panel, cx| {
-            panel.duplicate_node(NodeRef::Collection(id), cx)
-        });
-    }))
+    .item(
+        PopupMenuItem::new("Duplicate").on_click(move |_, window, cx| {
+            duplicate_panel.update(cx, |panel, cx| {
+                panel.duplicate_node(NodeRef::Collection(id), window, cx)
+            });
+        }),
+    )
     .item(PopupMenuItem::separator())
     .item(
         PopupMenuItem::new("Export as Postman JSON").on_click(move |_, window, cx| {
@@ -1184,11 +1253,13 @@ fn folder_menu(
             );
         });
     }))
-    .item(PopupMenuItem::new("Duplicate").on_click(move |_, _, cx| {
-        duplicate_panel.update(cx, |panel, cx| {
-            panel.duplicate_node(NodeRef::Folder(id), cx)
-        });
-    }))
+    .item(
+        PopupMenuItem::new("Duplicate").on_click(move |_, window, cx| {
+            duplicate_panel.update(cx, |panel, cx| {
+                panel.duplicate_node(NodeRef::Folder(id), window, cx)
+            });
+        }),
+    )
     .item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
         delete_panel.update(cx, |panel, cx| {
             panel.prompt_delete(NodeRef::Folder(id), window, cx)
@@ -1216,11 +1287,13 @@ fn request_menu(
             );
         });
     }))
-    .item(PopupMenuItem::new("Duplicate").on_click(move |_, _, cx| {
-        duplicate_panel.update(cx, |panel, cx| {
-            panel.duplicate_node(NodeRef::Request(id), cx)
-        });
-    }))
+    .item(
+        PopupMenuItem::new("Duplicate").on_click(move |_, window, cx| {
+            duplicate_panel.update(cx, |panel, cx| {
+                panel.duplicate_node(NodeRef::Request(id), window, cx)
+            });
+        }),
+    )
     .item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
         delete_panel.update(cx, |panel, cx| {
             panel.prompt_delete(NodeRef::Request(id), window, cx)
