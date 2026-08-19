@@ -4,7 +4,7 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{h_flex, Theme};
+use gpui_component::{Theme, h_flex, v_flex};
 
 /// A floating panel card: white-ish surface, hairline border, large radius,
 /// soft shadow, clipped contents. Wrap a panel's content in this.
@@ -16,6 +16,56 @@ pub fn card_panel(theme: &Theme) -> Div {
         .rounded(theme.radius_lg)
         .shadow_sm()
         .overflow_hidden()
+}
+
+/// A quiet panel for grouping controls inside a dialog or another card.
+///
+/// Unlike [`card_panel`], this has no shadow: nested elevation made the old
+/// environment dialog look like a stack of unrelated floating surfaces.
+pub fn inset_panel(theme: &Theme) -> Div {
+    div()
+        .bg(theme.popover)
+        .border_1()
+        .border_color(theme.border)
+        .rounded(theme.radius_lg)
+        .overflow_hidden()
+}
+
+/// Consistent small heading for sections inside dialogs and side rails.
+pub fn section_label(theme: &Theme, label: impl Into<SharedString>) -> Div {
+    div()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.muted_foreground)
+        .child(label.into())
+}
+
+/// A compact empty state that avoids leaving an unexplained blank panel.
+pub fn empty_state(
+    theme: &Theme,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+) -> Div {
+    v_flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .px_4()
+        .text_center()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.foreground)
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(description.into()),
+        )
 }
 
 /// The container for a segmented pill tab strip (muted rounded track).

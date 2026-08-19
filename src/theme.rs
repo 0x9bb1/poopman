@@ -1,8 +1,8 @@
 //! Warm-light ("Claude paper") theme: palette, layout dimensions, and the
 //! global theme application applied once at startup.
 
-use gpui::{px, App, Hsla};
-use gpui_component::{scroll::ScrollbarShow, Theme, ThemeMode};
+use gpui::{App, Hsla, px};
+use gpui_component::{Theme, ThemeMode, scroll::ScrollbarShow};
 
 use crate::types::HttpMethod;
 
@@ -22,6 +22,7 @@ const SUCCESS: u32 = 0x4F8A5B; // 2xx / GET
 const DANGER: u32 = 0xC0503F; // 4xx-5xx / DELETE
 const WARNING: u32 = 0xC98A3C; // amber / POST,PUT
 const SCROLLBAR: u32 = 0xD8D4C8;
+const OVERLAY: u32 = 0x342E29; // warm neutral modal scrim
 
 // ===== Layout dimensions (px) =====
 #[allow(dead_code)]
@@ -97,6 +98,9 @@ pub fn apply_theme(cx: &mut App) {
     // paint_selection()), so an opaque colour covers the selected text completely
     // — you select a header value and it vanishes. Alpha lets it show through.
     theme.selection = c(WASH).alpha(0.55);
+    // Keep dialogs visually separate from the busy request canvas without the
+    // cold grey cast of the component library's default overlay.
+    theme.overlay = c(OVERLAY).alpha(0.28);
 
     // Lists (history rows)
     theme.list = c(SIDEBAR);
