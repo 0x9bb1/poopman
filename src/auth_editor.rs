@@ -1,9 +1,10 @@
 use gpui::prelude::FluentBuilder as _;
-use gpui::*;
 use gpui::px;
+use gpui::*;
 use gpui_component::{
+    ActiveTheme as _, h_flex,
     input::{Input, InputState},
-    v_flex, h_flex, ActiveTheme as _,
+    v_flex,
 };
 
 use crate::types::{AuthConfig, AuthType};
@@ -25,11 +26,24 @@ impl AuthEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             auth_type_index: 0,
-            bearer_token: cx.new(|cx| InputState::new(window, cx).placeholder("Token")),
+            bearer_token: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Token")
+                    .masked(true)
+            }),
             basic_username: cx.new(|cx| InputState::new(window, cx).placeholder("Username")),
-            basic_password: cx.new(|cx| InputState::new(window, cx).placeholder("Password")),
-            api_key_name: cx.new(|cx| InputState::new(window, cx).placeholder("Key (e.g. X-API-Key)")),
-            api_key_value: cx.new(|cx| InputState::new(window, cx).placeholder("Value")),
+            basic_password: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Password")
+                    .masked(true)
+            }),
+            api_key_name: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Key (e.g. X-API-Key)")),
+            api_key_value: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Value")
+                    .masked(true)
+            }),
         }
     }
 
@@ -58,16 +72,31 @@ impl AuthEditor {
             AuthType::Basic => 2,
             AuthType::ApiKey => 3,
         };
-        self.bearer_token.update(cx, |i, cx| i.set_value(&auth.bearer_token, window, cx));
-        self.basic_username.update(cx, |i, cx| i.set_value(&auth.basic_username, window, cx));
-        self.basic_password.update(cx, |i, cx| i.set_value(&auth.basic_password, window, cx));
-        self.api_key_name.update(cx, |i, cx| i.set_value(&auth.api_key_name, window, cx));
-        self.api_key_value.update(cx, |i, cx| i.set_value(&auth.api_key_value, window, cx));
+        self.bearer_token
+            .update(cx, |i, cx| i.set_value(&auth.bearer_token, window, cx));
+        self.basic_username
+            .update(cx, |i, cx| i.set_value(&auth.basic_username, window, cx));
+        self.basic_password
+            .update(cx, |i, cx| i.set_value(&auth.basic_password, window, cx));
+        self.api_key_name
+            .update(cx, |i, cx| i.set_value(&auth.api_key_name, window, cx));
+        self.api_key_value
+            .update(cx, |i, cx| i.set_value(&auth.api_key_value, window, cx));
         cx.notify();
     }
 
     /// A labelled input row (label on the left, field filling the rest).
-    fn field_row(label: &'static str, input: &Entity<InputState>, theme: &gpui_component::Theme) -> impl IntoElement {
+    fn field_row(
+        label: &'static str,
+        input: &Entity<InputState>,
+        secret: bool,
+        theme: &gpui_component::Theme,
+    ) -> impl IntoElement {
+        let input = if secret {
+            Input::new(input).mask_toggle()
+        } else {
+            Input::new(input)
+        };
         h_flex()
             .gap_3()
             .items_center()
@@ -80,7 +109,7 @@ impl AuthEditor {
                     .text_color(theme.muted_foreground)
                     .child(label),
             )
-            .child(div().flex_1().child(Input::new(input)))
+            .child(div().flex_1().child(input))
     }
 }
 
@@ -149,15 +178,25 @@ impl Render for AuthEditor {
                 )
             })
             .when(self.auth_type_index == 1, |this| {
-                this.child(Self::field_row("Token", &self.bearer_token, theme))
+                this.child(Self::field_row("Token", &self.bearer_token, true, theme))
             })
             .when(self.auth_type_index == 2, |this| {
-                this.child(Self::field_row("Username", &self.basic_username, theme))
-                    .child(Self::field_row("Password", &self.basic_password, theme))
+                this.child(Self::field_row(
+                    "Username",
+                    &self.basic_username,
+                    false,
+                    theme,
+                ))
+                .child(Self::field_row(
+                    "Password",
+                    &self.basic_password,
+                    true,
+                    theme,
+                ))
             })
             .when(self.auth_type_index == 3, |this| {
-                this.child(Self::field_row("Key", &self.api_key_name, theme))
-                    .child(Self::field_row("Value", &self.api_key_value, theme))
+                this.child(Self::field_row("Key", &self.api_key_name, false, theme))
+                    .child(Self::field_row("Value", &self.api_key_value, true, theme))
             })
     }
 }

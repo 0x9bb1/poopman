@@ -666,7 +666,7 @@ impl CollectionsPanel {
             };
             let parse = cx.background_spawn(async move {
                 let text = std::fs::read_to_string(path)?;
-                Ok::<_, anyhow::Error>(postman::import_collection(&text)?)
+                postman::import_collection(&text)
             });
             match parse.await {
                 Ok(imported) => {

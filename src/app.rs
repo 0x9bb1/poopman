@@ -17,7 +17,9 @@ use crate::collections_panel::{
     SavedRequestClicked,
 };
 use crate::db::Database;
-use crate::environment_manager::{EnvironmentManager, EnvironmentsChanged};
+use crate::environment_manager::{
+    EnvironmentManager, EnvironmentsChanged, environment_dialog_geometry,
+};
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
 use crate::request_editor::{
     OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor,
@@ -424,8 +426,10 @@ impl PoopmanApp {
     /// Open the environment management dialog.
     pub(crate) fn open_env_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let manager = self.env_manager.clone();
-        window.open_dialog(cx, move |dialog, _window, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let theme = cx.theme();
+            let viewport = window.viewport_size();
+            let geometry = environment_dialog_geometry(viewport.width, viewport.height);
             dialog
                 .title(
                     v_flex()
@@ -440,11 +444,18 @@ impl PoopmanApp {
                         .child(
                             div()
                                 .text_xs()
+                                .font_weight(gpui::FontWeight::NORMAL)
                                 .text_color(theme.muted_foreground)
-                                .child("Define variables like {{base_url}} per environment"),
+                                .child(
+                                    "Create reusable values for URLs, headers, and request bodies.",
+                                ),
                         ),
                 )
-                .w(px(680.))
+                .w(geometry.width)
+                .margin_top(geometry.margin_top)
+                .max_h((viewport.height - px(32.)).max(px(400.)))
+                .bg(theme.popover)
+                .rounded(px(16.))
                 .child(manager.clone())
         });
     }

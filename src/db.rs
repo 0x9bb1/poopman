@@ -1074,7 +1074,7 @@ impl Database {
                 return Ok(());
             }
             let tx = conn.transaction()?;
-            if !name.is_empty() {
+            if !name.trim().is_empty() {
                 tx.execute(
                     "UPDATE environments SET name = ?1 WHERE id = ?2",
                     params![name, environment_id],
@@ -1200,6 +1200,38 @@ mod tests {
         let environment = db.load_environments().unwrap().remove(0);
         assert_eq!(environment.name, "current");
         assert_eq!(environment.variables[0].value, "new");
+    }
+
+    #[test]
+    fn environment_save_epochs_are_independent() {
+        let db = mem_db();
+        let first_id = db.create_environment("first").unwrap();
+        let second_id = db.create_environment("second").unwrap();
+        let first_epoch = Arc::new(AtomicU64::new(1));
+        let second_epoch = Arc::new(AtomicU64::new(1));
+
+        db.save_environment_if_current(first_id, "first edited", &[], first_epoch, 1)
+            .unwrap();
+        db.save_environment_if_current(second_id, "second edited", &[], second_epoch, 1)
+            .unwrap();
+
+        let environments = db.load_environments().unwrap();
+        assert_eq!(
+            environments
+                .iter()
+                .find(|environment| environment.id == first_id)
+                .unwrap()
+                .name,
+            "first edited"
+        );
+        assert_eq!(
+            environments
+                .iter()
+                .find(|environment| environment.id == second_id)
+                .unwrap()
+                .name,
+            "second edited"
+        );
     }
 
     #[test]
