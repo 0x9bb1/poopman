@@ -14,10 +14,22 @@ use crate::theme::METHOD_SELECT_WIDTH;
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
 use crate::url_params::{self, QueryParam};
 
+/// Event emitted synchronously when a tab starts a request.
+#[derive(Clone)]
+pub struct RequestStarted {
+    pub tab_id: usize,
+    pub request_id: u64,
+    /// Immutable, unresolved editor snapshot captured at send time.
+    pub request: RequestData,
+}
+
 /// Event emitted when a request is sent and response is received.
 /// The response is `Arc`-shared so subscribers can store it without copying the body.
 #[derive(Clone)]
 pub struct RequestCompleted {
+    pub tab_id: usize,
+    pub request_id: u64,
+    /// Immutable resolved snapshot of the request that went over the wire.
     pub request: RequestData,
     pub response: std::sync::Arc<ResponseData>,
 }
@@ -28,7 +40,15 @@ pub struct OpenCodeSnippet;
 
 /// Event emitted when the user cancels an in-flight request.
 #[derive(Clone)]
-pub struct RequestCancelled;
+pub struct RequestCancelled {
+    pub tab_id: usize,
+    pub request_id: u64,
+}
+
+struct InFlightRequest {
+    request_id: u64,
+    abort_handle: tokio::task::AbortHandle,
+}
 
 /// Emitted when the user toggles the current request's collection bookmark.
 /// The app saves an unbookmarked request or removes an existing bookmark.
@@ -89,13 +109,12 @@ pub struct RequestEditor {
     params: Vec<ParamRow>,
     params_scroll_handle: ScrollHandle,
     active_tab: usize,
-    loading: bool,
-    /// Abort handle for the in-flight request (Some only while loading).
-    abort_handle: Option<tokio::task::AbortHandle>,
-    /// Incremented on every send *and* cancel; spawned tasks capture their
-    /// generation and bail out if it no longer matches, so a stale task can
-    /// never clobber state owned by a newer send.
-    send_generation: u64,
+    /// Stable id of the request tab currently displayed by this shared editor.
+    active_request_tab_id: usize,
+    /// Runtime request ownership is keyed by tab, allowing different tabs to
+    /// run concurrently without sharing loading or cancellation state.
+    in_flight: std::collections::HashMap<usize, InFlightRequest>,
+    next_request_id: u64,
     _subscriptions: Vec<Subscription>, // Permanent: URL input + body editor subscriptions
     _row_subscriptions: Vec<Subscription>, // Header/param row subscriptions; rebuilt on load
     /// Active environment variables, pushed by PoopmanApp; used at send time.
@@ -141,9 +160,9 @@ impl RequestEditor {
             params: vec![],
             params_scroll_handle: ScrollHandle::new(),
             active_tab: 0,
-            loading: false,
-            abort_handle: None,
-            send_generation: 0,
+            active_request_tab_id: 0,
+            in_flight: std::collections::HashMap::new(),
+            next_request_id: 1,
             _subscriptions: vec![],
             _row_subscriptions: vec![],
             env_vars: std::collections::HashMap::new(),
@@ -192,6 +211,27 @@ impl RequestEditor {
             self.is_saved_request = is_saved;
             cx.notify();
         }
+    }
+
+    /// Point the shared editor at a stable request-tab identity.
+    pub fn set_active_request_tab(&mut self, tab_id: usize, cx: &mut Context<Self>) {
+        if self.active_request_tab_id != tab_id {
+            self.active_request_tab_id = tab_id;
+            cx.notify();
+        }
+    }
+
+    /// Closing a tab explicitly aborts its request and drops ownership. No
+    /// cancellation event is emitted because the destination no longer exists.
+    pub fn close_request_tab(&mut self, tab_id: usize, cx: &mut Context<Self>) {
+        if let Some(in_flight) = self.in_flight.remove(&tab_id) {
+            in_flight.abort_handle.abort();
+            cx.notify();
+        }
+    }
+
+    fn active_tab_is_loading(&self) -> bool {
+        self.in_flight.contains_key(&self.active_request_tab_id)
     }
 
     /// Initialize all predefined headers
@@ -1035,13 +1075,15 @@ impl RequestEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(handle) = self.abort_handle.take() {
-            handle.abort();
-        }
-        // Invalidate the spawned task so its completion can't touch state.
-        self.send_generation = self.send_generation.wrapping_add(1);
-        self.loading = false;
-        cx.emit(RequestCancelled);
+        let tab_id = self.active_request_tab_id;
+        let Some(in_flight) = self.in_flight.remove(&tab_id) else {
+            return;
+        };
+        in_flight.abort_handle.abort();
+        cx.emit(RequestCancelled {
+            tab_id,
+            request_id: in_flight.request_id,
+        });
         cx.notify();
     }
 
@@ -1070,7 +1112,7 @@ impl RequestEditor {
     /// it from PoopmanApp; no-op while a request is already in flight (the
     /// button is swapped to Cancel then, but the keyboard path isn't).
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.active_tab_is_loading() {
             return;
         }
         let mut url = self
@@ -1105,6 +1147,7 @@ impl RequestEditor {
 
         // Update Content-Length before sending
         self.update_content_length(window, cx);
+        let editor_request_snapshot = self.get_current_request_data(cx);
 
         // Get selected method
         let method_index = self
@@ -1193,9 +1236,12 @@ impl RequestEditor {
             auth: resolved_auth.clone(),
         };
 
-        self.send_generation = self.send_generation.wrapping_add(1);
-        let generation = self.send_generation;
-        self.loading = true;
+        let tab_id = self.active_request_tab_id;
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .expect("request id space exhausted");
 
         log::debug!("Starting {} request to: {}", method.as_str(), url);
 
@@ -1205,7 +1251,18 @@ impl RequestEditor {
         let client = crate::http_client::HttpClient::new();
         let wire_headers = crate::types::effective_wire_headers(&headers, &resolved_auth);
         let inflight = client.start_send(method, url, wire_headers, body);
-        self.abort_handle = Some(inflight.abort_handle());
+        self.in_flight.insert(
+            tab_id,
+            InFlightRequest {
+                request_id,
+                abort_handle: inflight.abort_handle(),
+            },
+        );
+        cx.emit(RequestStarted {
+            tab_id,
+            request_id,
+            request: editor_request_snapshot,
+        });
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -1215,8 +1272,7 @@ impl RequestEditor {
                     if e.downcast_ref::<crate::http_client::RequestCanceled>()
                         .is_some()
                     {
-                        // cancel_request() already reset the UI and bumped the
-                        // generation; nothing left to do.
+                        // Cancellation or tab closure already removed ownership.
                         return Ok(());
                     }
                     // Handle request error (network error, file read error, etc.)
@@ -1233,12 +1289,17 @@ impl RequestEditor {
                     };
 
                     this.update(cx, |this, cx| {
-                        if this.send_generation != generation {
-                            return; // superseded by a newer send/cancel
+                        let is_current = this
+                            .in_flight
+                            .get(&tab_id)
+                            .is_some_and(|state| state.request_id == request_id);
+                        if !is_current {
+                            return;
                         }
-                        this.loading = false;
-                        this.abort_handle = None;
+                        this.in_flight.remove(&tab_id);
                         cx.emit(RequestCompleted {
+                            tab_id,
+                            request_id,
                             request,
                             response: std::sync::Arc::new(error_response),
                         });
@@ -1273,12 +1334,17 @@ impl RequestEditor {
             };
 
             this.update(cx, |this, cx| {
-                if this.send_generation != generation {
-                    return; // superseded by a newer send/cancel
+                let is_current = this
+                    .in_flight
+                    .get(&tab_id)
+                    .is_some_and(|state| state.request_id == request_id);
+                if !is_current {
+                    return;
                 }
-                this.loading = false;
-                this.abort_handle = None;
+                this.in_flight.remove(&tab_id);
                 cx.emit(RequestCompleted {
+                    tab_id,
+                    request_id,
                     request,
                     response: std::sync::Arc::new(response_data),
                 });
@@ -1291,6 +1357,7 @@ impl RequestEditor {
     }
 }
 
+impl EventEmitter<RequestStarted> for RequestEditor {}
 impl EventEmitter<RequestCompleted> for RequestEditor {}
 impl EventEmitter<OpenCodeSnippet> for RequestEditor {}
 impl EventEmitter<RequestCancelled> for RequestEditor {}
@@ -1300,6 +1367,7 @@ impl Render for RequestEditor {
     #[cfg_attr(feature = "profile", profiling::function)]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let active_tab_is_loading = self.active_tab_is_loading();
 
         div().id("request-editor-root").flex().flex_col().w_full().h_full().on_click(cx.listener(|_, _, _, cx| cx.stop_propagation())).child(
             // Request section with header
@@ -1369,7 +1437,7 @@ impl Render for RequestEditor {
                         .child(
                             // Send button - prevent it from shrinking.
                             // While loading it becomes a Cancel button.
-                            div().flex_shrink_0().child(if self.loading {
+                            div().flex_shrink_0().child(if active_tab_is_loading {
                                 Button::new("cancel-btn")
                                     .danger()
                                     .label("Cancel")
