@@ -10,6 +10,11 @@ pub struct RequestTab {
     pub request: RequestData,
     /// Response data for this tab (shared, so tab switches never copy the body)
     pub response: Option<Arc<ResponseData>>,
+    /// The request currently owned by this tab. Completion/cancellation events
+    /// must match this id before they may mutate the tab.
+    pub active_request_id: Option<u64>,
+    /// Persisted response-panel state for a canceled request.
+    pub response_canceled: bool,
     // UI state (not persisted to database)
     pub params_state: Option<Vec<ParamState>>,
     pub headers_state: Option<Vec<HeaderState>>,
@@ -38,6 +43,8 @@ impl RequestTab {
                 auth: crate::types::AuthConfig::default(),
             },
             response: None,
+            active_request_id: None,
+            response_canceled: false,
             params_state: None,
             headers_state: None,
             history_id: None,
@@ -55,6 +62,8 @@ impl RequestTab {
             title: Self::generate_title(&item.request),
             request: item.request.clone(),
             response: item.response.clone(),
+            active_request_id: None,
+            response_canceled: false,
             params_state: None,
             headers_state: None,
             history_id: Some(item.id),
@@ -72,6 +81,8 @@ impl RequestTab {
             title: saved.name.clone(),
             request: saved.request.clone(),
             response: None,
+            active_request_id: None,
+            response_canceled: false,
             params_state: Some(saved.params_state.clone()),
             headers_state: Some(saved.headers_state.clone()),
             history_id: None,
@@ -118,6 +129,40 @@ impl RequestTab {
         } else {
             self.update_title();
         }
+    }
+
+    /// Record the immutable editor snapshot associated with a new send.
+    pub fn begin_request(&mut self, request_id: u64, request: RequestData) {
+        self.request = request;
+        self.active_request_id = Some(request_id);
+        self.response_canceled = false;
+        self.update_title_from_saved_name();
+    }
+
+    /// Apply a response only when it belongs to this tab's current request.
+    pub fn complete_request(
+        &mut self,
+        request_id: u64,
+        response: Arc<ResponseData>,
+    ) -> bool {
+        if self.active_request_id != Some(request_id) {
+            return false;
+        }
+        self.active_request_id = None;
+        self.response = Some(response);
+        self.response_canceled = false;
+        true
+    }
+
+    /// Apply cancellation only to the matching request in this tab.
+    pub fn cancel_request(&mut self, request_id: u64) -> bool {
+        if self.active_request_id != Some(request_id) {
+            return false;
+        }
+        self.active_request_id = None;
+        self.response = None;
+        self.response_canceled = true;
+        true
     }
 
     /// A pristine scratch tab — the default tab at startup, or an untouched
@@ -199,6 +244,16 @@ mod tests {
         assert!(!tab.is_blank());
     }
 
+    fn response(status: u16) -> Arc<ResponseData> {
+        Arc::new(ResponseData {
+            status: Some(status),
+            duration_ms: 1,
+            headers: vec![],
+            body: status.to_string().into_bytes(),
+            is_text: true,
+        })
+    }
+
     #[test]
     fn generated_tab_title_leaves_method_to_tab_bar() {
         let mut request = empty_request();
@@ -220,5 +275,82 @@ mod tests {
             ("Cache-Control".to_string(), "no-cache".to_string()),
         ];
         assert!(tab.is_blank());
+    }
+
+    #[test]
+    fn completion_after_switch_updates_only_its_originating_tab() {
+        let mut tabs = [RequestTab::new_empty(10), RequestTab::new_empty(20)];
+        tabs[0].begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
+
+        // The user switched to tab B before A completed. Routing uses tab id,
+        // never the active index.
+        let active_index = 1;
+        let origin = tabs.iter_mut().find(|tab| tab.id == 10).unwrap();
+        assert!(origin.complete_request(101, response(201)));
+
+        assert_eq!(tabs[0].response.as_ref().unwrap().status, Some(201));
+        assert!(tabs[active_index].response.is_none());
+    }
+
+    #[test]
+    fn send_keeps_an_immutable_request_snapshot() {
+        let mut editor_request = RequestData::new(HttpMethod::GET, "https://a.test".into());
+        let mut tab = RequestTab::new_empty(10);
+        tab.begin_request(101, editor_request.clone());
+
+        editor_request.url = "https://edited-later.test".into();
+
+        assert_eq!(tab.request.url, "https://a.test");
+    }
+
+    #[test]
+    fn concurrent_out_of_order_completions_stay_with_their_tabs() {
+        let mut a = RequestTab::new_empty(10);
+        let mut b = RequestTab::new_empty(20);
+        a.begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
+        b.begin_request(102, RequestData::new(HttpMethod::GET, "https://b.test".into()));
+
+        assert!(b.complete_request(102, response(202)));
+        assert!(a.complete_request(101, response(201)));
+        assert_eq!(a.response.unwrap().status, Some(201));
+        assert_eq!(b.response.unwrap().status, Some(202));
+    }
+
+    #[test]
+    fn cancel_affects_only_the_matching_tab_and_request() {
+        let mut a = RequestTab::new_empty(10);
+        let mut b = RequestTab::new_empty(20);
+        a.begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
+        b.begin_request(102, RequestData::new(HttpMethod::GET, "https://b.test".into()));
+
+        assert!(b.cancel_request(102));
+        assert!(b.response_canceled);
+        assert_eq!(a.active_request_id, Some(101));
+        assert!(!a.response_canceled);
+        assert!(!a.cancel_request(999));
+    }
+
+    #[test]
+    fn stale_same_tab_completion_cannot_overwrite_a_newer_request() {
+        let mut tab = RequestTab::new_empty(10);
+        tab.begin_request(101, RequestData::new(HttpMethod::GET, "https://old.test".into()));
+        tab.begin_request(102, RequestData::new(HttpMethod::GET, "https://new.test".into()));
+
+        assert!(!tab.complete_request(101, response(201)));
+        assert!(tab.response.is_none());
+        assert!(tab.complete_request(102, response(202)));
+        assert_eq!(tab.response.unwrap().status, Some(202));
+    }
+
+    #[test]
+    fn closing_a_running_tab_leaves_no_completion_destination() {
+        let mut tabs = vec![RequestTab::new_empty(10), RequestTab::new_empty(20)];
+        tabs[0].begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
+
+        tabs.remove(0);
+
+        assert!(tabs.iter_mut().find(|tab| tab.id == 10).is_none());
+        assert_eq!(tabs[0].id, 20);
+        assert!(tabs[0].response.is_none());
     }
 }

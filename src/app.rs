@@ -22,7 +22,7 @@ use crate::environment_manager::{
 };
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
 use crate::request_editor::{
-    OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor,
+    OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor, RequestStarted,
     ToggleRequestBookmarkRequested,
 };
 use crate::request_tab::RequestTab;
@@ -152,10 +152,35 @@ impl PoopmanApp {
         let next_tab_id = 1;
         let sidebar_view = SidebarView::Collections;
 
+        // Capture stable ownership and the immutable editor snapshot before the
+        // asynchronous request can complete.
+        let request_started_sub = cx.subscribe_in(
+            &request_editor,
+            window,
+            move |this, _, event: &RequestStarted, window, cx| {
+                let Some(tab_index) = this
+                    .request_tabs
+                    .iter()
+                    .position(|tab| tab.id == event.tab_id)
+                else {
+                    return;
+                };
+                this.request_tabs[tab_index]
+                    .begin_request(event.request_id, event.request.clone());
+                if tab_index == this.active_tab_index
+                    && this.response_viewer.read(cx).is_canceled()
+                {
+                    this.response_viewer.update(cx, |viewer, cx| {
+                        viewer.clear_response(window, cx);
+                    });
+                }
+                this.update_tab_bar(cx);
+            },
+        );
+
         // Subscribe to request completion events
         let db_clone = db.clone();
         let history_panel_clone = history_panel.clone();
-        let response_viewer_clone = response_viewer.clone();
         let request_sub = cx.subscribe_in(
             &request_editor,
             window,
@@ -163,22 +188,27 @@ impl PoopmanApp {
                 #[cfg(feature = "profile")]
                 profiling::scope!("handle request completed");
 
-                // Paint the response first. Persistence is intentionally not on
-                // this callback's critical path: Telegram-style UI work submits
-                // storage work and receives completion back on the main loop.
-                response_viewer_clone.update(cx, |viewer, cx| {
-                    viewer.set_response(event.response.clone(), window, cx);
-                });
-
-                // Keep the editor's unresolved request in the tab. The event
-                // request is the wire form (environment variables substituted),
-                // which must not overwrite a saved `{{variable}}` expression.
-                if let Some(tab) = this.request_tabs.get_mut(this.active_tab_index) {
-                    tab.request = this.request_editor.read(cx).get_current_request_data(cx);
-                    tab.response = Some(event.response.clone());
-                    tab.update_title_from_saved_name();
-                    this.update_tab_bar(cx);
+                let Some(tab_index) = this
+                    .request_tabs
+                    .iter()
+                    .position(|tab| tab.id == event.tab_id)
+                else {
+                    return;
+                };
+                if !this.request_tabs[tab_index]
+                    .complete_request(event.request_id, event.response.clone())
+                {
+                    return;
                 }
+
+                // The response is stored on its originating tab. Paint the
+                // shared viewer only if that tab is still active.
+                if tab_index == this.active_tab_index {
+                    this.response_viewer.update(cx, |viewer, cx| {
+                        viewer.set_response(event.response.clone(), window, cx);
+                    });
+                }
+                this.update_tab_bar(cx);
 
                 // Postman behavior: every send is logged to History, including a
                 // re-send of a request opened from history. Database::call is
@@ -306,14 +336,25 @@ impl PoopmanApp {
 
         // Show the canceled notice when the user aborts an in-flight request.
         // Canceled requests are never written to history (same as Postman).
-        let response_viewer_for_cancel = response_viewer.clone();
         let cancel_sub = cx.subscribe_in(
             &request_editor,
             window,
-            move |_this, _, _e: &RequestCancelled, window, cx| {
-                response_viewer_for_cancel.update(cx, |viewer, cx| {
-                    viewer.show_canceled(window, cx);
-                });
+            move |this, _, event: &RequestCancelled, window, cx| {
+                let Some(tab_index) = this
+                    .request_tabs
+                    .iter()
+                    .position(|tab| tab.id == event.tab_id)
+                else {
+                    return;
+                };
+                if !this.request_tabs[tab_index].cancel_request(event.request_id) {
+                    return;
+                }
+                if tab_index == this.active_tab_index {
+                    this.response_viewer.update(cx, |viewer, cx| {
+                        viewer.show_canceled(window, cx);
+                    });
+                }
             },
         );
 
@@ -356,6 +397,7 @@ impl PoopmanApp {
             code_panel,
             collections_reconcile_generation: 0,
             _subscriptions: vec![
+                request_started_sub,
                 request_sub,
                 history_sub,
                 collections_sub,
@@ -480,9 +522,11 @@ impl PoopmanApp {
             let params_state = self.request_editor.read(cx).get_params_state(cx);
             let headers_state = self.request_editor.read(cx).get_headers_state(cx);
             let response = self.response_viewer.read(cx).get_response();
+            let response_canceled = self.response_viewer.read(cx).is_canceled();
 
             tab.request = request_data;
             tab.response = response;
+            tab.response_canceled = response_canceled;
             tab.params_state = Some(params_state);
             tab.headers_state = Some(headers_state);
             tab.update_title_from_saved_name();
@@ -506,14 +550,7 @@ impl PoopmanApp {
         if let Some(tab) = self.request_tabs.get(index).cloned() {
             self.load_tab_into_editor(&tab, window, cx);
 
-            // Load response data
-            self.response_viewer.update(cx, |viewer, cx| {
-                if let Some(response) = &tab.response {
-                    viewer.set_response(response.clone(), window, cx);
-                } else {
-                    viewer.clear_response(window, cx);
-                }
-            });
+            self.load_tab_response(&tab, window, cx);
         }
 
         self.update_tab_bar(cx);
@@ -545,6 +582,15 @@ impl PoopmanApp {
 
     /// Close a tab
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(closing_tab_id) = self.request_tabs.get(index).map(|tab| tab.id) else {
+            return;
+        };
+        // Explicit policy: closing a tab aborts its in-flight request. The
+        // editor removes ownership first, so its eventual task result is ignored.
+        self.request_editor.update(cx, |editor, cx| {
+            editor.close_request_tab(closing_tab_id, cx);
+        });
+
         if self.request_tabs.len() <= 1 {
             // Don't close the last tab, just reset it to empty
             self.request_tabs[0] = RequestTab::new_empty(self.next_tab_id);
@@ -580,14 +626,7 @@ impl PoopmanApp {
             if let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() {
                 self.load_tab_into_editor(&tab, window, cx);
 
-                // Load response for the new active tab
-                self.response_viewer.update(cx, |viewer, cx| {
-                    if let Some(response) = &tab.response {
-                        viewer.set_response(response.clone(), window, cx);
-                    } else {
-                        viewer.clear_response(window, cx);
-                    }
-                });
+                self.load_tab_response(&tab, window, cx);
             }
         }
 
@@ -703,6 +742,7 @@ impl PoopmanApp {
         cx: &mut Context<Self>,
     ) {
         self.request_editor.update(cx, |editor, cx| {
+            editor.set_active_request_tab(tab.id, cx);
             editor.load_request(&tab.request, window, cx);
             editor.set_is_saved_request(tab.saved_request_id.is_some(), cx);
             if let Some(params_state) = &tab.params_state
@@ -714,6 +754,23 @@ impl PoopmanApp {
                 && !headers_state.is_empty()
             {
                 editor.load_headers_state(headers_state, window, cx);
+            }
+        });
+    }
+
+    fn load_tab_response(
+        &mut self,
+        tab: &RequestTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.response_viewer.update(cx, |viewer, cx| {
+            if tab.response_canceled {
+                viewer.show_canceled(window, cx);
+            } else if let Some(response) = &tab.response {
+                viewer.set_response(response.clone(), window, cx);
+            } else {
+                viewer.clear_response(window, cx);
             }
         });
     }
@@ -1084,6 +1141,7 @@ impl PoopmanApp {
     fn update_tab_bar(&mut self, cx: &mut Context<Self>) {
         self.tab_bar.update(cx, |tab_bar, cx| {
             tab_bar.update_tabs(self.request_tabs.clone(), self.active_tab_index, cx);
+            cx.notify();
         });
     }
 }

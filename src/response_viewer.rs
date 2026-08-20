@@ -359,6 +359,10 @@ impl ResponseViewer {
         self.response.clone()
     }
 
+    pub fn is_canceled(&self) -> bool {
+        self.canceled
+    }
+
     /// Clear response data
     pub fn clear_response(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.canceled = false;
