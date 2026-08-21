@@ -11,6 +11,7 @@ mod curl_import;
 mod db;
 mod environment_manager;
 mod format;
+mod formdata;
 mod header_completion;
 mod header_names;
 mod history_panel;

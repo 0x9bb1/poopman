@@ -519,12 +519,14 @@ impl PoopmanApp {
     fn save_current_tab_state(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.request_tabs.get_mut(self.active_tab_index) {
             let request_data = self.request_editor.read(cx).get_current_request_data(cx);
+            let body_draft = self.request_editor.read(cx).get_body_draft(cx);
             let params_state = self.request_editor.read(cx).get_params_state(cx);
             let headers_state = self.request_editor.read(cx).get_headers_state(cx);
             let response = self.response_viewer.read(cx).get_response();
             let response_canceled = self.response_viewer.read(cx).is_canceled();
 
             tab.request = request_data;
+            tab.body_draft = body_draft;
             tab.response = response;
             tab.response_canceled = response_canceled;
             tab.params_state = Some(params_state);
@@ -743,7 +745,12 @@ impl PoopmanApp {
     ) {
         self.request_editor.update(cx, |editor, cx| {
             editor.set_active_request_tab(tab.id, cx);
-            editor.load_request(&tab.request, window, cx);
+            editor.load_request_with_body_draft(
+                &tab.request,
+                Some(&tab.body_draft),
+                window,
+                cx,
+            );
             editor.set_is_saved_request(tab.saved_request_id.is_some(), cx);
             if let Some(params_state) = &tab.params_state
                 && !params_state.is_empty()

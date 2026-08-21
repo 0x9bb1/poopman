@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::types::{BodyType, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, ResponseData};
+use crate::types::{BodyDraft, BodyType, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, ResponseData};
 
 /// Represents a single request tab
 #[derive(Debug, Clone)]
@@ -8,6 +8,8 @@ pub struct RequestTab {
     pub id: usize,
     pub title: String,
     pub request: RequestData,
+    /// Complete body editor state, including drafts for inactive body types.
+    pub body_draft: BodyDraft,
     /// Response data for this tab (shared, so tab switches never copy the body)
     pub response: Option<Arc<ResponseData>>,
     /// The request currently owned by this tab. Completion/cancellation events
@@ -32,16 +34,18 @@ pub struct RequestTab {
 impl RequestTab {
     /// Create a new empty request tab
     pub fn new_empty(id: usize) -> Self {
+        let request = RequestData {
+            method: HttpMethod::GET,
+            url: String::new(),
+            headers: vec![],
+            body: BodyType::default(),
+            auth: crate::types::AuthConfig::default(),
+        };
         Self {
             id,
             title: "New Request".to_string(),
-            request: RequestData {
-                method: HttpMethod::GET,
-                url: String::new(),
-                headers: vec![],
-                body: BodyType::default(),
-                auth: crate::types::AuthConfig::default(),
-            },
+            body_draft: BodyDraft::from_body(&request.body),
+            request,
             response: None,
             active_request_id: None,
             response_canceled: false,
@@ -61,6 +65,7 @@ impl RequestTab {
             id,
             title: Self::generate_title(&item.request),
             request: item.request.clone(),
+            body_draft: BodyDraft::from_body(&item.request.body),
             response: item.response.clone(),
             active_request_id: None,
             response_canceled: false,
@@ -80,6 +85,7 @@ impl RequestTab {
             id,
             title: saved.name.clone(),
             request: saved.request.clone(),
+            body_draft: BodyDraft::from_body(&saved.request.body),
             response: None,
             active_request_id: None,
             response_canceled: false,
@@ -190,7 +196,7 @@ impl RequestTab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BodyType, RawSubtype, ResponseData};
+    use crate::types::{BodyKind, BodyType, RawSubtype, ResponseData};
 
     fn empty_request() -> RequestData {
         RequestData {
@@ -352,5 +358,22 @@ mod tests {
         assert!(tabs.iter_mut().find(|tab| tab.id == 10).is_none());
         assert_eq!(tabs[0].id, 20);
         assert!(tabs[0].response.is_none());
+    }
+
+    #[test]
+    fn inactive_body_drafts_are_isolated_per_tab() {
+        let mut a = RequestTab::new_empty(10);
+        let mut b = RequestTab::new_empty(20);
+        a.body_draft.kind = BodyKind::None;
+        a.body_draft.raw_content = "draft-a".into();
+        b.body_draft.kind = BodyKind::FormData;
+        b.body_draft.raw_content = "draft-b".into();
+
+        let loaded_b = b.body_draft.clone();
+        let loaded_a = a.body_draft.clone();
+
+        assert_eq!(loaded_b.raw_content, "draft-b");
+        assert_eq!(loaded_a.raw_content, "draft-a");
+        assert_eq!(loaded_a.kind, BodyKind::None);
     }
 }
