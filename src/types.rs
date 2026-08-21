@@ -193,6 +193,17 @@ pub struct FormDataRow {
     pub value: FormDataValue,
 }
 
+impl FormDataRow {
+    /// Editor-only empty rows are affordances, not request data.
+    pub fn is_blank(&self) -> bool {
+        self.key.is_empty()
+            && match &self.value {
+                FormDataValue::Text(value) => value.is_empty(),
+                FormDataValue::File { path } => path.is_empty(),
+            }
+    }
+}
+
 /// Request body type
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BodyType {
@@ -209,6 +220,68 @@ impl Default for BodyType {
         BodyType::Raw {
             content: String::new(),
             subtype: RawSubtype::Json,
+        }
+    }
+}
+
+/// Selected body panel in the editor. Unlike [`BodyType`], this does not own
+/// the panel contents, which lets inactive Raw and Form-data drafts survive a
+/// tab switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyKind {
+    None,
+    Raw,
+    FormData,
+}
+
+/// Complete, per-tab body editor state. Only `selected_body` is persisted or
+/// sent; the other fields are private drafts for inactive body panels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyDraft {
+    pub kind: BodyKind,
+    pub raw_content: String,
+    pub raw_subtype: RawSubtype,
+    pub formdata_rows: Vec<FormDataRow>,
+}
+
+impl BodyDraft {
+    pub fn from_body(body: &BodyType) -> Self {
+        match body {
+            BodyType::None => Self {
+                kind: BodyKind::None,
+                raw_content: String::new(),
+                raw_subtype: RawSubtype::Json,
+                formdata_rows: Vec::new(),
+            },
+            BodyType::Raw { content, subtype } => Self {
+                kind: BodyKind::Raw,
+                raw_content: content.clone(),
+                raw_subtype: *subtype,
+                formdata_rows: Vec::new(),
+            },
+            BodyType::FormData(rows) => Self {
+                kind: BodyKind::FormData,
+                raw_content: String::new(),
+                raw_subtype: RawSubtype::Json,
+                formdata_rows: rows.iter().filter(|row| !row.is_blank()).cloned().collect(),
+            },
+        }
+    }
+
+    pub fn selected_body(&self) -> BodyType {
+        match self.kind {
+            BodyKind::None => BodyType::None,
+            BodyKind::Raw => BodyType::Raw {
+                content: self.raw_content.clone(),
+                subtype: self.raw_subtype,
+            },
+            BodyKind::FormData => BodyType::FormData(
+                self.formdata_rows
+                    .iter()
+                    .filter(|row| !row.is_blank())
+                    .cloned()
+                    .collect(),
+            ),
         }
     }
 }
@@ -704,5 +777,25 @@ mod tests {
         };
         let out = effective_wire_headers(&manual, &auth);
         assert_eq!(out, vec![("X-API-Key".to_string(), "new".to_string())]);
+    }
+
+    #[test]
+    fn body_draft_never_exposes_formdata_placeholders() {
+        let real = FormDataRow {
+            enabled: true,
+            key: "name".into(),
+            value: FormDataValue::Text("alice".into()),
+        };
+        let blank = FormDataRow {
+            enabled: true,
+            key: String::new(),
+            value: FormDataValue::Text(String::new()),
+        };
+        let body = BodyType::FormData(vec![real.clone(), blank.clone(), blank]);
+
+        let first = BodyDraft::from_body(&body);
+        assert_eq!(first.formdata_rows, vec![real.clone()]);
+        assert_eq!(first.selected_body(), BodyType::FormData(vec![real]));
+        assert_eq!(BodyDraft::from_body(&first.selected_body()), first);
     }
 }

@@ -7,7 +7,7 @@ use gpui_component::{
     select::*, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
 };
 
-use crate::types::{BodyType, FormDataRow, FormDataValue, RawSubtype};
+use crate::types::{BodyDraft, BodyKind, BodyType, FormDataRow, FormDataValue, RawSubtype};
 
 use gpui::Subscription;
 
@@ -38,6 +38,10 @@ pub struct BodyEditor {
     current_raw_subtype: RawSubtype,      // Track current subtype
     formdata_rows: Vec<FormDataRow>,
     formdata_input_states: Vec<FormDataRowInputs>,
+    /// Stable identities kept parallel with the row model and input entities.
+    /// Event subscriptions capture these IDs, never mutable vector indices.
+    formdata_row_ids: Vec<u64>,
+    next_formdata_row_id: u64,
     formdata_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
     // Subscriptions owned by the current form-data rows. The raw subtype
@@ -51,24 +55,26 @@ pub struct BodyEditor {
 impl BodyEditor {
     fn handle_input_event(
         &mut self,
-        state_entity: Entity<InputState>,
+        row_id: u64,
+        is_key: bool,
         event: &InputChangeEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if let InputChangeEvent::Change = event
-            && let Some((index, (key_input, _value_input, _type_select))) = self
-                .formdata_input_states
-                .iter()
-                .enumerate()
-                .find(|(_, (k, v, _))| k.entity_id() == state_entity.entity_id() || v.entity_id() == state_entity.entity_id())
+            && let Some(index) = self.formdata_row_index(row_id)
         {
-            let is_key = key_input.entity_id() == state_entity.entity_id();
-            let value = state_entity.read(cx).value().to_string();
+            let (key_input, value_input, _) = &self.formdata_input_states[index];
+            let value = if is_key { key_input } else { value_input }
+                .read(cx)
+                .value()
+                .to_string();
             if is_key {
                 self.update_formdata_key(index, value, cx);
             } else {
                 self.update_formdata_value(index, value, cx);
             }
+            self.normalize_trailing_formdata_row(window, cx);
         }
     }
 }
@@ -106,6 +112,8 @@ impl BodyEditor {
             current_raw_subtype,
             formdata_rows: vec![],
             formdata_input_states: vec![],
+            formdata_row_ids: vec![],
+            next_formdata_row_id: 1,
             formdata_scroll_handle: ScrollHandle::new(),
             _subscriptions: vec![],
             _formdata_subscriptions: vec![],
@@ -160,153 +168,93 @@ impl BodyEditor {
 
     /// Get current body type from UI state
     pub fn get_body(&self, cx: &App) -> BodyType {
-        match self.body_type_index {
-            0 => BodyType::None,
-            1 => {
-                // Raw - read from single editor
-                let content = self.raw_body_editor.read(cx).value().to_string();
-                BodyType::Raw {
-                    content,
-                    subtype: self.current_raw_subtype
-                }
-            }
-            2 => {
-                // Form-data: read current input values. Zip rows with their input
-                // states so a length mismatch can never panic (it just stops early).
-                let updated_formdata_rows = self
-                    .formdata_rows
-                    .iter()
-                    .zip(self.formdata_input_states.iter())
-                    .map(|(row, (key_input, value_input, _type_select))| {
-                        let mut updated_row = row.clone();
-                        updated_row.key = key_input.read(cx).value().to_string();
-                        let value = value_input.read(cx).value().to_string();
-                        updated_row.value = match &row.value {
-                            FormDataValue::Text(_) => FormDataValue::Text(value),
-                            FormDataValue::File { .. } => FormDataValue::File { path: value },
-                        };
-                        updated_row
-                    })
-                    .collect();
-                BodyType::FormData(updated_formdata_rows)
-            }
-            _ => BodyType::None,
+        self.get_draft(cx).selected_body()
+    }
+
+    /// Snapshot both the active body and the inactive panel drafts for the
+    /// request tab that currently owns this shared editor.
+    pub fn get_draft(&self, cx: &App) -> BodyDraft {
+        let formdata_rows = self
+            .formdata_rows
+            .iter()
+            .zip(self.formdata_input_states.iter())
+            .map(|(row, (key_input, value_input, _type_select))| {
+                let mut updated_row = row.clone();
+                updated_row.key = key_input.read(cx).value().to_string();
+                let value = value_input.read(cx).value().to_string();
+                updated_row.value = match &row.value {
+                    FormDataValue::Text(_) => FormDataValue::Text(value),
+                    FormDataValue::File { .. } => FormDataValue::File { path: value },
+                };
+                updated_row
+            })
+            // Never let the editor's auto-add placeholder cross a persistence,
+            // export, tab, or send boundary.
+            .filter(|row| !row.is_blank())
+            .collect();
+
+        BodyDraft {
+            kind: match self.body_type_index {
+                0 => BodyKind::None,
+                1 => BodyKind::Raw,
+                2 => BodyKind::FormData,
+                _ => BodyKind::None,
+            },
+            raw_content: self.raw_body_editor.read(cx).value().to_string(),
+            raw_subtype: self.current_raw_subtype,
+            formdata_rows,
         }
     }
 
     /// Set body from loaded request
     pub fn set_body(&mut self, body: &BodyType, window: &mut Window, cx: &mut Context<Self>) {
-        match body {
-            BodyType::None => {
-                self.body_type_index = 0;
-            }
-            BodyType::Raw { content, subtype } => {
-                self.body_type_index = 1;
-                let subtype_index = RawSubtype::all().iter().position(|s| s == subtype).unwrap_or(0);
-                self.raw_subtype_select.update(cx, |select, cx| {
-                    select.set_selected_index(Some(IndexPath::default().row(subtype_index)), window, cx);
-                });
-                // Update current subtype and syntax highlighting
-                self.current_raw_subtype = *subtype;
-                self.raw_body_editor.update(cx, |input, cx| {
-                    input.set_value(content, window, cx);
-                    input.set_highlighter(subtype.as_str(), cx);
-                    // Also update placeholder when loading
-                    input.set_placeholder(get_placeholder_for_subtype(*subtype), window, cx);
-                });
-            }
-            BodyType::FormData(rows) => {
-                self.body_type_index = 2;
-                self.formdata_rows = rows.clone();
-                // Clear existing input states and subscriptions. Keep the raw
-                // subtype subscription alive; otherwise loading a saved
-                // form-data request makes the raw selector stop emitting.
-                self.formdata_input_states.clear();
-                self._formdata_subscriptions.clear();
+        self.set_draft(&BodyDraft::from_body(body), window, cx);
+    }
 
-                // Create new input states for each row
-                for (row_index, row) in rows.iter().enumerate() {
-                    let key_value = row.key.clone();
-                    let value_str = match &row.value {
-                        FormDataValue::Text(t) => t.clone(),
-                        FormDataValue::File { path } => path.clone(),
-                    };
-                    let is_file = matches!(row.value, FormDataValue::File { .. });
+    /// Restore a tab's complete body draft and rebuild all row subscriptions.
+    pub fn set_draft(&mut self, draft: &BodyDraft, window: &mut Window, cx: &mut Context<Self>) {
+        self.body_type_index = match draft.kind {
+            BodyKind::None => 0,
+            BodyKind::Raw => 1,
+            BodyKind::FormData => 2,
+        };
 
-                    let key_input = cx.new(|cx| {
-                        let mut input = InputState::new(window, cx);
-                        input.set_value(&key_value, window, cx);
-                        input.set_placeholder("Key", window, cx);
-                        input
-                    });
-                    let value_input = cx.new(|cx| {
-                        let mut input = InputState::new(window, cx);
-                        input.set_value(&value_str, window, cx);
-                        input.set_placeholder(if is_file { "File Path" } else { "Value" }, window, cx);
-                        input
-                    });
+        self.current_raw_subtype = draft.raw_subtype;
+        let subtype_index = RawSubtype::all()
+            .iter()
+            .position(|subtype| *subtype == draft.raw_subtype)
+            .unwrap_or(0);
+        self.raw_subtype_select.update(cx, |select, cx| {
+            select.set_selected_index(
+                Some(IndexPath::default().row(subtype_index)),
+                window,
+                cx,
+            );
+        });
+        self.raw_body_editor.update(cx, |input, cx| {
+            input.set_value(&draft.raw_content, window, cx);
+            input.set_highlighter(draft.raw_subtype.as_str(), cx);
+            input.set_placeholder(
+                get_placeholder_for_subtype(draft.raw_subtype),
+                window,
+                cx,
+            );
+        });
 
-                    // Add type selector
-                    let type_select = cx.new(|cx| {
-                        SelectState::new(
-                            vec!["Text", "File"],
-                            Some(IndexPath::default().row(if is_file { 1 } else { 0 })),
-                            window,
-                            cx,
-                        )
-                    });
-
-                    self._formdata_subscriptions.push(
-                        cx.subscribe(&key_input, Self::handle_input_event)
-                    );
-                    self._formdata_subscriptions.push(
-                        cx.subscribe(&value_input, Self::handle_input_event)
-                    );
-
-                    // Subscribe to type selector changes (subscribe_in for `window`,
-                    // so the value field's placeholder updates on Text <-> File).
-                    let value_input_for_type = value_input.clone();
-                    self._formdata_subscriptions.push(
-                        cx.subscribe_in(&type_select, window, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
-                            if let SelectEvent::Confirm(Some(selected_value)) = event {
-                                let should_be_file = *selected_value == "File";
-                                let current_is_file = matches!(
-                                    this.formdata_rows.get(row_index).map(|r| &r.value),
-                                    Some(FormDataValue::File { .. })
-                                );
-                                if should_be_file != current_is_file {
-                                    if let Some(row) = this.formdata_rows.get_mut(row_index) {
-                                        row.value = match &row.value {
-                                            FormDataValue::Text(text) => FormDataValue::File { path: text.clone() },
-                                            FormDataValue::File { path } => FormDataValue::Text(path.clone()),
-                                        };
-                                    }
-                                    value_input_for_type.update(cx, |input, cx| {
-                                        input.set_placeholder(
-                                            if should_be_file { "File Path" } else { "Value" },
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                    cx.notify();
-                                }
-                            }
-                        })
-                    );
-
-                    self.formdata_input_states.push((key_input, value_input, type_select));
-                }
-
-                // Add one empty row at the end for auto-add functionality
-                self.add_formdata_row(window, cx);
-            }
+        self.formdata_rows.clear();
+        self.formdata_input_states.clear();
+        self.formdata_row_ids.clear();
+        self._formdata_subscriptions.clear();
+        for row in draft.formdata_rows.iter().filter(|row| !row.is_blank()) {
+            self.add_formdata_row_with_value(row.clone(), window, cx);
         }
+        self.normalize_trailing_formdata_row(window, cx);
 
         // Emit event after all state updates are complete
-        let content_type = match body {
-            BodyType::None => None,
-            BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
-            BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
+        let content_type = match draft.kind {
+            BodyKind::None => None,
+            BodyKind::Raw => Some(draft.raw_subtype.content_type().to_string()),
+            BodyKind::FormData => Some("multipart/form-data; boundary=<auto>".to_string()),
         };
 
         cx.emit(BodyTypeChanged { content_type });
@@ -327,137 +275,146 @@ impl BodyEditor {
 
     // Form-data table methods
     fn add_formdata_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let row_index = self.formdata_rows.len();
-
-        self.formdata_rows.push(FormDataRow {
+        self.add_formdata_row_with_value(FormDataRow {
             enabled: true,
             key: String::new(),
             value: FormDataValue::Text(String::new()),
-        });
-        // Add new InputStates for key and value
+        }, window, cx);
+    }
+
+    fn add_formdata_row_with_value(
+        &mut self,
+        row: FormDataRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let row_id = self.next_formdata_row_id;
+        self.next_formdata_row_id = self.next_formdata_row_id.wrapping_add(1);
+        let key_value = row.key.clone();
+        let value_string = match &row.value {
+            FormDataValue::Text(value) => value.clone(),
+            FormDataValue::File { path } => path.clone(),
+        };
+        let is_file = matches!(row.value, FormDataValue::File { .. });
+
         let key_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Key")
+            let mut input = InputState::new(window, cx);
+            input.set_value(&key_value, window, cx);
+            input.set_placeholder("Key", window, cx);
+            input
         });
         let value_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Value")
+            let mut input = InputState::new(window, cx);
+            input.set_value(&value_string, window, cx);
+            input.set_placeholder(if is_file { "File Path" } else { "Value" }, window, cx);
+            input
         });
-
-        // Add type selector (Text/File)
         let type_select = cx.new(|cx| {
             SelectState::new(
                 vec!["Text", "File"],
-                Some(IndexPath::default()), // Default to Text
+                Some(IndexPath::default().row(if is_file { 1 } else { 0 })),
                 window,
                 cx,
             )
         });
 
-        // Clone for closure capture (auto-add logic)
-        let key_input_for_auto_add = key_input.clone();
+        self.formdata_rows.push(row);
+        self.formdata_row_ids.push(row_id);
+        self.formdata_input_states
+            .push((key_input.clone(), value_input.clone(), type_select.clone()));
 
-        // Subscribe to key input with auto-add logic (like headers)
-        let auto_add_sub = cx.subscribe_in(&key_input, window, move |this, _, _event: &InputChangeEvent, window, cx| {
-            // Check if this is the last row and it has content
-            if let Some((last_key, _, _)) = this.formdata_input_states.last() {
-                let has_key = !last_key.read(cx).value().is_empty();
-                // Verify this is the last row by comparing entity IDs
-                if has_key &&
-                   this.formdata_input_states.last().map(|(k, _, _)| Entity::entity_id(k)) ==
-                   Some(Entity::entity_id(&key_input_for_auto_add))
-                {
-                    // Auto-add a new empty row
-                    this.add_formdata_row(window, cx);
+        self._formdata_subscriptions.push(cx.subscribe_in(
+            &key_input,
+            window,
+            move |this, _, event: &InputChangeEvent, window, cx| {
+                this.handle_input_event(row_id, true, event, window, cx);
+            },
+        ));
+        self._formdata_subscriptions.push(cx.subscribe_in(
+            &value_input,
+            window,
+            move |this, _, event: &InputChangeEvent, window, cx| {
+                this.handle_input_event(row_id, false, event, window, cx);
+            },
+        ));
 
-                    // Scroll to bottom after adding new row
-                    let scroll_handle = this.formdata_scroll_handle.clone();
-                    cx.spawn_in(window, async move |_this, cx| {
-                        // Wait for layout to stabilize by checking max_offset changes
-                        let mut last_offset = px(0.);
-                        let mut stable_count = 0;
-
-                        for _ in 0..20 {  // Max 20 attempts (~20ms)
-                            cx.background_executor().timer(std::time::Duration::from_millis(1)).await;
-
-                            let current = scroll_handle.max_offset().height;
-                            if (current - last_offset).abs() < px(0.1) {
-                                stable_count += 1;
-                                if stable_count >= 2 {
-                                    // Offset stable for 2 checks, layout likely complete
-                                    break;
-                                }
-                            } else {
-                                stable_count = 0;
-                            }
-                            last_offset = current;
-                        }
-
-                        // Scroll to bottom
-                        let _ = cx.update(|_, _cx| {
-                            let max_offset = scroll_handle.max_offset();
-                            scroll_handle.set_offset(point(px(0.), -max_offset.height));
-                        });
-                    }).detach();
-
-                    cx.notify();
-                }
-            }
-        });
-        self._formdata_subscriptions.push(auto_add_sub);
-
-        // Subscribe to inputs for data model updates
-        self._formdata_subscriptions
-            .push(cx.subscribe(&key_input, Self::handle_input_event));
-        self._formdata_subscriptions
-            .push(cx.subscribe(&value_input, Self::handle_input_event));
-
-        // Subscribe to type selector changes (subscribe_in so we have `window` to
-        // refresh the value field's placeholder when toggling Text <-> File).
         let value_input_for_type = value_input.clone();
-        self._formdata_subscriptions.push(
-            cx.subscribe_in(&type_select, window, move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
+        self._formdata_subscriptions.push(cx.subscribe_in(
+            &type_select,
+            window,
+            move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
                 if let SelectEvent::Confirm(Some(selected_value)) = event {
                     let should_be_file = *selected_value == "File";
-                    let current_is_file = matches!(
-                        this.formdata_rows.get(row_index).map(|r| &r.value),
-                        Some(FormDataValue::File { .. })
-                    );
-                    if should_be_file != current_is_file {
-                        // Update the data model directly
-                        if let Some(row) = this.formdata_rows.get_mut(row_index) {
+                    if let Some(index) = this.formdata_row_index(row_id) {
+                        let current_is_file = matches!(
+                            this.formdata_rows.get(index).map(|row| &row.value),
+                            Some(FormDataValue::File { .. })
+                        );
+                        if should_be_file != current_is_file
+                            && let Some(row) = this.formdata_rows.get_mut(index)
+                        {
                             row.value = match &row.value {
                                 FormDataValue::Text(text) => FormDataValue::File { path: text.clone() },
                                 FormDataValue::File { path } => FormDataValue::Text(path.clone()),
                             };
+                            value_input_for_type.update(cx, |input, cx| {
+                                input.set_placeholder(
+                                    if should_be_file { "File Path" } else { "Value" },
+                                    window,
+                                    cx,
+                                );
+                            });
+                            cx.notify();
                         }
-                        value_input_for_type.update(cx, |input, cx| {
-                            input.set_placeholder(
-                                if should_be_file { "File Path" } else { "Value" },
-                                window,
-                                cx,
-                            );
-                        });
-                        cx.notify();
                     }
                 }
-            })
-        );
-
-        self.formdata_input_states
-            .push((key_input, value_input, type_select));
+            },
+        ));
 
         cx.notify();
     }
 
-    fn remove_formdata_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.formdata_rows.len() {
+    fn formdata_row_index(&self, row_id: u64) -> Option<usize> {
+        crate::formdata::row_index(&self.formdata_row_ids, row_id)
+    }
+
+    /// Keep one (and only one) empty row after the last row containing data.
+    fn normalize_trailing_formdata_row(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let desired_len = crate::formdata::desired_editor_len(&self.formdata_rows);
+
+        if self.formdata_rows.len() > desired_len {
+            self.formdata_rows.truncate(desired_len);
+            self.formdata_input_states.truncate(desired_len);
+            self.formdata_row_ids.truncate(desired_len);
+        }
+        while self.formdata_rows.len() < desired_len {
+            self.add_formdata_row(window, cx);
+        }
+    }
+
+    fn remove_formdata_row(
+        &mut self,
+        row_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = self.formdata_row_index(row_id) {
             self.formdata_rows.remove(index);
-            self.formdata_input_states.remove(index); // Remove corresponding input states
+            self.formdata_input_states.remove(index);
+            self.formdata_row_ids.remove(index);
+            self.normalize_trailing_formdata_row(window, cx);
             cx.notify();
         }
     }
 
-    fn toggle_formdata_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(row) = self.formdata_rows.get_mut(index) {
+    fn toggle_formdata_row(&mut self, row_id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self.formdata_row_index(row_id)
+            && let Some(row) = self.formdata_rows.get_mut(index)
+        {
             row.enabled = !row.enabled;
             cx.notify();
         }
@@ -512,7 +469,7 @@ impl BodyEditor {
     }
 
 
-    fn select_file_for_row(&mut self, index: usize, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_file_for_row(&mut self, row_id: u64, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let path = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -520,7 +477,9 @@ impl BodyEditor {
             prompt: Some("Select a file".into()),
         });
 
-        if let Some((_key_input, value_input, _type_select)) = self.formdata_input_states.get(index).cloned() {
+        if let Some(index) = self.formdata_row_index(row_id)
+            && let Some((_key_input, value_input, _type_select)) = self.formdata_input_states.get(index).cloned()
+        {
             cx.spawn_in(window, async move |_, window| {
                 if let Ok(Ok(Some(paths))) = path.await
                     && let Some(selected_path) = paths.first()
@@ -675,7 +634,8 @@ impl Render for BodyEditor {
                                 .size_full()
                                 .track_scroll(&self.formdata_scroll_handle)
                                 .overflow_scroll()
-                                .children(self.formdata_rows.iter().enumerate().zip(self.formdata_input_states.iter()).map(|((index, row), (key_input_entity, value_input_entity, type_select_entity))| {
+                                .children(self.formdata_rows.iter().zip(self.formdata_input_states.iter()).zip(self.formdata_row_ids.iter()).map(|((row, (key_input_entity, value_input_entity, type_select_entity)), row_id)| {
+                                    let row_id = *row_id;
                                     let is_file = matches!(row.value, FormDataValue::File { .. });
 
                                     h_flex()
@@ -685,10 +645,10 @@ impl Render for BodyEditor {
                                         .child(
                                             // Checkbox - Enable/Disable row
                                             div().flex_shrink_0().child(
-                                                Checkbox::new(("formdata-check", index))
+                                                Checkbox::new(("formdata-check", row_id))
                                                     .checked(row.enabled)
                                                     .on_click(cx.listener(move |this, _checked, _window, cx| {
-                                                        this.toggle_formdata_row(index, cx);
+                                                        this.toggle_formdata_row(row_id, cx);
                                                     }))
                                             )
                                         )
@@ -715,11 +675,11 @@ impl Render for BodyEditor {
                                                                 .when(is_file, |this| {
                                                                     // Choose File button when in file mode
                                                                     this.child(
-                                                                        Button::new(("choose-file", index))
+                                                                        Button::new(("choose-file", row_id))
                                                                             .xsmall()
                                                                             .label("Choose Files")
                                                                             .on_click(cx.listener(move |this, event, window, cx| {
-                                                                                this.select_file_for_row(index, event, window, cx);
+                                                                                this.select_file_for_row(row_id, event, window, cx);
                                                                             }))
                                                                     )
                                                                 })
@@ -729,12 +689,12 @@ impl Render for BodyEditor {
                                                                 )
                                                                 .child(
                                                                     // Delete button
-                                                                    Button::new(("delete-formdata", index))
+                                                                    Button::new(("delete-formdata", row_id))
                                                                         .ghost()
                                                                         .xsmall()
                                                                         .label("×")
-                                                                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                                                                            this.remove_formdata_row(index, cx);
+                                                                        .on_click(cx.listener(move |this, _event, window, cx| {
+                                                                            this.remove_formdata_row(row_id, window, cx);
                                                                         }))
                                                                 )
                                                         )

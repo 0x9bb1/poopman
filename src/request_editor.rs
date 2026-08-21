@@ -269,6 +269,17 @@ impl RequestEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.load_request_with_body_draft(request, None, window, cx);
+    }
+
+    /// Load a request while restoring the owning tab's inactive body drafts.
+    pub fn load_request_with_body_draft(
+        &mut self,
+        request: &RequestData,
+        body_draft: Option<&crate::types::BodyDraft>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Set URL
         self.url_input.update(cx, |input, cx| {
             input.set_value(&request.url, window, cx);
@@ -285,7 +296,11 @@ impl RequestEditor {
 
         // Set body via BodyEditor
         self.body_editor.update(cx, |editor, cx| {
-            editor.set_body(&request.body, window, cx);
+            if let Some(draft) = body_draft {
+                editor.set_draft(draft, window, cx);
+            } else {
+                editor.set_body(&request.body, window, cx);
+            }
         });
 
         // Set auth via AuthEditor
@@ -354,12 +369,13 @@ impl RequestEditor {
         self.rebuild_params_from_url(window, cx);
 
         // Force sync Content-Type with body type to auto-correct any inconsistencies in history
-        let content_type = match &request.body {
+        let loaded_body = body_draft
+            .map(crate::types::BodyDraft::selected_body)
+            .unwrap_or_else(|| request.body.clone());
+        let content_type = match loaded_body {
             crate::types::BodyType::None => None,
             crate::types::BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
-            crate::types::BodyType::FormData(_) => {
-                Some("multipart/form-data; boundary=<auto>".to_string())
-            }
+            crate::types::BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
         };
         self.update_content_type_from_body(&content_type, window, cx);
 
@@ -412,6 +428,10 @@ impl RequestEditor {
             body,
             auth: self.auth_editor.read(cx).get_auth(cx),
         }
+    }
+
+    pub fn get_body_draft(&self, cx: &App) -> crate::types::BodyDraft {
+        self.body_editor.read(cx).get_draft(cx)
     }
 
     /// Current request with `{{vars}}` resolved against the active environment,
