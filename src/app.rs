@@ -215,7 +215,7 @@ impl PoopmanApp {
                 // synchronous by design, so run it only on GPUI's background
                 // executor and refresh the panel after the write has completed.
                 let db = db_clone.clone();
-                let request = event.request.clone();
+                let request = event.history_request.clone();
                 let history_panel = history_panel_clone.clone();
                 let persist = cx.background_spawn(async move { Self::persist_send(&db, &request) });
                 cx.spawn_in(window, async move |_this, cx| {

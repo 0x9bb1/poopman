@@ -550,7 +550,9 @@ impl Database {
         let request_headers = request_headers.to_string();
         // Serialize body type + auth to JSON before crossing the channel.
         let body_json = serde_json::to_string(request_body).unwrap_or_default();
-        let auth_json = serde_json::to_string(auth).unwrap_or_default();
+        // Defense in depth: callers should pass a history snapshot, but the DB
+        // boundary also refuses to serialize drafts from inactive auth modes.
+        let auth_json = serde_json::to_string(&auth.active_only()).unwrap_or_default();
 
         self.call(move |conn| {
             let timestamp = chrono::Utc::now().to_rfc3339();
@@ -1278,6 +1280,36 @@ mod tests {
         let items = db.load_recent_history(10).unwrap();
         assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);
         assert_eq!(items[0].request.auth.bearer_token, "abc");
+    }
+
+    #[test]
+    fn history_storage_drops_inactive_auth_fields() {
+        let db = mem_db();
+        let auth = AuthConfig {
+            auth_type: AuthType::None,
+            bearer_token: "must-not-persist".into(),
+            basic_username: "must-not-persist".into(),
+            basic_password: "must-not-persist".into(),
+            api_key_name: "must-not-persist".into(),
+            api_key_value: "must-not-persist".into(),
+        };
+
+        db.insert_history(
+            "GET",
+            "{{base_url}}/private",
+            r#"[["Authorization","Bearer {{token}}"]]"#,
+            &BodyType::None,
+            &auth,
+        )
+        .unwrap();
+
+        let item = db.load_recent_history(1).unwrap().remove(0);
+        assert_eq!(item.request.url, "{{base_url}}/private");
+        assert_eq!(
+            item.request.headers,
+            vec![("Authorization".into(), "Bearer {{token}}".into())]
+        );
+        assert_eq!(item.request.auth, AuthConfig::default());
     }
 
     #[test]
