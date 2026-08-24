@@ -315,6 +315,35 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+    /// Return the portion of this configuration that belongs to the selected
+    /// auth mode.
+    ///
+    /// The editor deliberately keeps every mode's inputs alive so users can
+    /// switch between drafts. Those inactive drafts must not cross persistence
+    /// or wire boundaries, where they would become unrelated credentials.
+    pub fn active_only(&self) -> Self {
+        match self.auth_type {
+            AuthType::None => Self::default(),
+            AuthType::Bearer => Self {
+                auth_type: AuthType::Bearer,
+                bearer_token: self.bearer_token.clone(),
+                ..Self::default()
+            },
+            AuthType::Basic => Self {
+                auth_type: AuthType::Basic,
+                basic_username: self.basic_username.clone(),
+                basic_password: self.basic_password.clone(),
+                ..Self::default()
+            },
+            AuthType::ApiKey => Self {
+                auth_type: AuthType::ApiKey,
+                api_key_name: self.api_key_name.clone(),
+                api_key_value: self.api_key_value.clone(),
+                ..Self::default()
+            },
+        }
+    }
+
     /// The header this auth would put on the wire, or `None`.
     ///
     /// Emitted only when the relevant field(s) are non-empty, so an in-progress
@@ -343,7 +372,7 @@ impl AuthConfig {
                 }
             }
             AuthType::ApiKey => {
-                if self.api_key_name.is_empty() {
+                if self.api_key_name.is_empty() || self.api_key_value.is_empty() {
                     None
                 } else {
                     Some((self.api_key_name.clone(), self.api_key_value.clone()))
@@ -355,25 +384,32 @@ impl AuthConfig {
 
 /// Manual headers with the computed auth header merged in.
 ///
-/// Any manual header whose name case-insensitively matches the auth header's
-/// name is removed first (auth wins), then the auth header is appended. When the
-/// auth produces no header, the manual headers are returned unchanged.
+/// Selecting an auth mode claims its header even while its fields are empty:
+/// a stale manual credential must not become a fallback. If the selected auth
+/// is complete, its computed header is appended after the conflict is removed.
 pub fn effective_wire_headers(
     headers: &[(String, String)],
     auth: &AuthConfig,
 ) -> Vec<(String, String)> {
-    match auth.compute_header() {
-        None => headers.to_vec(),
-        Some((name, value)) => {
-            let mut out: Vec<(String, String)> = headers
-                .iter()
-                .filter(|(k, _)| !k.eq_ignore_ascii_case(&name))
-                .cloned()
-                .collect();
-            out.push((name, value));
-            out
-        }
+    let claimed_header = match auth.auth_type {
+        AuthType::None => None,
+        AuthType::Bearer | AuthType::Basic => Some("Authorization"),
+        AuthType::ApiKey if !auth.api_key_name.is_empty() => Some(auth.api_key_name.as_str()),
+        AuthType::ApiKey => None,
+    };
+
+    let mut out: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| {
+            claimed_header.is_none_or(|claimed| !name.eq_ignore_ascii_case(claimed))
+        })
+        .cloned()
+        .collect();
+
+    if let Some((name, value)) = auth.compute_header() {
+        out.push((name, value));
     }
+    out
 }
 
 /// Request data structure
@@ -399,6 +435,14 @@ impl RequestData {
             body: BodyType::default(),
             auth: AuthConfig::default(),
         }
+    }
+
+    /// Build the unresolved snapshot that is safe to write to request history.
+    /// Environment substitution happens only on the separate wire request.
+    pub fn history_snapshot(&self) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.auth = snapshot.auth.active_only();
+        snapshot
     }
 }
 
@@ -661,6 +705,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(a.compute_header(), None);
+        // ApiKey with empty value → nothing
+        let a = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            api_key_name: "X-API-Key".into(),
+            ..Default::default()
+        };
+        assert_eq!(a.compute_header(), None);
     }
 
     #[test]
@@ -767,6 +818,52 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_bearer_suppresses_stale_manual_authorization() {
+        let manual = vec![
+            ("Accept".to_string(), "*/*".to_string()),
+            ("authorization".to_string(), "Bearer OLD".to_string()),
+        ];
+        let auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            effective_wire_headers(&manual, &auth),
+            vec![("Accept".to_string(), "*/*".to_string())]
+        );
+    }
+
+    #[test]
+    fn incomplete_basic_suppresses_stale_manual_authorization() {
+        let manual = vec![(
+            "Authorization".to_string(),
+            "Basic c3RhbGU6c2VjcmV0".to_string(),
+        )];
+        let auth = AuthConfig {
+            auth_type: AuthType::Basic,
+            ..Default::default()
+        };
+
+        assert!(effective_wire_headers(&manual, &auth).is_empty());
+    }
+
+    #[test]
+    fn incomplete_api_key_suppresses_its_stale_manual_header() {
+        let manual = vec![("X-API-Key".to_string(), "OLD".to_string())];
+        let auth = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            api_key_name: "X-API-Key".into(),
+            api_key_value: String::new(),
+            ..Default::default()
+        };
+
+        // The selected mode still claims the name, so neither the stale value
+        // nor an empty replacement goes onto the wire.
+        assert!(effective_wire_headers(&manual, &auth).is_empty());
+    }
+
+    #[test]
     fn effective_headers_api_key_custom_name_dedupes() {
         let manual = vec![("X-API-Key".to_string(), "old".to_string())];
         let auth = AuthConfig {
@@ -777,6 +874,89 @@ mod tests {
         };
         let out = effective_wire_headers(&manual, &auth);
         assert_eq!(out, vec![("X-API-Key".to_string(), "new".to_string())]);
+    }
+
+    #[test]
+    fn history_snapshot_preserves_templates_and_drops_inactive_auth() {
+        let request = RequestData {
+            method: HttpMethod::POST,
+            url: "{{base_url}}/users?token={{query_token}}".into(),
+            headers: vec![("X-Token".into(), "{{header_token}}".into())],
+            body: BodyType::Raw {
+                content: "{\"token\":\"{{body_token}}\"}".into(),
+                subtype: RawSubtype::Json,
+            },
+            auth: AuthConfig {
+                auth_type: AuthType::Bearer,
+                bearer_token: "{{bearer_token}}".into(),
+                basic_username: "inactive-user".into(),
+                basic_password: "inactive-password".into(),
+                api_key_name: "X-Inactive-Key".into(),
+                api_key_value: "inactive-api-key".into(),
+            },
+        };
+
+        let snapshot = request.history_snapshot();
+        assert_eq!(snapshot.url, request.url);
+        assert_eq!(snapshot.headers, request.headers);
+        assert_eq!(snapshot.body, request.body);
+        assert_eq!(snapshot.auth.auth_type, AuthType::Bearer);
+        assert_eq!(snapshot.auth.bearer_token, "{{bearer_token}}");
+        assert!(snapshot.auth.basic_username.is_empty());
+        assert!(snapshot.auth.basic_password.is_empty());
+        assert!(snapshot.auth.api_key_name.is_empty());
+        assert!(snapshot.auth.api_key_value.is_empty());
+    }
+
+    #[test]
+    fn history_snapshot_with_none_drops_every_auth_draft() {
+        let mut request = RequestData::new(HttpMethod::GET, "{{base_url}}".into());
+        request.auth = AuthConfig {
+            auth_type: AuthType::None,
+            bearer_token: "inactive-bearer".into(),
+            basic_username: "inactive-user".into(),
+            basic_password: "inactive-password".into(),
+            api_key_name: "X-Inactive-Key".into(),
+            api_key_value: "inactive-api-key".into(),
+        };
+
+        assert_eq!(request.history_snapshot().auth, AuthConfig::default());
+    }
+
+    #[test]
+    fn active_only_keeps_basic_and_api_key_fields_separate() {
+        let all = AuthConfig {
+            auth_type: AuthType::Basic,
+            bearer_token: "bearer".into(),
+            basic_username: "user".into(),
+            basic_password: "pass".into(),
+            api_key_name: "X-Key".into(),
+            api_key_value: "key-value".into(),
+        };
+
+        assert_eq!(
+            all.active_only(),
+            AuthConfig {
+                auth_type: AuthType::Basic,
+                basic_username: "user".into(),
+                basic_password: "pass".into(),
+                ..Default::default()
+            }
+        );
+
+        let api_key = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            ..all
+        };
+        assert_eq!(
+            api_key.active_only(),
+            AuthConfig {
+                auth_type: AuthType::ApiKey,
+                api_key_name: "X-Key".into(),
+                api_key_value: "key-value".into(),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

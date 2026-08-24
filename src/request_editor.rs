@@ -29,8 +29,8 @@ pub struct RequestStarted {
 pub struct RequestCompleted {
     pub tab_id: usize,
     pub request_id: u64,
-    /// Immutable resolved snapshot of the request that went over the wire.
-    pub request: RequestData,
+    /// Immutable, unresolved and auth-sanitized snapshot for History.
+    pub history_request: RequestData,
     pub response: std::sync::Arc<ResponseData>,
 }
 
@@ -954,7 +954,9 @@ impl RequestEditor {
     ///
     /// Uses pure functions from url_params module for URL building.
     fn rebuild_url_with_params(&self, url_str: &str, cx: &App) -> String {
-        log::debug!("Rebuilding URL from: {}", url_str);
+        // URLs can contain literal or environment-backed credentials. Keep
+        // their values out of logs even before a request is sent.
+        log::debug!("Rebuilding URL from parameter state");
 
         // Extract base URL using pure function
         let base = url_params::extract_base_url(url_str);
@@ -975,7 +977,7 @@ impl RequestEditor {
         // Build URL using pure function
         let result = url_params::build_url_with_params(base, &params);
 
-        log::debug!("Rebuilt URL to: {}", result);
+        log::debug!("Rebuilt URL from parameter state");
         result
     }
 
@@ -1154,20 +1156,21 @@ impl RequestEditor {
         // Auto-add scheme if missing (like Postman does) - default to http://
         if !url.starts_with("http://") && !url.starts_with("https://") {
             url = format!("http://{}", url);
-            log::debug!("Auto-added http:// scheme to URL: {}", url);
+            log::debug!("Auto-added http:// scheme to request URL");
         }
 
         // Validate URL format after normalization
         if url::Url::parse(&url).is_err() {
-            log::error!("Invalid URL format even after normalization: '{}'", url);
+            log::error!("Invalid URL format after normalization");
             return;
         }
 
-        log::debug!("Sending request to: {}", url);
+        log::debug!("Sending request");
 
         // Update Content-Length before sending
         self.update_content_length(window, cx);
         let editor_request_snapshot = self.get_current_request_data(cx);
+        let history_request_snapshot = editor_request_snapshot.history_snapshot();
 
         // Get selected method
         let method_index = self
@@ -1245,16 +1248,8 @@ impl RequestEditor {
         // Resolve auth {{vars}} and compute the wire header. The saved request
         // keeps manual headers + the auth config; only the wire gets the merged
         // header set (auth wins over a manual same-name header).
-        let resolved_auth =
-            crate::variables::substitute_auth(&self.auth_editor.read(cx).get_auth(cx), env);
-
-        let request = RequestData {
-            method,
-            url: url.clone(),
-            headers: headers.clone(),
-            body: body.clone(),
-            auth: resolved_auth.clone(),
-        };
+        let unresolved_active_auth = self.auth_editor.read(cx).get_auth(cx).active_only();
+        let resolved_auth = crate::variables::substitute_auth(&unresolved_active_auth, env);
 
         let tab_id = self.active_request_tab_id;
         let request_id = self.next_request_id;
@@ -1263,7 +1258,7 @@ impl RequestEditor {
             .checked_add(1)
             .expect("request id space exhausted");
 
-        log::debug!("Starting {} request to: {}", method.as_str(), url);
+        log::debug!("Starting {} request", method.as_str());
 
         // Spawn the HTTP work onto the tokio runtime *now* so we can hold an
         // abort handle; the gpui task below only awaits the outcome.
@@ -1297,7 +1292,10 @@ impl RequestEditor {
                     }
                     // Handle request error (network error, file read error, etc.)
                     let duration = start.elapsed();
-                    let error_message = format!("Request failed: {}", e);
+                    // Transport errors can embed the fully-resolved URL. Never
+                    // copy them into logs or the response viewer because that
+                    // URL may contain environment-backed credentials.
+                    let error_message = "Request failed".to_string();
                     log::error!("{}", error_message);
 
                     let error_response = ResponseData {
@@ -1320,7 +1318,7 @@ impl RequestEditor {
                         cx.emit(RequestCompleted {
                             tab_id,
                             request_id,
-                            request,
+                            history_request: history_request_snapshot,
                             response: std::sync::Arc::new(error_response),
                         });
                         cx.notify();
@@ -1365,7 +1363,7 @@ impl RequestEditor {
                 cx.emit(RequestCompleted {
                     tab_id,
                     request_id,
-                    request,
+                    history_request: history_request_snapshot,
                     response: std::sync::Arc::new(response_data),
                 });
                 cx.notify();
