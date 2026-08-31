@@ -211,7 +211,9 @@ fn gen_curl(req: &RequestData) -> String {
         }
     }
     if let Some(body) = raw_body(req) {
-        lines.push(format!("  --data '{}'", shell_single(&body)));
+        // Unlike --data, --data-raw does not treat a leading @ as an instruction
+        // to read and upload a local file (or @- as an instruction to read stdin).
+        lines.push(format!("  --data-raw '{}'", shell_single(&body)));
     }
     lines.join(" \\\n")
 }
@@ -665,7 +667,122 @@ mod tests {
     fn curl_post_includes_data_body() {
         let out = generate(CodeTarget::Curl, &post_json_req());
         assert!(out.contains("--request POST"));
-        assert!(out.contains("--data '{\"name\": \"ada\"}'"));
+        assert!(out.contains("--data-raw '{\"name\": \"ada\"}'"));
+    }
+
+    #[test]
+    fn curl_raw_body_never_expands_leading_at_and_preserves_shell_quoting() {
+        let cases = [
+            ("@/etc/passwd", "--data-raw '@/etc/passwd'"),
+            ("@-", "--data-raw '@-'"),
+            (
+                "single quote: ' and\na newline",
+                "--data-raw 'single quote: '\\'' and\na newline'",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let mut req = post_json_req();
+            req.body = BodyType::Raw {
+                content: body.to_string(),
+                subtype: RawSubtype::Text,
+            };
+
+            let out = generate(CodeTarget::Curl, &req);
+            assert!(out.contains(expected), "generated cURL was: {out}");
+            assert!(!out.contains("  --data '"), "generated cURL was: {out}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executing_generated_curl_sends_raw_body_exactly() {
+        use std::io::{Read as _, Write as _};
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        if Command::new("curl").arg("--version").output().is_err() {
+            eprintln!("skipping cURL execution test: curl is not installed");
+            return;
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let body = "@/definitely/not/a/local/file\nsingle quote: ' stays literal\n@-\n";
+
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "curl did not connect to test server"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("failed to accept curl connection: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+
+            let mut request = Vec::new();
+            let (body_start, content_length) = loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(
+                    read > 0,
+                    "connection closed before the request was complete"
+                );
+                request.extend_from_slice(&chunk[..read]);
+
+                let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let body_start = header_end + 4;
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .expect("curl request must include Content-Length");
+
+                if request.len() >= body_start + content_length {
+                    break (body_start, content_length);
+                }
+            };
+
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+            request[body_start..body_start + content_length].to_vec()
+        });
+
+        let mut req = post_json_req();
+        req.url = url;
+        req.body = BodyType::Raw {
+            content: body.to_string(),
+            subtype: RawSubtype::Text,
+        };
+        let command = generate(CodeTarget::Curl, &req);
+        let output = Command::new("sh")
+            .args(["-c", &command])
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "generated cURL failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(server.join().unwrap(), body.as_bytes());
     }
 
     #[test]
