@@ -3,7 +3,7 @@ use gpui::px;
 use gpui::*;
 use gpui_component::input::InputEvent;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, button::*,
+    ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, WindowExt, button::*,
     checkbox::Checkbox, input::*, scroll::ScrollableElement as _, select::*, v_flex,
 };
 
@@ -125,6 +125,31 @@ pub struct RequestEditor {
 }
 
 impl RequestEditor {
+    fn show_curl_import_error(
+        error: crate::curl_import::CurlImportError,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = error.to_string();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            dialog
+                .title(
+                    div()
+                        .text_lg()
+                        .font_weight(FontWeight::BOLD)
+                        .child("cURL import failed"),
+                )
+                .w(px(520.))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(message.clone()),
+                )
+                .alert()
+        });
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://api.github.com/zen"));
@@ -177,14 +202,21 @@ impl RequestEditor {
             |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
                     let value = this.url_input.read(cx).value().to_string();
-                    if value.trim_start().starts_with("curl ")
-                        && let Some(request) = crate::curl_import::parse_curl(&value)
-                    {
-                        // load_request rewrites the URL input, which re-fires
-                        // Change — the new value no longer starts with "curl",
-                        // so there is no loop.
-                        this.load_request(&request, window, cx);
-                        return;
+                    if value.trim_start().starts_with("curl ") {
+                        match crate::curl_import::parse_curl(&value) {
+                            Ok(Some(request)) => {
+                                // load_request rewrites the URL input, which re-fires
+                                // Change — the new value no longer starts with "curl",
+                                // so there is no loop.
+                                this.load_request(&request, window, cx);
+                                return;
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                Self::show_curl_import_error(error, window, cx);
+                                return;
+                            }
+                        }
                     }
                 }
                 this.parse_url_to_params(window, cx);
