@@ -1,11 +1,49 @@
 //! Parse a pasted `curl …` command line into a [`RequestData`].
 //!
-//! Deliberately lenient: unknown flags are skipped, and a backslash followed
-//! by whitespace is treated as a token break (a multi-line command pasted
-//! into the single-line URL input arrives with `\<newline>` flattened to
-//! `\<space>`; POSIX "escaped space" semantics would corrupt it).
+//! Unknown options are rejected instead of guessed: silently skipping an
+//! option that takes a value could otherwise make that value become the
+//! imported request URL. A backslash followed by whitespace is treated as a
+//! token break (a multi-line command pasted into the single-line URL input
+//! arrives with `\<newline>` flattened to `\<space>`; POSIX "escaped space"
+//! semantics would corrupt it).
+
+use std::fmt;
 
 use crate::types::{AuthConfig, AuthType, BodyType, FormDataRow, FormDataValue, HttpMethod, RawSubtype, RequestData};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurlImportError {
+    UnsupportedOption(String),
+    MissingOptionValue(String),
+    InvalidOptionValue { option: String, expected: &'static str },
+    EmptyUrl,
+    MultipleUrls,
+}
+
+impl fmt::Display for CurlImportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedOption(option) => write!(
+                f,
+                "Unsupported cURL option `{option}`. The command was not imported because this option's arguments or request semantics are unknown."
+            ),
+            Self::MissingOptionValue(option) => {
+                write!(f, "cURL option `{option}` requires a value. The command was not imported.")
+            }
+            Self::InvalidOptionValue { option, expected } => write!(
+                f,
+                "cURL option `{option}` has an invalid value; expected {expected}. The command was not imported."
+            ),
+            Self::EmptyUrl => write!(f, "The cURL command contains an empty URL and was not imported."),
+            Self::MultipleUrls => write!(
+                f,
+                "The cURL command contains more than one URL. Import one request at a time."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CurlImportError {}
 
 /// Shell-style tokenizer. Single quotes take content verbatim; double quotes
 /// honor `\"` and `\\`; outside quotes a backslash escapes the next char,
@@ -83,28 +121,39 @@ fn tokenize(input: &str) -> Vec<String> {
 
 /// Extract a flag's value: attached (`-XPOST`), separate (`-X POST`), or
 /// `--request=POST`. Advances `i` past a separate value.
-fn flag_value(tokens: &[String], i: &mut usize, short: &str, long: &str) -> Option<String> {
-    let tok = &tokens[*i];
+fn flag_value(
+    tokens: &[String],
+    i: &mut usize,
+    short: &str,
+    long: &str,
+) -> Result<String, CurlImportError> {
+    let tok = tokens[*i].clone();
     if let Some(rest) = tok.strip_prefix(long) {
         if rest.is_empty() {
             *i += 1;
-            return tokens.get(*i).cloned();
+            return tokens
+                .get(*i)
+                .cloned()
+                .ok_or(CurlImportError::MissingOptionValue(tok));
         }
         if let Some(v) = rest.strip_prefix('=') {
-            return Some(v.to_string());
+            return Ok(v.to_string());
         }
-        return None; // e.g. "--headers" is not "--header"
+        unreachable!("flag_value called only after matches_flag");
     }
     if !short.is_empty()
         && let Some(rest) = tok.strip_prefix(short)
     {
         if rest.is_empty() {
             *i += 1;
-            return tokens.get(*i).cloned();
+            return tokens
+                .get(*i)
+                .cloned()
+                .ok_or(CurlImportError::MissingOptionValue(tok));
         }
-        return Some(rest.to_string()); // attached: -XPOST
+        return Ok(rest.to_string()); // attached: -XPOST
     }
-    None
+    unreachable!("flag_value called only after matches_flag");
 }
 
 /// Does this token invoke the given flag (exact, attached, or `=` form)?
@@ -115,34 +164,76 @@ fn matches_flag(tok: &str, short: &str, long: &str) -> bool {
         || tok.starts_with(&format!("{}=", long))
 }
 
-pub fn parse_curl(input: &str) -> Option<RequestData> {
+/// Options whose effects are either presentation-only or already match the
+/// HTTP client's behavior. Keep this list explicit: unknown option arity must
+/// never be guessed.
+fn is_safe_valueless_option(tok: &str) -> bool {
+    matches!(
+        tok,
+        "-s" | "--silent" | "-S" | "--show-error" | "-L" | "--location" | "--compressed"
+    )
+}
+
+fn set_url(url: &mut Option<String>, value: String) -> Result<(), CurlImportError> {
+    if value.is_empty() {
+        return Err(CurlImportError::EmptyUrl);
+    }
+    if url.is_some() {
+        return Err(CurlImportError::MultipleUrls);
+    }
+    *url = Some(value);
+    Ok(())
+}
+
+/// Parse one cURL command.
+///
+/// `Ok(None)` means the input is not yet an importable cURL command (it is not
+/// `curl`, or it has no URL). Unsafe, unsupported, or ambiguous commands return
+/// a visible error to the caller instead of a partially imported request.
+pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
     let tokens = tokenize(input);
     if tokens.first().map(String::as_str) != Some("curl") {
-        return None;
+        return Ok(None);
     }
 
     let mut method: Option<HttpMethod> = None;
-    let mut url = String::new();
+    let mut url: Option<String> = None;
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut data_parts: Vec<String> = Vec::new();
     let mut form_rows: Vec<FormDataRow> = Vec::new();
     let mut auth = AuthConfig::default();
+    let mut end_of_options = false;
 
     let mut i = 1;
     while i < tokens.len() {
         let tok = tokens[i].clone();
-        if matches_flag(&tok, "-X", "--request") {
-            if let Some(v) = flag_value(&tokens, &mut i, "-X", "--request")
-                && let Some(m) = HttpMethod::from_str(&v)
-            {
-                method = Some(m);
-            }
+        if end_of_options {
+            set_url(&mut url, tok)?;
+        } else if tok == "--" {
+            end_of_options = true;
+        } else if matches_flag(&tok, "-X", "--request") {
+            let v = flag_value(&tokens, &mut i, "-X", "--request")?;
+            method = Some(HttpMethod::from_str(&v).ok_or_else(|| {
+                CurlImportError::InvalidOptionValue {
+                    option: tok.clone(),
+                    expected: "a supported HTTP method",
+                }
+            })?);
         } else if matches_flag(&tok, "-H", "--header") {
-            if let Some(v) = flag_value(&tokens, &mut i, "-H", "--header")
-                && let Some((k, val)) = v.split_once(':')
-            {
-                headers.push((k.trim().to_string(), val.trim().to_string()));
+            let v = flag_value(&tokens, &mut i, "-H", "--header")?;
+            let (k, val) = v.split_once(':').ok_or_else(|| {
+                CurlImportError::InvalidOptionValue {
+                    option: tok.clone(),
+                    expected: "a `Name: value` header",
+                }
+            })?;
+            if k.trim().is_empty() {
+                return Err(CurlImportError::InvalidOptionValue {
+                    option: tok,
+                    expected: "a `Name: value` header",
+                });
             }
+            headers.push((k.trim().to_string(), val.trim().to_string()));
         } else if matches_flag(&tok, "", "--data-raw")
             || matches_flag(&tok, "", "--data-binary")
             || matches_flag(&tok, "", "--data-urlencode")
@@ -154,63 +245,67 @@ pub fn parse_curl(input: &str) -> Option<RequestData> {
             } else {
                 "--data-urlencode"
             };
-            if let Some(v) = flag_value(&tokens, &mut i, "", long) {
-                data_parts.push(v);
-            }
+            data_parts.push(flag_value(&tokens, &mut i, "", long)?);
         } else if matches_flag(&tok, "-d", "--data") {
-            if let Some(v) = flag_value(&tokens, &mut i, "-d", "--data") {
-                data_parts.push(v);
-            }
+            data_parts.push(flag_value(&tokens, &mut i, "-d", "--data")?);
         } else if matches_flag(&tok, "-F", "--form") {
-            if let Some(v) = flag_value(&tokens, &mut i, "-F", "--form")
-                && let Some((k, val)) = v.split_once('=')
-            {
-                let value = match val.strip_prefix('@') {
-                    Some(path) => FormDataValue::File { path: path.to_string() },
-                    None => FormDataValue::Text(val.to_string()),
-                };
-                form_rows.push(FormDataRow { enabled: true, key: k.to_string(), value });
-            }
-        } else if matches_flag(&tok, "-b", "--cookie") {
-            if let Some(v) = flag_value(&tokens, &mut i, "-b", "--cookie") {
-                // curl reads the -b argument as cookie data when it contains '=',
-                // otherwise as a cookie-jar filename (which we cannot load).
-                // Browser "Copy as cURL" always emits cookie data as a -b string.
-                if v.contains('=') {
-                    headers.push(("Cookie".to_string(), v));
+            let v = flag_value(&tokens, &mut i, "-F", "--form")?;
+            let (k, val) = v.split_once('=').ok_or_else(|| {
+                CurlImportError::InvalidOptionValue {
+                    option: tok.clone(),
+                    expected: "a `name=value` form field",
                 }
+            })?;
+            if k.is_empty() {
+                return Err(CurlImportError::InvalidOptionValue {
+                    option: tok,
+                    expected: "a `name=value` form field",
+                });
+            }
+            let value = match val.strip_prefix('@') {
+                Some(path) => FormDataValue::File { path: path.to_string() },
+                None => FormDataValue::Text(val.to_string()),
+            };
+            form_rows.push(FormDataRow { enabled: true, key: k.to_string(), value });
+        } else if matches_flag(&tok, "-b", "--cookie") {
+            let v = flag_value(&tokens, &mut i, "-b", "--cookie")?;
+            // curl reads the -b argument as cookie data when it contains '=',
+            // otherwise as a cookie-jar filename (which we cannot load).
+            // Browser "Copy as cURL" always emits cookie data as a -b string.
+            if v.contains('=') {
+                headers.push(("Cookie".to_string(), v));
             }
         } else if matches_flag(&tok, "-u", "--user") {
-            if let Some(v) = flag_value(&tokens, &mut i, "-u", "--user") {
-                // Split on the first ':' into user/pass; a value with no ':' is a
-                // username with an empty password (curl then prompts, we don't).
-                let (user, pass) = match v.split_once(':') {
-                    Some((u, p)) => (u.to_string(), p.to_string()),
-                    None => (v, String::new()),
-                };
-                auth = AuthConfig {
-                    auth_type: AuthType::Basic,
-                    basic_username: user,
-                    basic_password: pass,
-                    ..AuthConfig::default()
-                };
-            }
+            let v = flag_value(&tokens, &mut i, "-u", "--user")?;
+            // Split on the first ':' into user/pass; a value with no ':' is a
+            // username with an empty password (curl then prompts, we don't).
+            let (user, pass) = match v.split_once(':') {
+                Some((u, p)) => (u.to_string(), p.to_string()),
+                None => (v, String::new()),
+            };
+            auth = AuthConfig {
+                auth_type: AuthType::Basic,
+                basic_username: user,
+                basic_password: pass,
+                ..AuthConfig::default()
+            };
         } else if matches_flag(&tok, "", "--url") {
-            if let Some(v) = flag_value(&tokens, &mut i, "", "--url")
-                && url.is_empty()
-            {
-                url = v;
-            }
-        } else if !tok.starts_with('-') && url.is_empty() {
-            url = tok;
+            let v = flag_value(&tokens, &mut i, "", "--url")?;
+            set_url(&mut url, v)?;
+        } else if is_safe_valueless_option(&tok) {
+            // Explicitly supported no-op; do not generalize this branch.
+        } else if tok.starts_with('-') {
+            let option = tok.split_once('=').map_or(tok.as_str(), |(name, _)| name);
+            return Err(CurlImportError::UnsupportedOption(option.to_string()));
+        } else {
+            set_url(&mut url, tok)?;
         }
-        // Unknown flags fall through and are skipped.
         i += 1;
     }
 
-    if url.is_empty() {
-        return None;
-    }
+    let Some(url) = url else {
+        return Ok(None);
+    };
 
     let body = if !form_rows.is_empty() {
         BodyType::FormData(form_rows)
@@ -240,7 +335,7 @@ pub fn parse_curl(input: &str) -> Option<RequestData> {
         HttpMethod::POST
     });
 
-    Some(RequestData { method, url, headers, body, auth })
+    Ok(Some(RequestData { method, url, headers, body, auth }))
 }
 
 #[cfg(test)]
@@ -249,7 +344,13 @@ mod tests {
     use crate::types::{BodyType, FormDataValue, HttpMethod, RawSubtype};
 
     fn parse(s: &str) -> RequestData {
-        parse_curl(s).expect("should parse")
+        parse_curl(s)
+            .expect("command should be safe to import")
+            .expect("command should contain a request")
+    }
+
+    fn parse_error(s: &str) -> CurlImportError {
+        parse_curl(s).expect_err("command should be rejected")
     }
 
     #[test]
@@ -263,10 +364,10 @@ mod tests {
 
     #[test]
     fn non_curl_input_is_rejected() {
-        assert!(parse_curl("wget https://example.com").is_none());
-        assert!(parse_curl("").is_none());
-        assert!(parse_curl("curl").is_none()); // no URL
-        assert!(parse_curl("https://example.com").is_none());
+        assert!(parse_curl("wget https://example.com").unwrap().is_none());
+        assert!(parse_curl("").unwrap().is_none());
+        assert!(parse_curl("curl").unwrap().is_none()); // no URL
+        assert!(parse_curl("https://example.com").unwrap().is_none());
     }
 
     #[test]
@@ -386,10 +487,21 @@ mod tests {
     }
 
     #[test]
-    fn url_flag_and_bare_url_first_wins() {
+    fn url_flag_supports_separate_and_equals_forms() {
         assert_eq!(parse("curl --url https://a.example").url, "https://a.example");
-        let r = parse("curl https://first.example https://second.example");
-        assert_eq!(r.url, "https://first.example");
+        assert_eq!(parse("curl --url=https://b.example").url, "https://b.example");
+    }
+
+    #[test]
+    fn multiple_urls_are_rejected_as_ambiguous() {
+        assert_eq!(
+            parse_error("curl https://first.example https://second.example"),
+            CurlImportError::MultipleUrls
+        );
+        assert_eq!(
+            parse_error("curl https://first.example --url https://second.example"),
+            CurlImportError::MultipleUrls
+        );
     }
 
     #[test]
@@ -464,9 +576,65 @@ mod tests {
     }
 
     #[test]
-    fn unknown_flags_are_skipped() {
+    fn safe_valueless_options_are_ignored_explicitly() {
         let r = parse("curl -s -L --compressed https://example.com");
         assert_eq!(r.url, "https://example.com");
         assert_eq!(r.method, HttpMethod::GET);
+        assert_eq!(
+            parse("curl --silent --show-error --location https://example.com").url,
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn proxy_option_cannot_redirect_a_credential_bearing_import() {
+        assert_eq!(
+            parse_error(
+                "curl --proxy http://proxy.example -H 'Authorization: Bearer secret' https://api.example"
+            ),
+            CurlImportError::UnsupportedOption("--proxy".to_string())
+        );
+        assert_eq!(
+            parse_error(
+                "curl --proxy http://proxy.example -H 'Authorization: Bearer secret' --url https://api.example"
+            ),
+            CurlImportError::UnsupportedOption("--proxy".to_string())
+        );
+    }
+
+    #[test]
+    fn output_option_operand_cannot_become_the_url() {
+        assert_eq!(
+            parse_error("curl -o out.json https://api.example"),
+            CurlImportError::UnsupportedOption("-o".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_options_are_rejected_in_all_forms() {
+        assert_eq!(
+            parse_error("curl --future-option value https://api.example"),
+            CurlImportError::UnsupportedOption("--future-option".to_string())
+        );
+        assert_eq!(
+            parse_error("curl --future-option=value https://api.example"),
+            CurlImportError::UnsupportedOption("--future-option".to_string())
+        );
+        assert_eq!(
+            parse_error("curl --future-flag https://api.example"),
+            CurlImportError::UnsupportedOption("--future-flag".to_string())
+        );
+    }
+
+    #[test]
+    fn supported_options_with_missing_values_are_rejected() {
+        assert_eq!(
+            parse_error("curl https://example.com -H"),
+            CurlImportError::MissingOptionValue("-H".to_string())
+        );
+        assert_eq!(
+            parse_error("curl --url"),
+            CurlImportError::MissingOptionValue("--url".to_string())
+        );
     }
 }
