@@ -415,7 +415,14 @@ impl RequestEditor {
     }
 
     /// Replace the active environment variable map (called by PoopmanApp).
-    pub fn set_env_vars(&mut self, vars: std::collections::HashMap<String, String>) {
+    pub fn set_env_vars(
+        &mut self,
+        vars: std::collections::HashMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.body_editor
+            .update(cx, |editor, cx| editor.set_env_vars(&vars, window, cx));
         self.env_vars = vars;
     }
 

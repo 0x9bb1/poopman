@@ -7,6 +7,11 @@ use gpui_component::{
     select::*, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
 };
 
+use std::{collections::{HashMap, HashSet}, rc::Rc, time::Duration};
+
+use crate::body_editor_assistance::{
+    BodyDiagnosticSeverity, VariableCompletionProvider, compute_body_diagnostics,
+};
 use crate::types::{BodyDraft, BodyKind, BodyType, FormDataRow, FormDataValue, RawSubtype};
 
 use gpui::Subscription;
@@ -50,6 +55,8 @@ pub struct BodyEditor {
     // Format/validation state
     validation_message: Option<String>,
     validation_error: bool,
+    env_var_names: HashSet<String>,
+    diagnostics_generation: u64,
 }
 
 impl BodyEditor {
@@ -95,12 +102,15 @@ impl BodyEditor {
         // Create single editor for all raw types (default to JSON)
         let current_raw_subtype = RawSubtype::Json;
         let raw_body_editor = cx.new(|cx| {
-            InputState::new(window, cx)
+            let mut input = InputState::new(window, cx)
                 .code_editor(current_raw_subtype.as_str())
                 .line_number(true)
                 .indent_guides(true)
                 .tab_size(TabSize { tab_size: 4, hard_tabs: false })
-                .placeholder(get_placeholder_for_subtype(current_raw_subtype))
+                .placeholder(get_placeholder_for_subtype(current_raw_subtype));
+            input.lsp.completion_provider =
+                Some(Rc::new(VariableCompletionProvider::new(Vec::new())));
+            input
         });
 
         log::info!("Created single body editor with default language: 'json'");
@@ -119,6 +129,8 @@ impl BodyEditor {
             _formdata_subscriptions: vec![],
             validation_message: None,
             validation_error: false,
+            env_var_names: HashSet::new(),
+            diagnostics_generation: 0,
         };
 
         // Initialize with one empty form-data row for auto-add functionality
@@ -133,8 +145,104 @@ impl BodyEditor {
             },
         );
         editor._subscriptions.push(select_subscription);
+        let raw_input_subscription = cx.subscribe_in(
+            &raw_body_editor,
+            window,
+            |this: &mut BodyEditor, _, event: &InputChangeEvent, window, cx| {
+                if matches!(event, InputChangeEvent::Change) {
+                    this.schedule_raw_diagnostics(true, window, cx);
+                }
+            },
+        );
+        editor._subscriptions.push(raw_input_subscription);
 
         editor
+    }
+
+    /// Replace completion candidates and re-check unknown variables whenever the
+    /// active environment changes.
+    pub fn set_env_vars(
+        &mut self,
+        vars: &HashMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.env_var_names = vars.keys().cloned().collect();
+        let provider = VariableCompletionProvider::new(self.env_var_names.iter().cloned());
+        self.raw_body_editor.update(cx, |input, _| {
+            input.lsp.completion_provider = Some(Rc::new(provider));
+        });
+        self.schedule_raw_diagnostics(false, window, cx);
+    }
+
+    /// Coalesce typing, parse JSON off the UI thread, and discard stale results.
+    fn schedule_raw_diagnostics(
+        &mut self,
+        debounce: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.diagnostics_generation = self.diagnostics_generation.wrapping_add(1);
+        let generation = self.diagnostics_generation;
+
+        cx.spawn_in(window, async move |this, cx| {
+            if debounce {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+            }
+
+            // Snapshot only after the debounce. This avoids copying a 1 MB body
+            // on every keystroke when a newer generation will supersede it.
+            let snapshot = this.update(cx, |this, cx| {
+                (this.diagnostics_generation == generation).then(|| {
+                    (
+                        this.raw_body_editor.read(cx).value().to_string(),
+                        this.env_var_names.clone(),
+                        this.current_raw_subtype == RawSubtype::Json,
+                    )
+                })
+            })?;
+            let Some((content, variable_names, validate_json)) = snapshot else {
+                return Ok(());
+            };
+
+            let task = cx.background_spawn(async move {
+                compute_body_diagnostics(&content, &variable_names, validate_json)
+            });
+            let diagnostics = task.await;
+
+            this.update(cx, |this, cx| {
+                if this.diagnostics_generation != generation {
+                    return;
+                }
+                this.raw_body_editor.update(cx, |input, cx| {
+                    let Some(target) = input.diagnostics_mut() else {
+                        return;
+                    };
+                    target.clear();
+                    target.extend(diagnostics.into_iter().map(|diagnostic| {
+                        let severity = match diagnostic.severity {
+                            BodyDiagnosticSeverity::Error => {
+                                gpui_component::highlighter::DiagnosticSeverity::Error
+                            }
+                            BodyDiagnosticSeverity::Warning => {
+                                gpui_component::highlighter::DiagnosticSeverity::Warning
+                            }
+                        };
+                        gpui_component::highlighter::Diagnostic::new(
+                            diagnostic.range,
+                            diagnostic.message,
+                        )
+                        .with_severity(severity)
+                        .with_source(diagnostic.source)
+                    }));
+                    cx.notify();
+                });
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     /// Handle raw subtype change - switch syntax highlighting and placeholder
@@ -156,6 +264,7 @@ impl BodyEditor {
                 // Update placeholder based on subtype
                 state.set_placeholder(get_placeholder_for_subtype(new_subtype), window, cx);
             });
+            self.schedule_raw_diagnostics(false, window, cx);
 
             // Emit event to notify RequestEditor to update Content-Type header
             cx.emit(BodyTypeChanged {
@@ -240,6 +349,7 @@ impl BodyEditor {
                 cx,
             );
         });
+        self.schedule_raw_diagnostics(false, window, cx);
 
         self.formdata_rows.clear();
         self.formdata_input_states.clear();

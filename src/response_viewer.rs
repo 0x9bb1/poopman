@@ -618,8 +618,6 @@ impl Render for ResponseViewer {
                         .when(self.active_tab == 0, |this| {
                             let resp_is_text = self.response.as_ref().is_none_or(|r| r.is_text);
                             if resp_is_text {
-                                let is_error =
-                                    self.response.as_ref().is_some_and(|r| r.is_network_error());
                                 let body_display = self.body_display.clone();
                                 let has_body_display = self.body_ready;
                                 let body_loading = self.body_loading;
@@ -638,7 +636,15 @@ impl Render for ResponseViewer {
                                             this.child(
                                                 div().flex_1().min_h_0().w_full().child(
                                                     Input::new(&body_display)
-                                                        .disabled(is_error)
+                                                        // Disabled InputState still supports
+                                                        // selection, copy, navigation, and search,
+                                                        // but rejects every text mutation path.
+                                                        .disabled(true)
+                                                        // `disabled` normally paints a muted input
+                                                        // background and focus border. The parent
+                                                        // supplies the viewer chrome, so keep the
+                                                        // editor surface visually neutral.
+                                                        .appearance(false)
                                                         .rounded(theme.radius_lg)
                                                         .w_full()
                                                         .h_full(),
