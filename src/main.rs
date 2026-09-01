@@ -3,6 +3,7 @@
 mod app;
 mod auth_editor;
 mod body_editor;
+mod body_editor_assistance;
 mod code_formatter;
 mod code_gen;
 mod code_snippet_panel;

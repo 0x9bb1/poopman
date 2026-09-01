@@ -144,7 +144,9 @@ impl PoopmanApp {
 
         // Push the active environment's variables into the request editor.
         let initial_env_vars = Self::active_env_vars(&environments, active_environment_id);
-        request_editor.update(cx, |editor, _| editor.set_env_vars(initial_env_vars));
+        request_editor.update(cx, |editor, cx| {
+            editor.set_env_vars(initial_env_vars, window, cx)
+        });
 
         // Initialize with one empty tab
         let request_tabs = vec![RequestTab::new_empty(0)];
@@ -302,8 +304,13 @@ impl PoopmanApp {
         let env_changed_sub = cx.subscribe_in(
             &env_manager,
             window,
-            move |this, _, event: &EnvironmentsChanged, _window, cx| {
-                this.apply_environment_state(event.environments.clone(), event.active_id, cx);
+            move |this, _, event: &EnvironmentsChanged, window, cx| {
+                this.apply_environment_state(
+                    event.environments.clone(),
+                    event.active_id,
+                    window,
+                    cx,
+                );
             },
         );
 
@@ -455,13 +462,14 @@ impl PoopmanApp {
         &mut self,
         environments: Vec<crate::types::Environment>,
         active_environment_id: Option<i64>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.environments = environments;
         self.active_environment_id = active_environment_id;
         let vars = Self::active_env_vars(&self.environments, self.active_environment_id);
         self.request_editor
-            .update(cx, |editor, _| editor.set_env_vars(vars));
+            .update(cx, |editor, cx| editor.set_env_vars(vars, window, cx));
         cx.notify();
     }
 
