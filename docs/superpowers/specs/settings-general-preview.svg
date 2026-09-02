@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="760" viewBox="0 0 1120 760" fill="none">
+  <style>
+    .title { font: 700 15px Arial, sans-serif; letter-spacing: .06em; fill: #1A1915; }
+    .nav { font: 600 14px Arial, sans-serif; fill: #73706A; }
+    .navActive { font: 700 14px Arial, sans-serif; fill: #C15F3C; }
+    .heading { font: 700 24px Arial, sans-serif; fill: #1A1915; }
+    .section { font: 700 13px Arial, sans-serif; letter-spacing: .08em; fill: #73706A; }
+    .label { font: 700 15px Arial, sans-serif; fill: #1A1915; }
+    .body { font: 400 13px Arial, sans-serif; fill: #73706A; }
+    .field { font: 400 14px Arial, sans-serif; fill: #1A1915; }
+    .unit { font: 400 13px Arial, sans-serif; fill: #73706A; }
+    .hint { font: 600 12px Arial, sans-serif; fill: #4F8A5B; }
+  </style>
+  <rect width="1120" height="760" rx="18" fill="#FAF9F5"/>
+  <rect x="0" y="0" width="1120" height="64" rx="18" fill="#F0EEE6"/>
+  <rect x="0" y="48" width="1120" height="16" fill="#F0EEE6"/>
+  <text x="34" y="39" class="title">SETTINGS</text>
+  <path d="M1080 25L1093 38M1093 25L1080 38" stroke="#73706A" stroke-width="1.6" stroke-linecap="round"/>
+
+  <rect x="0" y="64" width="1120" height="48" fill="#FFF"/>
+  <text x="34" y="94" class="navActive">General</text>
+  <text x="126" y="94" class="nav">Themes</text>
+  <text x="214" y="94" class="nav">Shortcuts</text>
+  <text x="321" y="94" class="nav">Data</text>
+  <text x="386" y="94" class="nav">Certificates</text>
+  <text x="500" y="94" class="nav">Proxy</text>
+  <text x="571" y="94" class="nav">Update</text>
+  <text x="651" y="94" class="nav">About</text>
+  <rect x="23" y="109" width="72" height="3" rx="1.5" fill="#C15F3C"/>
+
+  <text x="58" y="164" class="heading">General</text>
+  <text x="58" y="190" class="body">Request defaults and safeguards apply to every new request.</text>
+
+  <rect x="58" y="218" width="1004" height="462" rx="12" fill="#FFF" stroke="#E7E4DA"/>
+  <text x="86" y="258" class="section">REQUEST</text>
+
+  <text x="86" y="300" class="label">HTTP version</text>
+  <text x="86" y="323" class="body">Choose the protocol preference used for outgoing requests.</text>
+  <rect x="814" y="278" width="172" height="42" rx="8" fill="#FFF" stroke="#E7E4DA"/>
+  <text x="832" y="304" class="field">Automatic</text>
+  <path d="M959 295l5 5 5-5" stroke="#73706A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M86 350H1034" stroke="#E7E4DA"/>
+
+  <text x="86" y="388" class="section">TIMEOUTS</text>
+  <text x="86" y="430" class="label">Connect timeout</text>
+  <text x="86" y="453" class="body">Stop if a connection cannot be established in time.</text>
+  <rect x="814" y="407" width="126" height="42" rx="8" fill="#FFF" stroke="#E7E4DA"/>
+  <text x="832" y="433" class="field">10,000</text>
+  <text x="955" y="433" class="unit">ms</text>
+  <path d="M86 480H1034" stroke="#E7E4DA"/>
+
+  <text x="86" y="520" class="label">Read idle timeout</text>
+  <text x="86" y="543" class="body">Stop when a connected server stops sending response data.</text>
+  <rect x="814" y="497" width="126" height="42" rx="8" fill="#FFF" stroke="#E7E4DA"/>
+  <text x="832" y="523" class="field">30,000</text>
+  <text x="955" y="523" class="unit">ms</text>
+  <path d="M86 570H1034" stroke="#E7E4DA"/>
+
+  <text x="86" y="610" class="label">Total request timeout</text>
+  <text x="86" y="633" class="body">A final limit for the complete request, including download time.</text>
+  <rect x="814" y="587" width="126" height="42" rx="8" fill="#FFF" stroke="#E7E4DA"/>
+  <text x="832" y="613" class="field">60,000</text>
+  <text x="955" y="613" class="unit">ms</text>
+
+  <rect x="58" y="702" width="1004" height="1" fill="#E7E4DA"/>
+  <circle cx="88" cy="727" r="4" fill="#4F8A5B"/>
+  <text x="101" y="731" class="hint">Changes are saved automatically</text>
+  <text x="829" y="731" class="body">Response limits &amp; downloads · next section</text>
+</svg>

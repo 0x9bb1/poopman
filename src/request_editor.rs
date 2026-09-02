@@ -4,7 +4,12 @@ use gpui::*;
 use gpui_component::input::InputEvent;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, WindowExt, button::*,
-    checkbox::Checkbox, input::*, scroll::ScrollableElement as _, select::*, v_flex,
+    checkbox::Checkbox, input::*, menu::PopupMenuItem, scroll::ScrollableElement as _,
+    select::*, v_flex,
+};
+use std::{
+    path::PathBuf,
+    sync::{Arc, RwLock},
 };
 
 use crate::auth_editor::AuthEditor;
@@ -122,6 +127,8 @@ pub struct RequestEditor {
     /// Whether the active tab is associated with a request in a collection.
     /// Saved requests use a filled bookmark in the request bar.
     is_saved_request: bool,
+    /// App-wide transfer settings shared with the Settings dialog.
+    settings: Arc<RwLock<crate::types::AppSettings>>,
 }
 
 impl RequestEditor {
@@ -150,7 +157,11 @@ impl RequestEditor {
         });
     }
 
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        settings: Arc<RwLock<crate::types::AppSettings>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let url_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://api.github.com/zen"));
 
@@ -192,6 +203,7 @@ impl RequestEditor {
             _row_subscriptions: vec![],
             env_vars: std::collections::HashMap::new(),
             is_saved_request: false,
+            settings,
         };
 
         // Subscribe to URL input changes: a pasted `curl …` command imports the
@@ -1157,6 +1169,28 @@ impl RequestEditor {
         self.send(window, cx);
     }
 
+    /// Ask for a destination before starting the request. The file picker runs
+    /// before networking begins so `start_download` can stream every decoded
+    /// chunk directly there instead of first filling the response viewer.
+    fn prompt_download_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab_is_loading() {
+            return;
+        }
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&dir, Some("response.bin"));
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(path))) = picker.await {
+                this.update_in(cx, |this, window, cx| {
+                    this.send_with_destination(Some(path), window, cx);
+                })?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
     /// Focus the URL input and select all of its text. Public so the ctrl-l
     /// action can trigger it from PoopmanApp.
     ///
@@ -1173,6 +1207,18 @@ impl RequestEditor {
     /// it from PoopmanApp; no-op while a request is already in flight (the
     /// button is swapped to Cancel then, but the keyboard path isn't).
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_with_destination(None, window, cx);
+    }
+
+    /// Send normally, or stream the decoded response into a user-selected
+    /// destination. The latter follows the same request/auth/history path but
+    /// never allocates a full response body for the viewer.
+    fn send_with_destination(
+        &mut self,
+        destination: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_tab_is_loading() {
             return;
         }
@@ -1302,9 +1348,17 @@ impl RequestEditor {
         // Spawn the HTTP work onto the tokio runtime *now* so we can hold an
         // abort handle; the gpui task below only awaits the outcome.
         let start = std::time::Instant::now();
-        let client = crate::http_client::HttpClient::new();
+        let settings = self
+            .settings
+            .read()
+            .expect("settings lock poisoned")
+            .clone();
+        let client = crate::http_client::HttpClient::new(settings);
         let wire_headers = crate::types::effective_wire_headers(&headers, &resolved_auth);
-        let inflight = client.start_send(method, url, wire_headers, body);
+        let inflight = match destination {
+            Some(destination) => client.start_download(method, url, wire_headers, body, destination),
+            None => client.start_send(method, url, wire_headers, body),
+        };
         self.in_flight.insert(
             tab_id,
             InFlightRequest {
@@ -1334,7 +1388,8 @@ impl RequestEditor {
                     // Transport errors can embed the fully-resolved URL. Never
                     // copy them into logs or the response viewer because that
                     // URL may contain environment-backed credentials.
-                    let error_message = "Request failed".to_string();
+                    let error_message = crate::http_client::actionable_error_message(&e)
+                        .unwrap_or_else(|| "Request failed".to_string());
                     log::error!("{}", error_message);
 
                     let error_response = ResponseData {
@@ -1343,6 +1398,8 @@ impl RequestEditor {
                         headers: vec![],
                         body: error_message.into_bytes(),
                         is_text: true,
+                        downloaded_to: None,
+                        downloaded_bytes: None,
                     };
 
                     this.update(cx, |this, cx| {
@@ -1375,7 +1432,13 @@ impl RequestEditor {
                 duration.as_millis()
             );
 
-            let is_text = crate::types::is_text_response(&response.headers, &response.body);
+            let downloaded_to = response
+                .downloaded_to
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+            let downloaded_bytes = response.downloaded_bytes;
+            let is_text = downloaded_to.is_none()
+                && crate::types::is_text_response(&response.headers, &response.body);
             log::debug!(
                 "Response body size: {} bytes (text={})",
                 response.body.len(),
@@ -1388,6 +1451,8 @@ impl RequestEditor {
                 headers: response.headers,
                 body: response.body,
                 is_text,
+                downloaded_to,
+                downloaded_bytes,
             };
 
             this.update(cx, |this, cx| {
@@ -1499,11 +1564,30 @@ impl Render for RequestEditor {
                                     .danger()
                                     .label("Cancel")
                                     .on_click(cx.listener(Self::cancel_request))
+                                    .into_any_element()
                             } else {
-                                Button::new("send-btn")
-                                    .primary()
-                                    .label("Send")
-                                    .on_click(cx.listener(Self::send_request))
+                                {
+                                    let editor = cx.entity();
+                                    DropdownButton::new("send-split-btn")
+                                        .primary()
+                                        .button(
+                                            Button::new("send-btn")
+                                                .label("Send")
+                                                .on_click(cx.listener(Self::send_request)),
+                                        )
+                                        .dropdown_menu(move |menu, _window, _cx| {
+                                            let editor = editor.clone();
+                                            menu.item(
+                                                PopupMenuItem::new("Download response…")
+                                                    .on_click(move |_, window, cx| {
+                                                        editor.update(cx, |editor, cx| {
+                                                            editor.prompt_download_destination(window, cx);
+                                                        });
+                                                    }),
+                                            )
+                                        })
+                                        .into_any_element()
+                                }
                             }),
                         ),
                 )

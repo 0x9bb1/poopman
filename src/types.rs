@@ -2,6 +2,75 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Limits and transfer behavior applied to every newly started HTTP request.
+///
+/// These values deliberately live outside individual requests: they are client
+/// safeguards, not data that should be saved into a collection or history item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppSettings {
+    /// Maximum time allowed to establish a TCP/TLS connection.
+    pub connect_timeout_ms: u64,
+    /// Maximum period with no response-body bytes arriving.
+    pub read_timeout_ms: u64,
+    /// Wall-clock limit for the complete request, including the response body.
+    pub total_timeout_ms: u64,
+    /// Maximum decoded bytes retained for display in the response viewer.
+    pub max_response_size_bytes: u64,
+}
+
+impl AppSettings {
+    pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
+    pub const DEFAULT_READ_TIMEOUT_MS: u64 = 30_000;
+    pub const DEFAULT_TOTAL_TIMEOUT_MS: u64 = 60_000;
+    pub const DEFAULT_MAX_RESPONSE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
+
+    const MAX_TIMEOUT_MS: u64 = 3_600_000;
+    const MIN_RESPONSE_SIZE_BYTES: u64 = 1_024;
+    const MAX_RESPONSE_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+    /// Protect startup from a malformed or hand-edited persisted value. The UI
+    /// performs the same validation before allowing a change to take effect.
+    pub fn normalized(mut self) -> Self {
+        self.connect_timeout_ms = Self::valid_timeout(
+            self.connect_timeout_ms,
+            Self::DEFAULT_CONNECT_TIMEOUT_MS,
+        );
+        self.read_timeout_ms =
+            Self::valid_timeout(self.read_timeout_ms, Self::DEFAULT_READ_TIMEOUT_MS);
+        self.total_timeout_ms =
+            Self::valid_timeout(self.total_timeout_ms, Self::DEFAULT_TOTAL_TIMEOUT_MS);
+        if !(Self::MIN_RESPONSE_SIZE_BYTES..=Self::MAX_RESPONSE_SIZE_BYTES)
+            .contains(&self.max_response_size_bytes)
+        {
+            self.max_response_size_bytes = Self::DEFAULT_MAX_RESPONSE_SIZE_BYTES;
+        }
+        self
+    }
+
+    fn valid_timeout(value: u64, fallback: u64) -> u64 {
+        if (1..=Self::MAX_TIMEOUT_MS).contains(&value) {
+            value
+        } else {
+            fallback
+        }
+    }
+
+    pub fn response_limit_mebibytes(&self) -> u64 {
+        self.max_response_size_bytes.div_ceil(1024 * 1024)
+    }
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            connect_timeout_ms: Self::DEFAULT_CONNECT_TIMEOUT_MS,
+            read_timeout_ms: Self::DEFAULT_READ_TIMEOUT_MS,
+            total_timeout_ms: Self::DEFAULT_TOTAL_TIMEOUT_MS,
+            max_response_size_bytes: Self::DEFAULT_MAX_RESPONSE_SIZE_BYTES,
+        }
+    }
+}
+
 /// Header type for distinguishing predefined vs custom headers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeaderType {
@@ -456,6 +525,13 @@ pub struct ResponseData {
     pub body: Vec<u8>,
     /// Whether the body should be shown as text (vs treated as binary).
     pub is_text: bool,
+    /// Destination selected for a streamed download. Such responses never keep
+    /// their full body in memory.
+    #[serde(default)]
+    pub downloaded_to: Option<String>,
+    /// Number of decoded bytes written by a streamed download.
+    #[serde(default)]
+    pub downloaded_bytes: Option<u64>,
 }
 
 /// Decide whether a response body should be shown as text.
