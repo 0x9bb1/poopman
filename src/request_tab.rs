@@ -236,6 +236,8 @@ mod tests {
             headers: vec![],
             body: vec![],
             is_text: true,
+            downloaded_to: None,
+            downloaded_bytes: None,
         }));
         assert!(!tab.is_blank());
     }
@@ -257,6 +259,8 @@ mod tests {
             headers: vec![],
             body: status.to_string().into_bytes(),
             is_text: true,
+            downloaded_to: None,
+            downloaded_bytes: None,
         })
     }
 

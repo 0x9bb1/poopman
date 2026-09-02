@@ -9,7 +9,7 @@ use gpui_component::{
     select::{Select, SelectState},
     v_flex,
 };
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::code_snippet_panel::CodeSnippetPanel;
 use crate::collections_panel::{
@@ -60,6 +60,7 @@ pub(crate) struct AppInitialState {
     active_environment_id: Option<i64>,
     history: Vec<crate::types::HistoryItem>,
     collections: Vec<crate::types::Collection>,
+    settings: crate::types::AppSettings,
 }
 
 impl AppInitialState {
@@ -69,12 +70,14 @@ impl AppInitialState {
         let active_environment_id = db.get_active_environment_id()?;
         let history = db.load_recent_history(crate::history_panel::HISTORY_LIMIT)?;
         let collections = db.load_collections()?;
+        let settings = db.load_app_settings()?;
         Ok(Self {
             db,
             environments,
             active_environment_id,
             history,
             collections,
+            settings,
         })
     }
 }
@@ -95,6 +98,9 @@ pub struct PoopmanApp {
     /// `track_focus` call in `render`. Moving it back up kills the window controls.
     focus_handle: FocusHandle,
     db: Arc<Database>,
+    /// Shared with the settings panel and request editor. A setting change
+    /// affects the next request immediately, before its async disk write ends.
+    settings: Arc<RwLock<crate::types::AppSettings>>,
     history_panel: Entity<HistoryPanel>,
     collections_panel: Entity<CollectionsPanel>,
     sidebar_view: SidebarView,
@@ -120,11 +126,15 @@ impl PoopmanApp {
             active_environment_id,
             history,
             collections,
+            settings,
         } = initial;
         db.register_ui_thread();
 
+        let settings = Arc::new(RwLock::new(settings));
+
         // Create components
-        let request_editor = cx.new(|cx| RequestEditor::new(window, cx));
+        let request_editor =
+            cx.new(|cx| RequestEditor::new(settings.clone(), window, cx));
         let response_viewer = cx.new(|cx| ResponseViewer::new(window, cx));
         let history_panel = cx.new(|cx| HistoryPanel::new(db.clone(), history, window, cx));
         let collections_panel =
@@ -389,6 +399,7 @@ impl PoopmanApp {
         Self {
             focus_handle,
             db,
+            settings,
             history_panel,
             collections_panel,
             sidebar_view,
@@ -507,6 +518,39 @@ impl PoopmanApp {
                 .bg(theme.popover)
                 .rounded(px(16.))
                 .child(manager.clone())
+        });
+    }
+
+    /// Open the app-wide HTTP General settings. The panel is fresh on each
+    /// open, but edits share an `Arc<RwLock<_>>` with the request editor.
+    pub(crate) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let db = self.db.clone();
+        let settings = self.settings.clone();
+        let panel = cx.new(|cx| crate::settings::SettingsPanel::new(db, settings, window, cx));
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            dialog
+                .title(
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(theme.foreground)
+                                .child("Settings"),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Configure request behavior and response safeguards."),
+                        ),
+                )
+                .w(px(880.))
+                .bg(theme.popover)
+                .rounded(px(16.))
+                .child(panel.clone())
         });
     }
 
@@ -1211,7 +1255,16 @@ impl Render for PoopmanApp {
                             cx.entity(),
                             self.environments.clone(),
                             self.active_environment_id,
-                        )),
+                        ))
+                        .child(
+                            Button::new("open-settings")
+                                .ghost()
+                                .icon(gpui_component::Icon::empty().path("icons/settings.svg"))
+                                .tooltip("Settings")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings(window, cx);
+                                })),
+                        ),
                 ),
             )
             .child(

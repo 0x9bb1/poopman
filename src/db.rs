@@ -19,8 +19,8 @@ use std::sync::{
 use std::thread;
 
 use crate::types::{
-    AuthConfig, BodyType, Collection, CollectionFolder, EnvVar, Environment, HeaderState,
-    HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
+    AppSettings, AuthConfig, BodyType, Collection, CollectionFolder, EnvVar, Environment,
+    HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
 };
 
 /// A unit of work executed on the database's owning thread.
@@ -1138,16 +1138,64 @@ impl Database {
             Ok(())
         })
     }
+
+    /// Load the app-wide HTTP safeguards. Missing or malformed values are
+    /// intentionally non-fatal: an upgrade should always start with safe
+    /// defaults rather than leave the application unusable.
+    pub fn load_app_settings(&self) -> Result<AppSettings> {
+        self.call(|conn| {
+            let value: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM app_meta WHERE key = 'app_settings'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(value
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<AppSettings>(json).ok())
+                .unwrap_or_default()
+                .normalized())
+        })
+    }
+
+    /// Persist all General settings atomically in the existing app metadata
+    /// table. Keeping them in one JSON value makes future settings additions
+    /// backwards-compatible and avoids a schema migration for every field.
+    pub fn save_app_settings(&self, settings: &AppSettings) -> Result<()> {
+        let json = serde_json::to_string(&settings.clone().normalized())?;
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO app_meta (key, value) VALUES ('app_settings', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![json],
+            )?;
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::types::{AuthConfig, AuthType};
+    use crate::types::{AppSettings, AuthConfig, AuthType};
 
     fn mem_db() -> Database {
         Database::new_in_memory()
+    }
+
+    #[test]
+    fn app_settings_round_trip_through_metadata() {
+        let db = mem_db();
+        let settings = AppSettings {
+            connect_timeout_ms: 1_500,
+            read_timeout_ms: 2_500,
+            total_timeout_ms: 3_500,
+            max_response_size_bytes: 12 * 1024 * 1024,
+        };
+        db.save_app_settings(&settings).unwrap();
+        assert_eq!(db.load_app_settings().unwrap(), settings);
     }
 
     #[test]

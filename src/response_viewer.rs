@@ -207,7 +207,7 @@ impl ResponseViewer {
     ) {
         self.canceled = false;
         // Pre-build an inline preview for image responses (binary only).
-        self.preview_image = if response.is_text {
+        self.preview_image = if response.is_text || response.downloaded_to.is_some() {
             None
         } else {
             response
@@ -226,7 +226,10 @@ impl ResponseViewer {
         // Binary responses use their dedicated preview. Text response metadata
         // is visible immediately; its expensive display representation arrives
         // asynchronously or is restored from the prepared-state cache.
-        if response.is_text {
+        if response.downloaded_to.is_some() {
+            // The body deliberately remains empty: Download has already
+            // streamed it to disk without a viewer-sized allocation.
+        } else if response.is_text {
             if let Some(cached) = self.take_cached_body(&response) {
                 #[cfg(feature = "profile")]
                 profiling::scope!("response body cache hit");
@@ -468,7 +471,13 @@ impl ResponseViewer {
                     "Time: {}",
                     crate::format::format_duration_ms(response.duration_ms)
                 )))
-                .when(!response.is_network_error(), |this| {
+                .when_some(response.downloaded_bytes, |this, downloaded_bytes| {
+                    this.child(div().text_sm().child(format!(
+                        "Downloaded: {}",
+                        crate::format::format_size(downloaded_bytes as usize)
+                    )))
+                })
+                .when(response.downloaded_bytes.is_none() && !response.is_network_error(), |this| {
                     this.child(div().text_sm().child(format!(
                         "Size: {}",
                         crate::format::format_size(response.body.len())
@@ -616,6 +625,42 @@ impl Render for ResponseViewer {
                                 ),
                         )
                         .when(self.active_tab == 0, |this| {
+                            if let Some(path) = self
+                                .response
+                                .as_ref()
+                                .and_then(|response| response.downloaded_to.clone())
+                            {
+                                let downloaded_bytes = self
+                                    .response
+                                    .as_ref()
+                                    .and_then(|response| response.downloaded_bytes)
+                                    .unwrap_or(0);
+                                return this.child(
+                                    v_flex()
+                                        .flex_1()
+                                        .w_full()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme.success)
+                                                .child("Download complete"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!(
+                                                    "{} saved to {}",
+                                                    crate::format::format_size(downloaded_bytes as usize),
+                                                    path
+                                                )),
+                                        ),
+                                );
+                            }
                             let resp_is_text = self.response.as_ref().is_none_or(|r| r.is_text);
                             if resp_is_text {
                                 let body_display = self.body_display.clone();
