@@ -95,6 +95,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux x86_64. Build on Ubuntu 22.04 so the dynamically linked
+          # binary has a glibc baseline that works on broadly current distros.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset_name: Poopman-linux-x86_64
+
           # macOS x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
@@ -127,6 +133,22 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libexpat1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -165,6 +187,12 @@ jobs:
           # Cleanup
           rm -rf dmg_contents
 
+      - name: Create archive (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          tar -C target/${{ matrix.target }}/release \
+            -czf ${{ matrix.asset_name }}.tar.gz poopman
+
       - name: Create archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -178,6 +206,13 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}.dmg
+
+      - name: Upload artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}.tar.gz
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
@@ -218,6 +253,7 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
+            artifacts/Poopman-linux-x86_64/Poopman-linux-x86_64.tar.gz
             artifacts/Poopman-macos-x86_64/Poopman-macos-x86_64.dmg
             artifacts/Poopman-macos-aarch64/Poopman-macos-aarch64.dmg
             artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.zip
