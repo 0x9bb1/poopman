@@ -38,6 +38,12 @@ pub fn substitute(input: &str, vars: &HashMap<String, String>) -> String {
     out
 }
 
+/// Resolve URL templates without allowing resolved query delimiters to change
+/// parameter boundaries. Query keys and values are encoded after substitution.
+pub fn substitute_url(input: &str, vars: &HashMap<String, String>) -> String {
+    crate::url_params::resolve_url_for_send(input, |part| substitute(part, vars))
+}
+
 /// Substitute `{{vars}}` in every auth field. `auth_type` is preserved as-is.
 pub fn substitute_auth(auth: &AuthConfig, vars: &HashMap<String, String>) -> AuthConfig {
     AuthConfig {
@@ -82,7 +88,7 @@ pub fn substitute_request(req: &RequestData, vars: &HashMap<String, String>) -> 
 
     RequestData {
         method: req.method,
-        url: substitute(&req.url, vars),
+        url: substitute_url(&req.url, vars),
         headers,
         body,
         auth: substitute_auth(&req.auth, vars),
@@ -160,6 +166,21 @@ mod tests {
             BodyType::Raw { content, .. } => assert_eq!(content, "{\"env\": \"prod\"}"),
             _ => panic!("expected raw body"),
         }
+    }
+
+    #[test]
+    fn substitute_url_encodes_resolved_query_without_moving_fragment() {
+        let out = substitute_url(
+            "{{base_url}}/search?q={{term}}&q=already%20encoded#results",
+            &vars(&[
+                ("base_url", "HTTPS://api.test"),
+                ("term", "a b&c/你好"),
+            ]),
+        );
+        assert_eq!(
+            out,
+            "HTTPS://api.test/search?q=a%20b%26c%2F%E4%BD%A0%E5%A5%BD&q=already%20encoded#results"
+        );
     }
 
     #[test]

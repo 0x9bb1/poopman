@@ -136,7 +136,7 @@ fn parse_url(
             })
             .collect::<Vec<_>>();
         return (
-            crate::url_params::build_url_with_params(base, &query_params),
+            crate::url_params::build_url_with_params(&base, &query_params),
             params,
         );
     }
@@ -848,7 +848,7 @@ mod tests {
                 "request": {
                     "method": "GET",
                     "url": {
-                        "raw": "https://example.test/items?page=1&debug=true",
+                        "raw": "https://example.test/items?page=1&debug=true#results",
                         "query": [
                             {"key":"page", "value":"1"},
                             {"key":"debug", "value":"true", "disabled":true}
@@ -859,14 +859,17 @@ mod tests {
         });
         let result = import_collection(&input.to_string()).unwrap();
         let request = &result.collection.requests[0];
-        assert_eq!(request.request.url, "https://example.test/items?page=1");
+        assert_eq!(
+            request.request.url,
+            "https://example.test/items?page=1#results"
+        );
         assert_eq!(request.params_state.len(), 2);
         assert!(!request.params_state[1].enabled);
         let output: Value =
             serde_json::from_str(&export_collection(&result.collection).unwrap()).unwrap();
         assert_eq!(
             output["item"][0]["request"]["url"]["raw"],
-            "https://example.test/items?page=1"
+            "https://example.test/items?page=1#results"
         );
         assert_eq!(
             output["item"][0]["request"]["url"]["query"][1]["disabled"],
