@@ -8,6 +8,7 @@ use std::{
 };
 use anyhow::Result;
 use futures::StreamExt as _;
+use reqwest::{StatusCode, Url, header::LOCATION};
 use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
 
@@ -15,6 +16,18 @@ use crate::types::{AppSettings, BodyType, FormDataValue, HttpMethod};
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static NEXT_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_REDIRECTS: usize = 10;
+
+/// Request headers reqwest already treats as credentials on cross-origin
+/// redirects. Auth-configured API keys add their dynamic name to this list at
+/// send time.
+const STANDARD_CREDENTIAL_HEADERS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "cookie2",
+    "proxy-authorization",
+    "www-authenticate",
+];
 
 /// A completed HTTP response. Normal sends collect a bounded body on the Tokio
 /// runtime; download sends retain only metadata because their body is streamed
@@ -78,6 +91,36 @@ impl std::fmt::Display for ResponseLimitExceeded {
 
 impl std::error::Error for ResponseLimitExceeded {}
 
+/// A redirect chain exceeded the documented maximum number of hops.
+#[derive(Debug)]
+pub struct RedirectLimitExceeded;
+
+impl std::fmt::Display for RedirectLimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Request stopped after {MAX_REDIRECTS} redirects. Check the server for a redirect loop."
+        )
+    }
+}
+
+impl std::error::Error for RedirectLimitExceeded {}
+
+/// A redirect target used a scheme the native HTTP client will not send to.
+#[derive(Debug)]
+pub struct UnsupportedRedirectScheme;
+
+impl std::fmt::Display for UnsupportedRedirectScheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Redirect blocked because its destination is not HTTP or HTTPS."
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedRedirectScheme {}
+
 /// Return a user-facing error only for errors that we explicitly made safe to
 /// expose. Other transport failures intentionally remain the generic
 /// "Request failed" so resolved URLs and their secrets never leak into UI.
@@ -88,6 +131,16 @@ pub fn actionable_error_message(error: &anyhow::Error) -> Option<String> {
         .or_else(|| {
             error
                 .downcast_ref::<ResponseLimitExceeded>()
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            error
+                .downcast_ref::<RedirectLimitExceeded>()
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            error
+                .downcast_ref::<UnsupportedRedirectScheme>()
                 .map(ToString::to_string)
         })
 }
@@ -130,6 +183,9 @@ impl HttpClient {
             .connect_timeout(Duration::from_millis(settings.connect_timeout_ms))
             .read_timeout(Duration::from_millis(settings.read_timeout_ms))
             .timeout(Duration::from_millis(settings.total_timeout_ms))
+            // Redirects are followed explicitly in `send_request` so an auth
+            // header with an arbitrary name can be removed at an origin boundary.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to initialize HTTP client");
 
@@ -149,14 +205,24 @@ impl HttpClient {
         method: HttpMethod,
         url: String,
         headers: Vec<(String, String)>,
+        auth_header_name: Option<String>,
         body: BodyType,
     ) -> InFlightRequest {
         let client = self.client.clone();
         let max_response_size_bytes = self.settings.max_response_size_bytes;
+        let total_timeout = Duration::from_millis(self.settings.total_timeout_ms);
 
         let handle = runtime().spawn(async move {
-            let response = send_request(client, method, url, headers, body).await?;
-            collect_response(response, max_response_size_bytes).await
+            match tokio::time::timeout(total_timeout, async move {
+                let response =
+                    send_request(client, method, url, headers, auth_header_name, body).await?;
+                collect_response(response, max_response_size_bytes).await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::Error::new(RequestTimedOut)),
+            }
         });
 
         InFlightRequest { handle }
@@ -170,13 +236,23 @@ impl HttpClient {
         method: HttpMethod,
         url: String,
         headers: Vec<(String, String)>,
+        auth_header_name: Option<String>,
         body: BodyType,
         destination: PathBuf,
     ) -> InFlightRequest {
         let client = self.client.clone();
+        let total_timeout = Duration::from_millis(self.settings.total_timeout_ms);
         let handle = runtime().spawn(async move {
-            let response = send_request(client, method, url, headers, body).await?;
-            download_response(response, destination).await
+            match tokio::time::timeout(total_timeout, async move {
+                let response =
+                    send_request(client, method, url, headers, auth_header_name, body).await?;
+                download_response(response, destination).await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::Error::new(RequestTimedOut)),
+            }
         });
         InFlightRequest { handle }
     }
@@ -196,14 +272,60 @@ async fn send_request(
     client: reqwest::Client,
     method: HttpMethod,
     url: String,
-    headers: Vec<(String, String)>,
-    body: BodyType,
+    mut headers: Vec<(String, String)>,
+    auth_header_name: Option<String>,
+    mut body: BodyType,
 ) -> Result<reqwest::Response> {
-    let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes())?;
-    let mut req = client.request(reqwest_method, &url);
+    let mut method = reqwest::Method::from_bytes(method.as_str().as_bytes())?;
+    let mut url = Url::parse(&url)?;
+    let mut redirect_count = 0;
+
+    loop {
+        let response = send_single_request(&client, &method, &url, &headers, &body).await?;
+        let status = response.status();
+        if !is_redirect(status) {
+            return Ok(response);
+        }
+
+        let Some(next_url) = redirect_target(&url, &response) else {
+            // Match normal user-agent behavior for a redirect without a usable
+            // Location header: expose the 3xx response instead of inventing a target.
+            return Ok(response);
+        };
+        if !matches!(next_url.scheme(), "http" | "https") {
+            return Err(anyhow::Error::new(UnsupportedRedirectScheme));
+        }
+        if redirect_count >= MAX_REDIRECTS {
+            return Err(anyhow::Error::new(RedirectLimitExceeded));
+        }
+        redirect_count += 1;
+
+        // Same-origin means an exact scheme/host/effective-port tuple. On any
+        // boundary (including HTTPS -> HTTP), credentials are removed before
+        // constructing the next request and are never reintroduced later.
+        protect_redirect_headers(
+            &mut headers,
+            auth_header_name.as_deref(),
+            &url,
+            &next_url,
+        );
+
+        adjust_redirect_method_and_body(status, &mut method, &mut body, &mut headers);
+        url = next_url;
+    }
+}
+
+async fn send_single_request(
+    client: &reqwest::Client,
+    method: &reqwest::Method,
+    url: &Url,
+    headers: &[(String, String)],
+    body: &BodyType,
+) -> Result<reqwest::Response> {
+    let mut req = client.request(method.clone(), url.clone());
 
     let is_form = matches!(body, BodyType::FormData(_));
-    for (key, value) in &headers {
+    for (key, value) in headers {
         // Never send a manual Content-Length — reqwest computes the correct one
         // from the actual body. A stale predefined value would truncate it.
         if key.eq_ignore_ascii_case("content-length") {
@@ -219,7 +341,7 @@ async fn send_request(
     match body {
         BodyType::None => {}
         BodyType::Raw { content, .. } => {
-            req = req.body(content.into_bytes());
+            req = req.body(content.clone().into_bytes());
         }
         BodyType::FormData(rows) => {
             let mut form = reqwest::multipart::Form::new();
@@ -227,15 +349,15 @@ async fn send_request(
                 if !row.enabled || row.key.is_empty() {
                     continue;
                 }
-                match row.value {
+                match &row.value {
                     FormDataValue::Text(text) => {
-                        form = form.text(row.key, text);
+                        form = form.text(row.key.clone(), text.clone());
                     }
                     FormDataValue::File { path } => {
                         if path.is_empty() {
                             continue;
                         }
-                        form = form.file(row.key, &path).await.map_err(|e| {
+                        form = form.file(row.key.clone(), path).await.map_err(|e| {
                             anyhow::anyhow!("Failed to read file '{}': {}", path, e)
                         })?;
                     }
@@ -246,6 +368,81 @@ async fn send_request(
     }
 
     req.send().await.map_err(classify_reqwest_error)
+}
+
+fn is_redirect(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
+}
+
+fn redirect_target(current: &Url, response: &reqwest::Response) -> Option<Url> {
+    let location = response.headers().get(LOCATION)?.to_str().ok()?;
+    current.join(location).ok()
+}
+
+/// RFC origin tuple used for credential forwarding. Default and explicit
+/// ports compare equal (for example, `https://host` and `https://host:443`).
+fn is_same_origin(previous: &Url, next: &Url) -> bool {
+    previous.scheme() == next.scheme()
+        && previous.host_str() == next.host_str()
+        && previous.port_or_known_default() == next.port_or_known_default()
+}
+
+fn protect_redirect_headers(
+    headers: &mut Vec<(String, String)>,
+    auth_header_name: Option<&str>,
+    previous: &Url,
+    next: &Url,
+) {
+    if is_same_origin(previous, next) {
+        return;
+    }
+
+    headers.retain(|(name, _)| {
+        let is_standard = STANDARD_CREDENTIAL_HEADERS
+            .iter()
+            .any(|sensitive| name.eq_ignore_ascii_case(sensitive));
+        let is_configured_auth =
+            auth_header_name.is_some_and(|auth| name.eq_ignore_ascii_case(auth));
+        !is_standard && !is_configured_auth
+    });
+}
+
+fn adjust_redirect_method_and_body(
+    status: StatusCode,
+    method: &mut reqwest::Method,
+    body: &mut BodyType,
+    headers: &mut Vec<(String, String)>,
+) {
+    let switch_to_get = match status {
+        StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND => *method == reqwest::Method::POST,
+        StatusCode::SEE_OTHER => *method != reqwest::Method::HEAD,
+        _ => false,
+    };
+    let drop_body = switch_to_get || status == StatusCode::SEE_OTHER;
+
+    if switch_to_get {
+        *method = reqwest::Method::GET;
+    }
+    if drop_body {
+        *body = BodyType::None;
+        headers.retain(|(name, _)| {
+            ![
+                "content-type",
+                "content-length",
+                "content-encoding",
+                "transfer-encoding",
+            ]
+            .iter()
+            .any(|payload| name.eq_ignore_ascii_case(payload))
+        });
+    }
 }
 
 fn response_metadata(response: &reqwest::Response) -> (u16, Vec<(String, String)>) {
@@ -386,6 +583,7 @@ mod tests {
     use crate::types::{AppSettings, BodyType, HttpMethod};
     use flate2::{Compression, write::GzEncoder};
     use std::io::{Read as _, Write as _};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     fn test_settings() -> AppSettings {
@@ -402,6 +600,22 @@ mod tests {
             .block_on(fut)
     }
 
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8(request).unwrap()
+    }
+
     #[test]
     fn abort_maps_to_request_canceled_error() {
         // A listener that accepts but never responds: the request hangs
@@ -410,7 +624,7 @@ mod tests {
         let url = format!("http://{}/", listener.local_addr().unwrap());
 
         let client = HttpClient::new(test_settings());
-        let inflight = client.start_send(HttpMethod::GET, url, vec![], BodyType::None);
+        let inflight = client.start_send(HttpMethod::GET, url, vec![], None, BodyType::None);
         inflight.abort_handle().abort();
 
         let err = block_on(inflight.wait()).expect_err("aborted request must fail");
@@ -438,11 +652,153 @@ mod tests {
         });
 
         let client = HttpClient::new(test_settings());
-        let inflight = client.start_send(HttpMethod::GET, url, vec![], BodyType::None);
+        let inflight = client.start_send(HttpMethod::GET, url, vec![], None, BodyType::None);
 
         let response = block_on(inflight.wait()).expect("request should succeed");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"hi");
+    }
+
+    #[test]
+    fn same_origin_redirect_preserves_custom_auth_header() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/start", listener.local_addr().unwrap());
+        let (request_tx, request_rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let _ = read_request(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: /finish\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            request_tx.send(read_request(&mut second)).unwrap();
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                )
+                .unwrap();
+        });
+
+        let inflight = HttpClient::new(test_settings()).start_send(
+            HttpMethod::GET,
+            url,
+            vec![("X-API-Key".into(), "same-origin-secret".into())],
+            Some("X-API-Key".into()),
+            BodyType::None,
+        );
+        let response = block_on(inflight.wait()).expect("same-origin redirect should succeed");
+        let redirected_request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        assert_eq!(response.status, 200);
+        assert!(
+            redirected_request
+                .to_ascii_lowercase()
+                .contains("x-api-key: same-origin-secret")
+        );
+    }
+
+    #[test]
+    fn cross_origin_redirect_removes_custom_and_standard_credentials() {
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_url = format!("http://{}/finish", target.local_addr().unwrap());
+        let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let source_url = format!("http://{}/start", source.local_addr().unwrap());
+        let (request_tx, request_rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            let _ = read_request(&mut stream);
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        std::thread::spawn(move || {
+            let (mut stream, _) = target.accept().unwrap();
+            request_tx.send(read_request(&mut stream)).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                )
+                .unwrap();
+        });
+
+        let inflight = HttpClient::new(test_settings()).start_send(
+            HttpMethod::GET,
+            source_url,
+            vec![
+                ("X-API-Key".into(), "cross-origin-secret".into()),
+                ("Authorization".into(), "Bearer standard-secret".into()),
+                ("X-Trace".into(), "keep-me".into()),
+            ],
+            Some("X-API-Key".into()),
+            BodyType::None,
+        );
+        let response = block_on(inflight.wait()).expect("sanitized redirect should succeed");
+        let redirected_request = request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .to_ascii_lowercase();
+
+        assert_eq!(response.status, 200);
+        assert!(!redirected_request.contains("x-api-key:"));
+        assert!(!redirected_request.contains("authorization:"));
+        assert!(redirected_request.contains("x-trace: keep-me"));
+    }
+
+    #[test]
+    fn https_to_http_redirect_removes_custom_auth_header() {
+        let previous = Url::parse("https://api.example.test:443/start").unwrap();
+        let next = Url::parse("http://api.example.test:443/finish").unwrap();
+        let mut headers = vec![
+            ("X-Custom-Secret".into(), "secret".into()),
+            ("Accept".into(), "application/json".into()),
+        ];
+
+        protect_redirect_headers(&mut headers, Some("X-Custom-Secret"), &previous, &next);
+
+        assert_eq!(headers, vec![("Accept".into(), "application/json".into())]);
+    }
+
+    #[test]
+    fn redirect_limit_has_a_safe_actionable_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/loop", listener.local_addr().unwrap());
+
+        std::thread::spawn(move || {
+            for _ in 0..=MAX_REDIRECTS {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_request(&mut stream);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+        });
+
+        let inflight = HttpClient::new(test_settings()).start_send(
+            HttpMethod::GET,
+            url,
+            vec![],
+            None,
+            BodyType::None,
+        );
+        let error = block_on(inflight.wait()).expect_err("redirect loop should stop");
+
+        assert!(error.downcast_ref::<RedirectLimitExceeded>().is_some());
+        assert_eq!(
+            actionable_error_message(&error).as_deref(),
+            Some("Request stopped after 10 redirects. Check the server for a redirect loop.")
+        );
     }
 
     #[test]
@@ -459,7 +815,13 @@ mod tests {
         let mut settings = test_settings();
         settings.total_timeout_ms = 40;
         settings.read_timeout_ms = 500;
-        let inflight = HttpClient::new(settings).start_send(HttpMethod::GET, url, vec![], BodyType::None);
+        let inflight = HttpClient::new(settings).start_send(
+            HttpMethod::GET,
+            url,
+            vec![],
+            None,
+            BodyType::None,
+        );
         let error = block_on(inflight.wait()).expect_err("stalled request should time out");
         assert!(error.downcast_ref::<RequestTimedOut>().is_some(), "{error:#}");
     }
@@ -482,7 +844,13 @@ mod tests {
         let mut settings = test_settings();
         settings.read_timeout_ms = 40;
         settings.total_timeout_ms = 500;
-        let inflight = HttpClient::new(settings).start_send(HttpMethod::GET, url, vec![], BodyType::None);
+        let inflight = HttpClient::new(settings).start_send(
+            HttpMethod::GET,
+            url,
+            vec![],
+            None,
+            BodyType::None,
+        );
         let error = block_on(inflight.wait()).expect_err("idle body should time out");
         assert!(error.downcast_ref::<RequestTimedOut>().is_some(), "{error:#}");
     }
@@ -508,7 +876,13 @@ mod tests {
 
         let mut settings = test_settings();
         settings.max_response_size_bytes = 1_024;
-        let inflight = HttpClient::new(settings).start_send(HttpMethod::GET, url, vec![], BodyType::None);
+        let inflight = HttpClient::new(settings).start_send(
+            HttpMethod::GET,
+            url,
+            vec![],
+            None,
+            BodyType::None,
+        );
         let error = block_on(inflight.wait()).expect_err("chunked body should exceed limit");
         let limit = error
             .downcast_ref::<ResponseLimitExceeded>()
@@ -543,7 +917,13 @@ mod tests {
 
         let mut settings = test_settings();
         settings.max_response_size_bytes = 1_024;
-        let inflight = HttpClient::new(settings).start_send(HttpMethod::GET, url, vec![], BodyType::None);
+        let inflight = HttpClient::new(settings).start_send(
+            HttpMethod::GET,
+            url,
+            vec![],
+            None,
+            BodyType::None,
+        );
         let error = block_on(inflight.wait()).expect_err("decoded gzip body should exceed limit");
         assert!(error.downcast_ref::<ResponseLimitExceeded>().is_some(), "{error:#}");
     }
@@ -572,6 +952,7 @@ mod tests {
             HttpMethod::GET,
             url,
             vec![],
+            None,
             BodyType::None,
             destination.clone(),
         );
