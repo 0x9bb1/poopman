@@ -8,11 +8,10 @@
 /// Common HTTP request header names offered as completions.
 ///
 /// Byte-sorted and deduplicated — `suggest` returns candidates in table order, so
-/// the table's order *is* the menu's order. The six headers that already own
+/// the table's order *is* the menu's order. The five headers that already own
 /// dedicated rows in the editor (`Cache-Control`, `Content-Type`, `Accept`,
-/// `User-Agent`, `Connection`, `Content-Length`) are deliberately absent: they
-/// cannot be typed into a custom row without sending a duplicate header on the
-/// wire. See `PredefinedHeader` in `types.rs`.
+/// `User-Agent`, `Connection`) are deliberately absent to prevent duplicates.
+/// `Content-Length` is absent because it is owned by the HTTP transport.
 pub const HEADER_NAMES: &[&str] = &[
     "Accept-Charset",
     "Accept-Encoding",
@@ -99,8 +98,8 @@ fn starts_with_ignore_ascii_case(name: &str, prefix: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The names that own dedicated rows in the editor and must never be suggested.
-    const PREDEFINED: &[&str] = &[
+    /// Editor-owned and transport-owned names must never be suggested.
+    const RESERVED: &[&str] = &[
         "Cache-Control",
         "Content-Type",
         "Accept",
@@ -155,7 +154,7 @@ mod tests {
 
     #[test]
     fn predefined_headers_are_never_suggested() {
-        for predefined in PREDEFINED {
+        for predefined in RESERVED {
             assert!(
                 !HEADER_NAMES.contains(predefined),
                 "{predefined} is in the table but owns a dedicated row"

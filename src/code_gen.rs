@@ -88,14 +88,15 @@ fn form_rows(req: &RequestData) -> Vec<&FormDataRow> {
     }
 }
 
-/// Headers to export: non-blank keys, minus Content-Type for form-data
-/// bodies — the UI pins `multipart/form-data; boundary=<auto>` on such
-/// requests, and each target's library must generate its own boundary.
+/// Headers to export: non-blank user-managed keys, minus Content-Type for
+/// form-data bodies. Each target's library owns multipart boundaries and all
+/// targets calculate Content-Length from their final encoded body.
 fn export_headers(req: &RequestData) -> Vec<(&str, &str)> {
     let skip_content_type = matches!(&req.body, BodyType::FormData(_));
     req.headers
         .iter()
         .filter(|(k, _)| !k.trim().is_empty())
+        .filter(|(k, _)| !crate::types::is_transport_owned_header(k))
         .filter(|(k, _)| !(skip_content_type && k.eq_ignore_ascii_case("content-type")))
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect()
@@ -641,6 +642,17 @@ mod tests {
         let out = generate(CodeTarget::Curl, &req);
         assert!(out.contains("Bearer NEW"));
         assert!(!out.contains("Bearer OLD"));
+    }
+
+    #[test]
+    fn every_target_omits_stale_content_length() {
+        let mut req = post_json_req();
+        req.headers.push(("Content-Length".into(), "1".into()));
+
+        for target in CodeTarget::all() {
+            let out = generate(target, &req);
+            assert!(!out.contains("Content-Length"), "generated {target:?}: {out}");
+        }
     }
 
     #[test]

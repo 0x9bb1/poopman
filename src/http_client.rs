@@ -179,15 +179,18 @@ impl HttpClient {
     /// edit affects the next request immediately rather than only after restart.
     pub fn new(settings: AppSettings) -> Self {
         let settings = settings.normalized();
-        let client = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(settings.connect_timeout_ms))
             .read_timeout(Duration::from_millis(settings.read_timeout_ms))
             .timeout(Duration::from_millis(settings.total_timeout_ms))
             // Redirects are followed explicitly in `send_request` so an auth
             // header with an arbitrary name can be removed at an origin boundary.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("Failed to initialize HTTP client");
+            .redirect(reqwest::redirect::Policy::none());
+        // Wire tests must reach their loopback listener directly even when the
+        // developer machine has a system proxy configured.
+        #[cfg(test)]
+        let builder = builder.no_proxy();
+        let client = builder.build().expect("Failed to initialize HTTP client");
 
         Self { client, settings }
     }
@@ -328,7 +331,7 @@ async fn send_single_request(
     for (key, value) in headers {
         // Never send a manual Content-Length — reqwest computes the correct one
         // from the actual body. A stale predefined value would truncate it.
-        if key.eq_ignore_ascii_case("content-length") {
+        if crate::types::is_transport_owned_header(key) {
             continue;
         }
         // For multipart, reqwest owns Content-Type so it includes its boundary.
@@ -580,7 +583,7 @@ fn format_byte_limit(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AppSettings, BodyType, HttpMethod};
+    use crate::types::{AppSettings, BodyType, FormDataRow, HttpMethod, RequestData};
     use flate2::{Compression, write::GzEncoder};
     use std::io::{Read as _, Write as _};
     use std::sync::mpsc;
@@ -614,6 +617,170 @@ mod tests {
             request.extend_from_slice(&chunk[..read]);
         }
         String::from_utf8(request).unwrap()
+    }
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        head: String,
+        body: Vec<u8>,
+    }
+
+    impl CapturedRequest {
+        fn header(&self, expected_name: &str) -> Option<&str> {
+            self.head.lines().skip(1).find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case(expected_name)
+                    .then_some(value.trim())
+            })
+        }
+    }
+
+    fn read_complete_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "connection closed before request headers arrived");
+            request.extend_from_slice(&chunk[..read]);
+        };
+
+        let head = String::from_utf8(request[..header_end].to_vec()).unwrap();
+        let content_length = head
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "connection closed before request body arrived");
+            request.extend_from_slice(&chunk[..read]);
+        }
+
+        CapturedRequest {
+            head,
+            body: request[header_end..header_end + content_length].to_vec(),
+        }
+    }
+
+    fn capture_request(
+        method: HttpMethod,
+        headers: Vec<(String, String)>,
+        body: BodyType,
+    ) -> CapturedRequest {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (request_tx, request_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            request_tx.send(read_complete_request(&mut stream)).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+
+        let inflight =
+            HttpClient::new(test_settings()).start_send(method, url, headers, None, body);
+        block_on(inflight.wait()).expect("captured request should succeed");
+        request_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+    }
+
+    #[test]
+    fn variable_backed_unicode_body_gets_its_real_byte_length() {
+        let unresolved = RequestData {
+            method: HttpMethod::POST,
+            url: "https://unused.test".into(),
+            headers: vec![("Content-Length".into(), "1".into())],
+            body: BodyType::Raw {
+                content: "{{message}}".into(),
+                subtype: crate::types::RawSubtype::Text,
+            },
+            auth: crate::types::AuthConfig::default(),
+        };
+        let env =
+            std::collections::HashMap::from([("message".to_string(), "你好，Poopman".to_string())]);
+        let resolved = crate::variables::substitute_request(&unresolved, &env);
+        let expected_body = match &resolved.body {
+            BodyType::Raw { content, .. } => content.as_bytes(),
+            _ => unreachable!(),
+        };
+        let captured = capture_request(
+            resolved.method,
+            crate::types::effective_wire_headers(&resolved.headers, &resolved.auth),
+            resolved.body.clone(),
+        );
+
+        assert_eq!(captured.body, expected_body);
+        assert_eq!(
+            captured
+                .header("Content-Length")
+                .and_then(|value| value.parse::<usize>().ok()),
+            Some(expected_body.len())
+        );
+    }
+
+    #[test]
+    fn empty_body_has_no_injected_editor_headers() {
+        let captured = capture_request(
+            HttpMethod::POST,
+            vec![("Content-Length".into(), "999".into())],
+            BodyType::None,
+        );
+
+        assert!(captured.body.is_empty());
+        if let Some(length) = captured.header("Content-Length") {
+            assert_eq!(length, "0");
+        }
+        // reqwest 0.13 owns its own `Accept: */*` transport default. The
+        // application-level defaults that used to come from editor rows must
+        // not leak onto an otherwise headerless request.
+        for name in ["Cache-Control", "Content-Type", "User-Agent", "Connection"] {
+            assert_eq!(captured.header(name), None, "unexpected {name} header");
+        }
+    }
+
+    #[test]
+    fn multipart_boundary_and_length_are_generated_from_encoded_body() {
+        let captured = capture_request(
+            HttpMethod::POST,
+            vec![
+                ("Content-Length".into(), "0".into()),
+                (
+                    "Content-Type".into(),
+                    "multipart/form-data; boundary=<auto>".into(),
+                ),
+            ],
+            BodyType::FormData(vec![
+                FormDataRow {
+                    enabled: true,
+                    key: "message".into(),
+                    value: FormDataValue::Text("你好".into()),
+                },
+                FormDataRow {
+                    enabled: false,
+                    key: "ignored".into(),
+                    value: FormDataValue::Text("not-on-wire".into()),
+                },
+            ]),
+        );
+
+        let content_type = captured.header("Content-Type").unwrap();
+        assert!(content_type.starts_with("multipart/form-data; boundary="));
+        assert!(!content_type.contains("<auto>"));
+        assert_eq!(
+            captured.header("Content-Length").unwrap(),
+            captured.body.len().to_string()
+        );
+        let body = String::from_utf8(captured.body).unwrap();
+        assert!(body.contains("name=\"message\""));
+        assert!(body.contains("你好"));
+        assert!(!body.contains("not-on-wire"));
     }
 
     #[test]

@@ -9,7 +9,10 @@
 
 use std::fmt;
 
-use crate::types::{AuthConfig, AuthType, BodyType, FormDataRow, FormDataValue, HttpMethod, RawSubtype, RequestData};
+use crate::types::{
+    AuthConfig, AuthType, BodyType, FormDataRow, FormDataValue, HttpMethod, RawSubtype,
+    RequestData, is_transport_owned_header,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CurlImportError {
@@ -233,7 +236,9 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
                     expected: "a `Name: value` header",
                 });
             }
-            headers.push((k.trim().to_string(), val.trim().to_string()));
+            if !is_transport_owned_header(k.trim()) {
+                headers.push((k.trim().to_string(), val.trim().to_string()));
+            }
         } else if matches_flag(&tok, "", "--data-raw")
             || matches_flag(&tok, "", "--data-binary")
             || matches_flag(&tok, "", "--data-urlencode")
@@ -406,6 +411,17 @@ mod tests {
         assert_eq!(
             r.headers,
             vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+        );
+    }
+
+    #[test]
+    fn content_length_is_not_imported() {
+        let r = parse(
+            "curl -H 'Content-Length: 1' -H 'X-Trace: kept' -d '你好' https://example.com",
+        );
+        assert_eq!(
+            r.headers,
+            vec![("X-Trace".to_string(), "kept".to_string())]
         );
     }
 
