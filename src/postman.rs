@@ -224,6 +224,9 @@ fn parse_headers(
             warning(warnings, item_path, "header without a key was ignored");
             continue;
         }
+        if crate::types::is_transport_owned_header(&key) {
+            continue;
+        }
         let enabled = !bool_entry(item, "disabled");
         let state = HeaderState {
             enabled,
@@ -587,7 +590,7 @@ fn export_headers(saved: &SavedRequest) -> Vec<Value> {
         return saved
             .headers_state
             .iter()
-            .filter(|header| !header.key.trim().is_empty())
+            .filter(|header| !header.key.trim().is_empty() && !header.is_transport_owned())
             .map(|header| {
                 json!({
                     "key": header.key,
@@ -601,7 +604,7 @@ fn export_headers(saved: &SavedRequest) -> Vec<Value> {
         .request
         .headers
         .iter()
-        .filter(|(key, _)| !key.trim().is_empty())
+        .filter(|(key, _)| !key.trim().is_empty() && !crate::types::is_transport_owned_header(key))
         .map(|(key, value)| json!({ "key": key, "value": value }))
         .collect()
 }
@@ -790,6 +793,38 @@ mod tests {
         assert!(!request.headers_state[1].enabled);
         assert!(!request.params_state[1].enabled);
         assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn import_and_export_strip_content_length() {
+        let input = json!({
+            "info": {"name":"Headers", "schema": V21_SCHEMA},
+            "item": [{
+                "name": "request",
+                "request": {
+                    "method": "POST",
+                    "url": "https://example.test",
+                    "header": [
+                        {"key":"Content-Length", "value":"1"},
+                        {"key":"X-Trace", "value":"kept", "disabled":true}
+                    ],
+                    "body": {"mode":"raw", "raw":"你好"}
+                }
+            }]
+        });
+
+        let imported = import_collection(&input.to_string()).unwrap();
+        let saved = &imported.collection.requests[0];
+        assert!(saved.request.headers.is_empty());
+        assert_eq!(saved.headers_state.len(), 1);
+        assert_eq!(saved.headers_state[0].key, "X-Trace");
+        assert!(!saved.headers_state[0].enabled);
+
+        let exported: Value =
+            serde_json::from_str(&export_collection(&imported.collection).unwrap()).unwrap();
+        let headers = exported["item"][0]["request"]["header"].as_array().unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0]["key"], "X-Trace");
     }
 
     #[test]

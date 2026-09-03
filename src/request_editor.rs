@@ -237,7 +237,7 @@ impl RequestEditor {
         editor._subscriptions.push(url_sub);
         editor._subscriptions.push(body_sub);
 
-        // Initialize with predefined headers
+        // Match Postman's new-request behavior: predefined rows start enabled.
         editor.init_predefined_headers(window, cx);
 
         // Add initial empty custom header row with subscription
@@ -278,9 +278,9 @@ impl RequestEditor {
         self.in_flight.contains_key(&self.active_request_tab_id)
     }
 
-    /// Initialize all predefined headers
+    /// Initialize user-editable predefined headers in Postman-style enabled state.
     fn init_predefined_headers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for predefined in PredefinedHeader::all() {
+        for predefined in PredefinedHeader::editable() {
             let header_type = predefined.header_type();
 
             let key_input = cx.new(|cx| {
@@ -296,7 +296,7 @@ impl RequestEditor {
             });
 
             self.headers.push(HeaderRow {
-                enabled: true, // All predefined headers are enabled by default
+                enabled: true,
                 key_input,
                 value_input,
                 header_type,
@@ -362,14 +362,18 @@ impl RequestEditor {
         // Clear params to force rebuild with fresh subscriptions.
         self.params.clear();
 
-        // First, add all predefined headers
+        // First, add every user-editable predefined header.
         self.init_predefined_headers(window, cx);
 
-        // Then, update predefined headers or add custom headers from the loaded request
+        // Then, overlay values explicitly present in the loaded request.
+        let editable_predefined = PredefinedHeader::editable();
         for (key, value) in &request.headers {
+            if crate::types::is_transport_owned_header(key) {
+                continue;
+            }
+
             // Check if this matches a predefined header
-            let all_predefined = PredefinedHeader::all();
-            let predefined_match = all_predefined
+            let predefined_match = editable_predefined
                 .iter()
                 .find(|p| p.name().eq_ignore_ascii_case(key));
 
@@ -462,6 +466,10 @@ impl RequestEditor {
                 let key = header_row.key_input.read(cx).value().to_string();
                 let value = header_row.value_input.read(cx).value().to_string();
 
+                if crate::types::is_transport_owned_header(&key) {
+                    continue;
+                }
+
                 // Skip empty custom headers (the placeholder row)
                 if !key.is_empty() || !matches!(header_row.header_type, HeaderType::Custom) {
                     headers.push((key, value));
@@ -512,16 +520,21 @@ impl RequestEditor {
     pub fn get_headers_state(&self, cx: &App) -> Vec<crate::types::HeaderState> {
         self.headers
             .iter()
-            .map(|header_row| {
+            .filter_map(|header_row| {
                 let key = header_row.key_input.read(cx).value().to_string();
+                if header_row.predefined == Some(PredefinedHeader::ContentLength)
+                    || crate::types::is_transport_owned_header(&key)
+                {
+                    return None;
+                }
                 let value = header_row.value_input.read(cx).value().to_string();
-                crate::types::HeaderState {
+                Some(crate::types::HeaderState {
                     enabled: header_row.enabled,
                     key,
                     value,
                     header_type: header_row.header_type,
                     predefined: header_row.predefined,
-                }
+                })
             })
             .collect()
     }
@@ -586,60 +599,77 @@ impl RequestEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Clear existing headers and subscriptions
+        // Begin from the complete Postman-style predefined set. Older saved/imported
+        // states may contain only the rows that appeared in the source request.
         self.headers.clear();
+        self.init_predefined_headers(window, cx);
 
-        // Rebuild headers from saved state
+        // Apply saved state on top, normalizing predefined rows and dropping
+        // legacy Content-Length values.
+        let editable_predefined = PredefinedHeader::editable();
         for header_state in state {
-            // Predefined rows render their key field disabled, so only custom rows
-            // get the typeahead.
-            let key_input = if matches!(header_state.header_type, HeaderType::Custom) {
-                custom_header_key_input(&header_state.key, window, cx)
-            } else {
-                cx.new(|cx| {
-                    let mut input = InputState::new(window, cx);
-                    input.set_value(&header_state.key, window, cx);
-                    input
-                })
-            };
+            if header_state.is_transport_owned() {
+                continue;
+            }
+
+            let predefined = header_state
+                .predefined
+                .filter(|predefined| editable_predefined.contains(predefined))
+                .or_else(|| {
+                    editable_predefined.iter().copied().find(|predefined| {
+                        predefined.name().eq_ignore_ascii_case(&header_state.key)
+                    })
+                });
+
+            if let Some(predefined) = predefined {
+                if let Some(header) = self
+                    .headers
+                    .iter_mut()
+                    .find(|header| header.predefined == Some(predefined))
+                {
+                    header.enabled = header_state.enabled;
+                    header.header_type = predefined.header_type();
+                    header.value_input.update(cx, |input, cx| {
+                        input.set_value(&header_state.value, window, cx);
+                    });
+                }
+                continue;
+            }
 
             let header_row = HeaderRow {
                 enabled: header_state.enabled,
-                key_input,
+                key_input: custom_header_key_input(&header_state.key, window, cx),
                 value_input: cx.new(|cx| {
                     let mut input = InputState::new(window, cx);
                     input.set_value(&header_state.value, window, cx);
                     input
                 }),
-                header_type: header_state.header_type,
-                predefined: header_state.predefined,
+                header_type: HeaderType::Custom,
+                predefined: None,
                 last_key_len: header_state.key.chars().count(),
             };
 
-            // Subscribe to key input change if it's a custom header
-            if matches!(header_state.header_type, HeaderType::Custom) {
-                let key_input = header_row.key_input.clone();
-                let key_input_for_closure = key_input.clone();
-                let sub = cx.subscribe_in(
-                    &key_input,
-                    window,
-                    move |this, emitter, _event: &InputEvent, window, cx| {
-                        this.maybe_advance_after_completion(emitter, window, cx);
+            let key_input = header_row.key_input.clone();
+            let key_input_for_closure = key_input.clone();
+            let sub = cx.subscribe_in(
+                &key_input,
+                window,
+                move |this, emitter, _event: &InputEvent, window, cx| {
+                    this.maybe_advance_after_completion(emitter, window, cx);
 
-                        if let Some(last) = this.headers.last() {
-                            let has_key = !last.key_input.read(cx).value().is_empty();
-                            if has_key
-                                && matches!(last.header_type, HeaderType::Custom)
-                                && this.headers.last().map(|h| Entity::entity_id(&h.key_input))
-                                    == Some(Entity::entity_id(&key_input_for_closure))
-                            {
-                                this.add_custom_header_row(window, cx);
-                            }
+                    if let Some(last) = this.headers.last() {
+                        let has_key = !last.key_input.read(cx).value().is_empty();
+                        if has_key
+                            && matches!(last.header_type, HeaderType::Custom)
+                            && this.headers.last().map(|h| Entity::entity_id(&h.key_input))
+                                == Some(Entity::entity_id(&key_input_for_closure))
+                        {
+                            this.add_custom_header_row(window, cx);
                         }
-                    },
-                );
-                self._row_subscriptions.push(sub);
-            }
+                    }
+                },
+            );
+            self._row_subscriptions.push(sub);
 
             self.headers.push(header_row);
         }
@@ -810,23 +840,6 @@ impl RequestEditor {
             }
 
             cx.notify();
-        }
-    }
-
-    /// Update Content-Length header with calculated value from body
-    fn update_content_length(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let content_length = self.body_editor.read(cx).calculate_length(cx).to_string();
-
-        // Find Content-Length header and update it
-        for header in &mut self.headers {
-            if let Some(predefined) = header.predefined
-                && matches!(predefined, PredefinedHeader::ContentLength)
-            {
-                header.value_input.update(cx, |input, cx| {
-                    input.set_value(&content_length, window, cx);
-                });
-                break;
-            }
         }
     }
 
@@ -1245,8 +1258,6 @@ impl RequestEditor {
 
         log::debug!("Sending request");
 
-        // Update Content-Length before sending
-        self.update_content_length(window, cx);
         let editor_request_snapshot = self.get_current_request_data(cx);
         let history_request_snapshot = editor_request_snapshot.history_snapshot();
 
@@ -1278,7 +1289,10 @@ impl RequestEditor {
             if header.enabled {
                 let key = header.key_input.read(cx).value().to_string();
                 let value = header.value_input.read(cx).value().to_string();
-                if !key.is_empty() && !value.is_empty() {
+                if !crate::types::is_transport_owned_header(&key)
+                    && !key.is_empty()
+                    && !value.is_empty()
+                {
                     headers.push((key, value));
                 }
             }
@@ -1686,7 +1700,6 @@ impl Render for RequestEditor {
                                             let is_mandatory = matches!(header.header_type, HeaderType::Mandatory);
                                             let is_predefined = !matches!(header.header_type, HeaderType::Custom);
                                             let is_custom = matches!(header.header_type, HeaderType::Custom);
-                                            let is_auto_calculated = header.predefined.map(|p| p.is_auto_calculated()).unwrap_or(false);
 
                                             div()
                                                 .flex()
@@ -1740,13 +1753,13 @@ impl Render for RequestEditor {
                                                         .child(Input::new(&header.key_input).disabled(is_predefined))
                                                 })
                                                 .child(
-                                                    // Value input - disabled for auto-calculated headers and Content-Type
+                                                    // Content-Type follows the selected body subtype.
                                                     // Delete button embedded as suffix for custom headers
                                                     div()
                                                         .flex_1()
                                                         .child(
                                                             Input::new(&header.value_input)
-                                                                .disabled(is_auto_calculated || header.predefined == Some(PredefinedHeader::ContentType))
+                                                                .disabled(header.predefined == Some(PredefinedHeader::ContentType))
                                                                 .when(is_custom, |input| {
                                                                     input.suffix(
                                                                         Button::new(("delete-header", index))

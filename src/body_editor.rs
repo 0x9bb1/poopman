@@ -370,19 +370,6 @@ impl BodyEditor {
         cx.emit(BodyTypeChanged { content_type });
     }
 
-    /// Calculate body content length
-    pub fn calculate_length(&self, cx: &App) -> usize {
-        match self.body_type_index {
-            0 => 0, // None
-            1 => {
-                // Raw - read from single editor
-                self.raw_body_editor.read(cx).value().len()
-            }
-            2 | 3 => 0, // Form-data and UrlEncoded - approximate
-            _ => 0,
-        }
-    }
-
     // Form-data table methods
     fn add_formdata_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.add_formdata_row_with_value(FormDataRow {

@@ -74,7 +74,8 @@ impl Default for AppSettings {
 /// Header type for distinguishing predefined vs custom headers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeaderType {
-    /// Mandatory header that cannot be disabled or deleted (e.g., Cache-Control)
+    /// Legacy persisted value for headers that could not be disabled.
+    /// New editor rows never use this variant.
     Mandatory,
     /// Predefined header that can be toggled but not deleted
     Predefined,
@@ -112,31 +113,34 @@ impl PredefinedHeader {
             PredefinedHeader::Accept => "*/*",
             PredefinedHeader::UserAgent => "PostmanRuntime/7.48.0",
             PredefinedHeader::Connection => "keep-alive",
-            PredefinedHeader::ContentLength => "0",
+            // Kept only so old serialized `PredefinedHeader` values still decode.
+            // Content-Length is owned by the HTTP transport and has no editor value.
+            PredefinedHeader::ContentLength => "",
         }
-    }
-
-    pub fn is_auto_calculated(&self) -> bool {
-        matches!(self, PredefinedHeader::ContentLength)
     }
 
     pub fn header_type(&self) -> HeaderType {
-        match self {
-            PredefinedHeader::CacheControl => HeaderType::Mandatory,
-            _ => HeaderType::Predefined,
-        }
+        HeaderType::Predefined
     }
 
-    pub fn all() -> Vec<Self> {
+    /// Headers represented by rows in the editor. The `ContentLength` enum
+    /// variant remains for backward-compatible deserialization, but is never
+    /// user-managed.
+    pub fn editable() -> Vec<Self> {
         vec![
             PredefinedHeader::CacheControl,
             PredefinedHeader::ContentType,
             PredefinedHeader::Accept,
             PredefinedHeader::UserAgent,
             PredefinedHeader::Connection,
-            PredefinedHeader::ContentLength,
         ]
     }
+}
+
+/// Metadata calculated by the HTTP transport from the final encoded body.
+/// Matching is case-insensitive because HTTP field names are case-insensitive.
+pub fn is_transport_owned_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-length")
 }
 
 /// HTTP methods supported by the API client.
@@ -470,12 +474,16 @@ pub fn effective_wire_headers(
     let mut out: Vec<(String, String)> = headers
         .iter()
         .filter(|(name, _)| {
-            claimed_header.is_none_or(|claimed| !name.eq_ignore_ascii_case(claimed))
+            !is_transport_owned_header(name)
+                && claimed_header.is_none_or(|claimed| !name.eq_ignore_ascii_case(claimed))
         })
         .cloned()
         .collect();
 
-    if let Some((name, value)) = auth.compute_header() {
+    if let Some((name, value)) = auth
+        .compute_header()
+        .filter(|(name, _)| !is_transport_owned_header(name))
+    {
         out.push((name, value));
     }
     out
@@ -510,8 +518,16 @@ impl RequestData {
     /// Environment substitution happens only on the separate wire request.
     pub fn history_snapshot(&self) -> Self {
         let mut snapshot = self.clone();
+        snapshot.strip_transport_owned_headers();
         snapshot.auth = snapshot.auth.active_only();
         snapshot
+    }
+
+    /// Remove headers whose values must be computed from the final wire body.
+    /// This also sanitizes records created by older versions of Poopman.
+    pub fn strip_transport_owned_headers(&mut self) {
+        self.headers
+            .retain(|(name, _)| !is_transport_owned_header(name));
     }
 }
 
@@ -664,6 +680,13 @@ pub struct HeaderState {
     pub value: String,
     pub header_type: HeaderType,
     pub predefined: Option<PredefinedHeader>,
+}
+
+impl HeaderState {
+    pub fn is_transport_owned(&self) -> bool {
+        self.predefined == Some(PredefinedHeader::ContentLength)
+            || is_transport_owned_header(&self.key)
+    }
 }
 
 /// A request persisted inside a collection. The request payload and the
@@ -854,6 +877,47 @@ mod tests {
     }
 
     #[test]
+    fn content_length_is_transport_owned_and_not_editable() {
+        assert!(is_transport_owned_header("Content-Length"));
+        assert!(is_transport_owned_header("content-length"));
+        assert!(!is_transport_owned_header("Content-Type"));
+        assert_eq!(
+            serde_json::from_str::<PredefinedHeader>("\"ContentLength\"").unwrap(),
+            PredefinedHeader::ContentLength
+        );
+        assert!(!PredefinedHeader::editable().contains(&PredefinedHeader::ContentLength));
+        assert_eq!(
+            PredefinedHeader::CacheControl.header_type(),
+            HeaderType::Predefined
+        );
+    }
+
+    #[test]
+    fn effective_headers_drop_manual_content_length_case_insensitively() {
+        let manual = vec![
+            ("content-length".to_string(), "1".to_string()),
+            ("X-Trace".to_string(), "kept".to_string()),
+        ];
+
+        assert_eq!(
+            effective_wire_headers(&manual, &AuthConfig::default()),
+            vec![("X-Trace".to_string(), "kept".to_string())]
+        );
+    }
+
+    #[test]
+    fn effective_headers_reject_content_length_as_an_api_key_name() {
+        let auth = AuthConfig {
+            auth_type: AuthType::ApiKey,
+            api_key_name: "Content-Length".into(),
+            api_key_value: "999".into(),
+            ..Default::default()
+        };
+
+        assert!(effective_wire_headers(&[], &auth).is_empty());
+    }
+
+    #[test]
     fn effective_headers_appends_auth() {
         let manual = vec![("Accept".to_string(), "*/*".to_string())];
         let auth = AuthConfig {
@@ -997,6 +1061,20 @@ mod tests {
         };
 
         assert_eq!(request.history_snapshot().auth, AuthConfig::default());
+    }
+
+    #[test]
+    fn history_snapshot_drops_stale_content_length() {
+        let mut request = RequestData::new(HttpMethod::POST, "https://api.test".into());
+        request.headers = vec![
+            ("Content-Length".into(), "0".into()),
+            ("X-Trace".into(), "kept".into()),
+        ];
+
+        assert_eq!(
+            request.history_snapshot().headers,
+            vec![("X-Trace".into(), "kept".into())]
+        );
     }
 
     #[test]

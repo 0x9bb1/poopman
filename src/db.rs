@@ -39,7 +39,9 @@ fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let request_body: String = row.get(5)?;
     let request_auth: Option<String> = row.get(6)?;
 
-    let headers: Vec<(String, String)> = serde_json::from_str(&request_headers).unwrap_or_default();
+    let mut headers: Vec<(String, String)> =
+        serde_json::from_str(&request_headers).unwrap_or_default();
+    headers.retain(|(name, _)| !crate::types::is_transport_owned_header(name));
     let body: BodyType = serde_json::from_str(&request_body).unwrap_or_default();
     let auth: crate::types::AuthConfig = request_auth
         .as_deref()
@@ -89,14 +91,19 @@ struct SavedRequestRow {
 }
 
 fn decode_saved_request(row: SavedRequestRow) -> Result<SavedRequest> {
+    let mut request: RequestData = serde_json::from_str(&row.request_json)?;
+    request.strip_transport_owned_headers();
+    let mut headers_state = serde_json::from_str::<Vec<HeaderState>>(&row.headers_json)?;
+    headers_state.retain(|header| !header.is_transport_owned());
+
     Ok(SavedRequest {
         id: row.id,
         collection_id: row.collection_id,
         folder_id: row.folder_id,
         name: row.name,
-        request: serde_json::from_str(&row.request_json)?,
+        request,
         params_state: serde_json::from_str::<Vec<ParamState>>(&row.params_json)?,
-        headers_state: serde_json::from_str::<Vec<HeaderState>>(&row.headers_json)?,
+        headers_state,
         position: row.position,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -226,10 +233,16 @@ fn encode_saved_request(
     params_state: &[ParamState],
     headers_state: &[HeaderState],
 ) -> Result<(String, String, String)> {
+    let mut request = request.clone();
+    request.strip_transport_owned_headers();
+    let headers_state: Vec<&HeaderState> = headers_state
+        .iter()
+        .filter(|header| !header.is_transport_owned())
+        .collect();
     Ok((
-        serde_json::to_string(request)?,
+        serde_json::to_string(&request)?,
         serde_json::to_string(params_state)?,
-        serde_json::to_string(headers_state)?,
+        serde_json::to_string(&headers_state)?,
     ))
 }
 
@@ -547,7 +560,10 @@ impl Database {
     ) -> Result<i64> {
         let method = method.to_string();
         let url = url.to_string();
-        let request_headers = request_headers.to_string();
+        let mut request_headers: Vec<(String, String)> =
+            serde_json::from_str(request_headers).unwrap_or_default();
+        request_headers.retain(|(name, _)| !crate::types::is_transport_owned_header(name));
+        let request_headers = serde_json::to_string(&request_headers).unwrap_or_default();
         // Serialize body type + auth to JSON before crossing the channel.
         let body_json = serde_json::to_string(request_body).unwrap_or_default();
         // Defense in depth: callers should pass a history snapshot, but the DB
@@ -1331,6 +1347,28 @@ mod tests {
     }
 
     #[test]
+    fn history_storage_and_loading_strip_content_length() {
+        let db = mem_db();
+        db.insert_history(
+            "POST",
+            "https://x",
+            r#"[["Content-Length","1"],["X-Trace","kept"]]"#,
+            &BodyType::Raw {
+                content: "你好".into(),
+                subtype: crate::types::RawSubtype::Text,
+            },
+            &AuthConfig::default(),
+        )
+        .unwrap();
+
+        let items = db.load_recent_history(10).unwrap();
+        assert_eq!(
+            items[0].request.headers,
+            vec![("X-Trace".into(), "kept".into())]
+        );
+    }
+
+    #[test]
     fn history_storage_drops_inactive_auth_fields() {
         let db = mem_db();
         let auth = AuthConfig {
@@ -1609,6 +1647,72 @@ mod tests {
         assert_eq!(saved.request, request);
         assert_eq!(saved.params_state, params);
         assert_eq!(saved.headers_state, headers);
+    }
+
+    #[test]
+    fn saved_request_persistence_strips_legacy_content_length() {
+        let db = mem_db();
+        let collection_id = db.create_collection("Demo").unwrap();
+        let (mut request, params, mut headers) =
+            saved_request_fixture("Request", "https://api.test/a");
+        request.headers.push(("content-length".into(), "1".into()));
+        headers.push(HeaderState {
+            enabled: true,
+            key: "Content-Length".into(),
+            value: "1".into(),
+            header_type: crate::types::HeaderType::Predefined,
+            predefined: Some(crate::types::PredefinedHeader::ContentLength),
+        });
+
+        let id = db
+            .insert_saved_request(collection_id, None, "Request", &request, &params, &headers)
+            .unwrap();
+        let saved = db.load_saved_request(id).unwrap().unwrap();
+
+        assert_eq!(
+            saved.request.headers,
+            vec![("X-Enabled".into(), "yes".into())]
+        );
+        assert!(
+            saved
+                .headers_state
+                .iter()
+                .all(|header| !header.is_transport_owned())
+        );
+    }
+
+    #[test]
+    fn decoding_old_saved_rows_strips_synthetic_content_length() {
+        let request = RequestData {
+            method: HttpMethod::POST,
+            url: "https://api.test/a".into(),
+            headers: vec![("Content-Length".into(), "0".into())],
+            body: BodyType::None,
+            auth: AuthConfig::default(),
+        };
+        let headers = vec![HeaderState {
+            enabled: true,
+            key: "Content-Length".into(),
+            value: "0".into(),
+            header_type: crate::types::HeaderType::Mandatory,
+            predefined: Some(crate::types::PredefinedHeader::ContentLength),
+        }];
+        let decoded = decode_saved_request(SavedRequestRow {
+            id: 1,
+            collection_id: 1,
+            folder_id: None,
+            name: "Legacy".into(),
+            request_json: serde_json::to_string(&request).unwrap(),
+            params_json: "[]".into(),
+            headers_json: serde_json::to_string(&headers).unwrap(),
+            position: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap();
+
+        assert!(decoded.request.headers.is_empty());
+        assert!(decoded.headers_state.is_empty());
     }
 
     #[test]
