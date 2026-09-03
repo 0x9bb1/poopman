@@ -1354,10 +1354,18 @@ impl RequestEditor {
             .expect("settings lock poisoned")
             .clone();
         let client = crate::http_client::HttpClient::new(settings);
+        let auth_header_name = resolved_auth.compute_header().map(|(name, _)| name);
         let wire_headers = crate::types::effective_wire_headers(&headers, &resolved_auth);
         let inflight = match destination {
-            Some(destination) => client.start_download(method, url, wire_headers, body, destination),
-            None => client.start_send(method, url, wire_headers, body),
+            Some(destination) => client.start_download(
+                method,
+                url,
+                wire_headers,
+                auth_header_name,
+                body,
+                destination,
+            ),
+            None => client.start_send(method, url, wire_headers, auth_header_name, body),
         };
         self.in_flight.insert(
             tab_id,
