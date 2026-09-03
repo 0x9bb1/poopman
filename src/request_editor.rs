@@ -1009,9 +1009,6 @@ impl RequestEditor {
         // their values out of logs even before a request is sent.
         log::debug!("Rebuilding URL from parameter state");
 
-        // Extract base URL using pure function
-        let base = url_params::extract_base_url(url_str);
-
         // Collect params as QueryParam structs
         let params: Vec<QueryParam> = self
             .params
@@ -1026,7 +1023,7 @@ impl RequestEditor {
             .collect();
 
         // Build URL using pure function
-        let result = url_params::build_url_with_params(base, &params);
+        let result = url_params::build_url_with_params(url_str, &params);
 
         log::debug!("Rebuilt URL from parameter state");
         result
@@ -1236,19 +1233,15 @@ impl RequestEditor {
 
         // Substitute {{env vars}} BEFORE scheme normalization/validation, so a
         // value like "https://host" doesn't get an extra "http://" prefix.
-        url = crate::variables::substitute(&url, &self.env_vars);
+        url = crate::variables::substitute_url(&url, &self.env_vars);
 
-        // Auto-add scheme if missing (like Postman does) - default to http://
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            url = format!("http://{}", url);
-            log::debug!("Auto-added http:// scheme to request URL");
-        }
-
-        // Validate URL format after normalization
-        if url::Url::parse(&url).is_err() {
+        // Scheme detection and normalization are delegated to structured URL
+        // parsing, which correctly accepts case-insensitive HTTP(S) schemes.
+        let Some(parsed_url) = url_params::normalize_http_url(&url) else {
             log::error!("Invalid URL format after normalization");
             return;
-        }
+        };
+        url = parsed_url.into();
 
         log::debug!("Sending request");
 
