@@ -12,6 +12,7 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme as _, IndexPath, Sizable as _, h_flex,
     input::{Input, InputEvent as InputChangeEvent, InputState},
+    scroll::ScrollableElement as _,
     select::{Select, SelectState},
     v_flex,
 };
@@ -21,6 +22,16 @@ use crate::{db::Database, types::AppSettings};
 const MAX_TIMEOUT_MS: u64 = 3_600_000;
 const MIN_RESPONSE_LIMIT_MIB: u64 = 1;
 const MAX_RESPONSE_LIMIT_MIB: u64 = 2_048;
+const MIN_PANEL_HEIGHT: f32 = 320.;
+const MAX_PANEL_HEIGHT: f32 = 550.;
+// Dialog title, padding, and margins consume approximately this much height.
+const DIALOG_CHROME_HEIGHT: f32 = 108.;
+
+fn settings_panel_height(viewport_height: Pixels) -> Pixels {
+    (viewport_height - px(DIALOG_CHROME_HEIGHT))
+        .max(px(MIN_PANEL_HEIGHT))
+        .min(px(MAX_PANEL_HEIGHT))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SaveStatus {
@@ -50,6 +61,7 @@ pub struct SettingsPanel {
     read_timeout: Entity<InputState>,
     total_timeout: Entity<InputState>,
     response_limit: Entity<InputState>,
+    content_scroll_handle: ScrollHandle,
     status: SaveStatus,
     save_generation: u64,
     _subscriptions: Vec<Subscription>,
@@ -93,6 +105,7 @@ impl SettingsPanel {
             read_timeout,
             total_timeout,
             response_limit,
+            content_scroll_handle: ScrollHandle::new(),
             status: SaveStatus::Saved,
             save_generation: 0,
             _subscriptions: vec![],
@@ -212,7 +225,7 @@ impl SettingsPanel {
             .justify_between()
             .gap_6()
             .px_5()
-            .py_4()
+            .py_3()
             .when(top_border, |row| {
                 row.border_t_1().border_color(theme.border)
             })
@@ -267,8 +280,9 @@ fn number_input(
 }
 
 impl Render for SettingsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let panel_height = settings_panel_height(window.viewport_size().height);
         let (status_color, status_text_color) = match self.status {
             SaveStatus::Saved => (theme.success, theme.muted_foreground),
             SaveStatus::Saving => (theme.warning, theme.muted_foreground),
@@ -277,11 +291,13 @@ impl Render for SettingsPanel {
 
         v_flex()
             .w_full()
-            .h(px(550.))
+            .h(panel_height)
+            .min_h_0()
             .gap_3()
             .child(
                 h_flex()
                     .w_full()
+                    .flex_shrink_0()
                     .items_center()
                     .gap_3()
                     .px_1()
@@ -307,8 +323,18 @@ impl Render for SettingsPanel {
                 crate::ui::inset_panel(theme)
                     .flex()
                     .flex_col()
+                    .flex_1()
+                    .min_h_0()
                     .w_full()
                     .child(
+                        v_flex()
+                            .id("settings-general-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .track_scroll(&self.content_scroll_handle)
+                            .overflow_scroll()
+                            .child(
                         div()
                             .px_5()
                             .pt_4()
@@ -324,7 +350,7 @@ impl Render for SettingsPanel {
                             .justify_between()
                             .gap_6()
                             .px_5()
-                            .py_4()
+                            .py_3()
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -355,6 +381,8 @@ impl Render for SettingsPanel {
                         div()
                             .px_5()
                             .pt_3()
+                            .border_t_1()
+                            .border_color(theme.border)
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
@@ -438,10 +466,13 @@ impl Render for SettingsPanel {
                                     ),
                             ),
                     ),
+                    )
+                    .vertical_scrollbar(&self.content_scroll_handle),
             )
             .child(
                 h_flex()
                     .w_full()
+                    .flex_shrink_0()
                     .items_center()
                     .gap_2()
                     .px_1()
@@ -465,11 +496,20 @@ impl Render for SettingsPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_RESPONSE_LIMIT_MIB, MIN_RESPONSE_LIMIT_MIB};
+    use super::{MAX_RESPONSE_LIMIT_MIB, MIN_RESPONSE_LIMIT_MIB, settings_panel_height};
+    use gpui::px;
 
     #[test]
     fn response_limit_bounds_cover_a_useful_range() {
         assert_eq!(MIN_RESPONSE_LIMIT_MIB, 1);
         assert!(MAX_RESPONSE_LIMIT_MIB >= 1_024);
+    }
+
+    #[test]
+    fn settings_panel_height_tracks_compact_viewports_and_caps_on_desktop() {
+        assert_eq!(settings_panel_height(px(1_040.)), px(550.));
+        assert_eq!(settings_panel_height(px(658.)), px(550.));
+        assert_eq!(settings_panel_height(px(480.)), px(372.));
+        assert_eq!(settings_panel_height(px(300.)), px(320.));
     }
 }
