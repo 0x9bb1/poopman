@@ -62,17 +62,14 @@ impl CodeTarget {
     }
 }
 
-/// Raw request body as a string, or `None` for empty/`None`/`FormData` bodies.
-fn raw_body(req: &RequestData) -> Option<String> {
+/// Raw request body as a string, or `None` for `None`/`FormData` bodies.
+///
+/// A selected Raw body is significant even when it is empty or contains only
+/// whitespace: the native send path passes those exact bytes to reqwest.
+fn raw_body(req: &RequestData) -> Option<&str> {
     match &req.body {
         BodyType::None => None,
-        BodyType::Raw { content, .. } => {
-            if content.trim().is_empty() {
-                None
-            } else {
-                Some(content.clone())
-            }
-        }
+        BodyType::Raw { content, .. } => Some(content),
         BodyType::FormData(_) => None,
     }
 }
@@ -142,24 +139,42 @@ fn rust_raw(s: &str) -> String {
     format!("r{h}\"{s}\"{h}")
 }
 
-/// Python triple-quoted string — preserves newlines. Falls back to an escaped
-/// double-quoted string when the body would break the triple-quote.
-fn py_string(s: &str) -> String {
-    if s.contains("\"\"\"") || s.ends_with('"') {
-        format!("\"{}\"", dq(s))
-    } else {
-        format!("\"\"\"{}\"\"\"", s)
+/// A double-quoted string literal accepted by both Python and JavaScript.
+/// Escaping every source-significant character prevents runtime interpretation
+/// of payload backslashes, JavaScript interpolation, and line terminators.
+fn portable_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c if c <= '\u{001f}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            _ => out.push(c),
+        }
     }
+    out.push('"');
+    out
 }
 
-/// JS template literal (backticks) — preserves newlines. Falls back to an escaped
-/// double-quoted string when the body contains a backtick or `${`.
+/// Python expression whose value is the exact original UTF-8 bytes. Passing a
+/// `str` directly to older Requests/urllib3 versions can calculate
+/// Content-Length in characters rather than encoded bytes.
+fn py_string(s: &str) -> String {
+    format!("{}.encode(\"utf-8\")", portable_string(s))
+}
+
+/// JavaScript string literal. Double quotes make backticks and `${...}` plain
+/// payload data rather than executable template-literal syntax.
 fn js_string(s: &str) -> String {
-    if s.contains('`') || s.contains("${") {
-        format!("\"{}\"", dq(s))
-    } else {
-        format!("`{}`", s)
-    }
+    portable_string(s)
 }
 
 /// Final path component of a local file path, tolerating / and \ separators
@@ -826,7 +841,9 @@ mod tests {
     #[test]
     fn python_includes_payload_when_body() {
         let out = generate(CodeTarget::PythonRequests, &post_json_req());
-        assert!(out.contains("payload = \"\"\"{\"name\": \"ada\"}\"\"\""));
+        assert!(out.contains(
+            "payload = \"{\\\"name\\\": \\\"ada\\\"}\".encode(\"utf-8\")"
+        ));
         assert!(out.contains("data=payload"));
     }
 
@@ -835,7 +852,7 @@ mod tests {
         let out = generate(CodeTarget::JavaScriptFetch, &post_json_req());
         assert!(out.contains("myHeaders.append(\"Content-Type\", \"application/json\");"));
         assert!(out.contains("method: \"POST\","));
-        assert!(out.contains("body: `{\"name\": \"ada\"}`,"));
+        assert!(out.contains("body: \"{\\\"name\\\": \\\"ada\\\"}\","));
         assert!(out.contains("fetch(\"https://api.example.com/users\", requestOptions)"));
     }
 
@@ -843,13 +860,11 @@ mod tests {
     fn axios_lowercases_method() {
         let out = generate(CodeTarget::NodeAxios, &post_json_req());
         assert!(out.contains("method: \"post\","));
-        assert!(out.contains("data: `{\"name\": \"ada\"}`,"));
+        assert!(out.contains("data: \"{\\\"name\\\": \\\"ada\\\"}\","));
     }
 
     #[test]
-    fn multiline_body_stays_readable_not_escaped() {
-        // A pretty-printed JSON body must keep real newlines in each language's
-        // idiomatic raw/multi-line string — never literal "\n".
+    fn multiline_body_uses_lossless_literals() {
         let mut req = post_json_req();
         let pretty = "{\n    \"userId\": 2204668,\n    \"salesFlag\": true\n}";
         req.body = BodyType::Raw {
@@ -862,13 +877,163 @@ mod tests {
         assert!(!rust.contains("\\n"));
 
         let py = generate(CodeTarget::PythonRequests, &req);
-        assert!(py.contains(&format!("payload = \"\"\"{}\"\"\"", pretty)));
+        assert!(py.contains("payload = \"{\\n    \\\"userId\\\""));
+        assert!(py.contains(".encode(\"utf-8\")"));
 
         let fetch = generate(CodeTarget::JavaScriptFetch, &req);
-        assert!(fetch.contains(&format!("body: `{}`,", pretty)));
+        assert!(fetch.contains("body: \"{\\n    \\\"userId\\\""));
 
         let go = generate(CodeTarget::GoNetHttp, &req);
         assert!(go.contains(&format!("strings.NewReader(`{}`)", pretty)));
+    }
+
+    #[cfg(not(windows))]
+    fn generated_assignment<'a>(source: &'a str, prefix: &str) -> &'a str {
+        source
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(prefix))
+            .map(|expression| expression.strip_suffix(',').unwrap_or(expression))
+            .unwrap_or_else(|| panic!("missing `{prefix}` assignment in generated code:\n{source}"))
+    }
+
+    #[cfg(not(windows))]
+    fn available_runtime(
+        candidates: &[(&'static str, &'static [&'static str])],
+    ) -> Option<(&'static str, &'static [&'static str])> {
+        candidates.iter().copied().find(|(program, prefix_args)| {
+            std::process::Command::new(program)
+                .args(*prefix_args)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn assert_framed_payloads(mut actual: &[u8], expected: &[&str], runtime: &str) {
+        for (index, body) in expected.iter().enumerate() {
+            assert!(
+                actual.len() >= 8,
+                "{runtime} omitted the length for payload case {index}"
+            );
+            let (length, rest) = actual.split_at(8);
+            let length = u64::from_be_bytes(length.try_into().unwrap()) as usize;
+            assert!(
+                rest.len() >= length,
+                "{runtime} truncated payload case {index}"
+            );
+            let (payload, rest) = rest.split_at(length);
+            assert_eq!(payload, body.as_bytes(), "{runtime} changed {body:?}");
+            actual = rest;
+        }
+        assert!(actual.is_empty(), "{runtime} emitted unexpected trailing bytes");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn evaluated_python_and_javascript_payloads_preserve_exact_utf8() {
+        use std::process::Command;
+
+        let python_runtime = available_runtime(&[("python3", &[])]);
+        let node_runtime = available_runtime(&[("node", &[])]);
+        let cases = [
+            "",
+            " \t\r\n ",
+            r"C:\new\temp",
+            "quotes: \"double\", 'single', and trailing \"",
+            "backtick: ` and interpolation: ${process.exit(99)}",
+            "line one\r\nline two\n",
+            "你好，Poopman 💩",
+            "controls: \0\u{0001}\u{0008}\u{000c}\u{2028}\u{2029}",
+        ];
+        let mut python_expressions = Vec::new();
+        let mut javascript_expressions = Vec::new();
+        let mut javascript_expected = Vec::new();
+
+        for body in cases {
+            let mut req = post_json_req();
+            req.body = BodyType::Raw {
+                content: body.to_string(),
+                subtype: RawSubtype::Text,
+            };
+
+            let python = generate(CodeTarget::PythonRequests, &req);
+            let python_expression = generated_assignment(&python, "payload = ");
+            assert!(
+                python_expression.ends_with(".encode(\"utf-8\")"),
+                "Python payload must be bytes: {python_expression}"
+            );
+            python_expressions.push(python_expression.to_string());
+
+            for (target, prefix) in [
+                (CodeTarget::JavaScriptFetch, "body: "),
+                (CodeTarget::NodeAxios, "data: "),
+            ] {
+                let javascript = generate(target, &req);
+                let javascript_expression = generated_assignment(&javascript, prefix);
+                javascript_expressions.push(javascript_expression.to_string());
+                javascript_expected.push(body);
+            }
+        }
+
+        if let Some((program, prefix_args)) = python_runtime {
+            let mut script = "import sys\nvalues = [\n".to_string();
+            script.push_str(&python_expressions.join(",\n"));
+            script.push_str(
+                "\n]\nfor value in values:\n    assert isinstance(value, bytes)\n    sys.stdout.buffer.write(len(value).to_bytes(8, \"big\"))\n    sys.stdout.buffer.write(value)\n",
+            );
+            let output = Command::new(program)
+                .args(prefix_args)
+                .args(["-c", script.as_str()])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "generated Python expressions failed with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_framed_payloads(&output.stdout, &cases, "Python Requests");
+        }
+
+        if let Some((program, prefix_args)) = node_runtime {
+            let mut script = "const values = [\n".to_string();
+            script.push_str(&javascript_expressions.join(",\n"));
+            script.push_str(
+                "\n];\nfor (const value of values) {\n  const data = Buffer.from(value, \"utf8\");\n  const length = Buffer.alloc(8);\n  length.writeBigUInt64BE(BigInt(data.length));\n  process.stdout.write(length);\n  process.stdout.write(data);\n}\n",
+            );
+            let output = Command::new(program)
+                .args(prefix_args)
+                .args(["-e", script.as_str()])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "generated JavaScript expressions failed with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_framed_payloads(&output.stdout, &javascript_expected, "Fetch/Axios");
+        }
+    }
+
+    #[test]
+    fn selected_raw_body_is_never_discarded_as_blank() {
+        for body in ["", " \t\r\n "] {
+            let mut req = post_json_req();
+            req.body = BodyType::Raw {
+                content: body.to_string(),
+                subtype: RawSubtype::Text,
+            };
+
+            assert_eq!(raw_body(&req), Some(body));
+            assert!(generate(CodeTarget::Curl, &req).contains("--data-raw"));
+            assert!(generate(CodeTarget::RustReqwest, &req).contains(".body("));
+            assert!(generate(CodeTarget::PythonRequests, &req).contains("payload = "));
+            assert!(generate(CodeTarget::JavaScriptFetch, &req).contains("  body: "));
+            assert!(generate(CodeTarget::NodeAxios, &req).contains("  data: "));
+            assert!(generate(CodeTarget::GoNetHttp, &req).contains("strings.NewReader("));
+        }
     }
 
     #[test]
