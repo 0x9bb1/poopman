@@ -56,6 +56,7 @@ enum SidebarView {
 /// stall an already-running UI event loop.
 pub(crate) struct AppInitialState {
     db: Arc<Database>,
+    pub(crate) environment_persistence: crate::environment_persistence::EnvironmentPersistence,
     environments: Vec<crate::types::Environment>,
     active_environment_id: Option<i64>,
     history: Vec<crate::types::HistoryItem>,
@@ -72,6 +73,9 @@ impl AppInitialState {
         let collections = db.load_collections()?;
         let settings = db.load_app_settings()?;
         Ok(Self {
+            environment_persistence: crate::environment_persistence::EnvironmentPersistence::new(
+                db.clone(),
+            ),
             db,
             environments,
             active_environment_id,
@@ -122,6 +126,7 @@ impl PoopmanApp {
     pub fn new(initial: AppInitialState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let AppInitialState {
             db,
+            environment_persistence,
             environments,
             active_environment_id,
             history,
@@ -143,7 +148,7 @@ impl PoopmanApp {
         let manager_environments = environments.clone();
         let env_manager = cx.new(|cx| {
             EnvironmentManager::new(
-                db.clone(),
+                environment_persistence,
                 manager_environments,
                 active_environment_id,
                 window,
@@ -1240,7 +1245,7 @@ impl Render for PoopmanApp {
                 // Brand + Edit menu are grouped in one child so the TitleBar's
                 // justify_between row keeps them together at the left (otherwise
                 // two children get pushed to opposite ends).
-                TitleBar::new().child(
+                TitleBar::new().on_close_window(|_, _, cx| crate::request_quit(cx)).child(
                     h_flex()
                         .items_center()
                         .gap_2()

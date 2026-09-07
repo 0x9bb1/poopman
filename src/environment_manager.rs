@@ -1,7 +1,7 @@
 //! Environment management UI (shown inside a Dialog): create/rename/delete
 //! environments, edit their variables, and choose the active one. All mutations
-//! are written to the DB immediately and an `EnvironmentsChanged` event is emitted
-//! so `PoopmanApp` can reload and refresh the request editor's variable map.
+//! enter one ordered persistence queue and emit an `EnvironmentsChanged` event
+//! so `PoopmanApp` can refresh the request editor's variable map immediately.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -10,16 +10,15 @@ use gpui_component::{
     ActiveTheme as _, Icon, Sizable as _, button::*, checkbox::Checkbox, h_flex, input::*,
     scroll::ScrollableElement as _, v_flex,
 };
-use std::time::Duration;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use crate::db::Database;
+use crate::environment_persistence::EnvironmentPersistence;
 use crate::types::{EnvVar, Environment};
 
 /// Emitted with the manager's current in-memory state. The UI never has to
@@ -32,6 +31,7 @@ pub struct EnvironmentsChanged {
 
 struct VarRow {
     enabled: bool,
+    value_visible: bool,
     key_input: Entity<InputState>,
     value_input: Entity<InputState>,
 }
@@ -166,11 +166,34 @@ fn environment_name_is_valid(name: &str) -> bool {
     !name.trim().is_empty()
 }
 
+struct ActiveSelection {
+    id: Option<i64>,
+    generation: u64,
+}
+
+impl ActiveSelection {
+    fn choose(&mut self, id: Option<i64>) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.id = id;
+        self.generation
+    }
+
+    fn reconcile(&mut self, generation: u64, persisted_id: Option<i64>) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.id = persisted_id;
+        true
+    }
+}
+
 pub struct EnvironmentManager {
-    db: Arc<Database>,
+    persistence: EnvironmentPersistence,
     environments: Vec<Environment>,
-    active_id: Option<i64>,
+    active: ActiveSelection,
     selected_id: Option<i64>,
+    selection_generation: u64,
+    deleting: HashSet<i64>,
     name_input: Entity<InputState>,
     var_rows: Vec<VarRow>,
     env_list_scroll_handle: ScrollHandle,
@@ -188,7 +211,7 @@ impl EventEmitter<EnvironmentsChanged> for EnvironmentManager {}
 
 impl EnvironmentManager {
     pub fn new(
-        db: Arc<Database>,
+        persistence: EnvironmentPersistence,
         environments: Vec<Environment>,
         active_id: Option<i64>,
         window: &mut Window,
@@ -198,10 +221,15 @@ impl EnvironmentManager {
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Environment name"));
 
         let mut this = Self {
-            db,
+            persistence,
             environments,
-            active_id,
+            active: ActiveSelection {
+                id: active_id,
+                generation: 0,
+            },
             selected_id,
+            selection_generation: 0,
+            deleting: HashSet::new(),
             name_input,
             var_rows: vec![],
             env_list_scroll_handle: ScrollHandle::new(),
@@ -247,7 +275,7 @@ impl EnvironmentManager {
     fn changed_event(&self) -> EnvironmentsChanged {
         EnvironmentsChanged {
             environments: self.environments.clone(),
-            active_id: self.active_id,
+            active_id: self.active.id,
         }
     }
 
@@ -294,6 +322,7 @@ impl EnvironmentManager {
         let value = value.to_string();
         VarRow {
             enabled,
+            value_visible: false,
             key_input: cx.new(|cx| {
                 let mut i = InputState::new(window, cx).placeholder("Key");
                 i.set_value(&key, window, cx);
@@ -313,16 +342,26 @@ impl EnvironmentManager {
     }
 
     fn select(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.persistence.is_closing() || self.deleting.contains(&id) {
+            return;
+        }
         // Edits update the in-memory model immediately and persist in the
         // background, so selection never needs a read-back round trip.
         self.selected_id = Some(id);
+        self.selection_generation = self.selection_generation.wrapping_add(1);
         self.load_selected_into_editor(window, cx);
         cx.notify();
     }
 
     fn add_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move { db.create_environment("New Environment") });
+        if self.persistence.is_closing() {
+            return;
+        }
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        let selection_generation = self.selection_generation;
+        let task = self
+            .persistence
+            .submit(None, |db| db.create_environment("New Environment"));
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
                 Ok(id) => {
@@ -332,8 +371,10 @@ impl EnvironmentManager {
                             name: "New Environment".to_string(),
                             variables: Vec::new(),
                         });
-                        this.selected_id = Some(id);
-                        this.load_selected_into_editor(window, cx);
+                        if this.selection_generation == selection_generation {
+                            this.selected_id = Some(id);
+                            this.load_selected_into_editor(window, cx);
+                        }
                         this.save_tracker.set_status(id, SaveStatus::Saved);
                         cx.emit(this.changed_event());
                         cx.notify();
@@ -342,7 +383,9 @@ impl EnvironmentManager {
                 Err(error) => {
                     log::error!("Failed to create environment: {}", error);
                     this.update(cx, |this, cx| {
-                        if let Some(id) = this.selected_id {
+                        if this.selection_generation == selection_generation
+                            && let Some(id) = this.selected_id
+                        {
                             this.save_tracker.set_status(id, SaveStatus::Failed);
                         }
                         cx.notify();
@@ -355,25 +398,28 @@ impl EnvironmentManager {
     }
 
     fn delete_environment(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        self.save_tracker.invalidate(id);
-        let was_active = self.active_id == Some(id);
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move {
-            db.delete_environment(id)?;
-            if was_active {
-                db.set_active_environment_id(None)?;
-            }
-            Ok::<_, anyhow::Error>(())
-        });
+        if self.persistence.is_closing() || !self.deleting.insert(id) {
+            return;
+        }
+        let selection_generation = self.selection_generation;
+        let task = self
+            .persistence
+            .submit(None, move |db| db.delete_environment(id));
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
                 Ok(()) => {
                     this.update_in(cx, |this, window, cx| {
+                        this.deleting.remove(&id);
+                        this.save_tracker.invalidate(id);
                         this.environments.retain(|environment| environment.id != id);
-                        if was_active {
-                            this.active_id = None;
+                        if this.active.id == Some(id) {
+                            this.active.choose(None);
                         }
                         if this.selected_id == Some(id) {
+                            if this.selection_generation == selection_generation {
+                                this.selection_generation =
+                                    this.selection_generation.wrapping_add(1);
+                            }
                             this.selected_id = this.environments.first().map(|env| env.id);
                             this.load_selected_into_editor(window, cx);
                         }
@@ -384,6 +430,8 @@ impl EnvironmentManager {
                 Err(error) => {
                     log::error!("Failed to delete environment: {}", error);
                     this.update(cx, |this, cx| {
+                        this.deleting.remove(&id);
+                        this.save_tracker.invalidate(id);
                         this.save_tracker.set_status(id, SaveStatus::Failed);
                         cx.notify();
                     })?;
@@ -400,19 +448,35 @@ impl EnvironmentManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let previous = self.active_id;
-        self.active_id = id;
+        if self.persistence.is_closing() || id.is_some_and(|id| self.deleting.contains(&id)) {
+            return;
+        }
+        let generation = self.active.choose(id);
         cx.emit(self.changed_event());
         cx.notify();
 
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move { db.set_active_environment_id(id) });
+        let task = self
+            .persistence
+            .submit(None, move |db| db.set_active_environment_id(id));
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = task.await {
                 log::error!("Failed to set active environment: {}", error);
+                // Read the actual persisted choice through the same queue. The
+                // previous optimistic choice may itself have failed to save.
+                let recovery = this.update(cx, |this, _| {
+                    (this.active.generation == generation).then(|| {
+                        this.persistence
+                            .submit(None, |db| db.get_active_environment_id())
+                    })
+                })?;
+                let Some(recovery) = recovery else {
+                    return Ok(());
+                };
+                let persisted_id = recovery.await?;
                 this.update(cx, |this, cx| {
-                    if this.active_id == id {
-                        this.active_id = previous;
+                    let persisted_id =
+                        persisted_id.filter(|id| this.environments.iter().any(|env| env.id == *id));
+                    if this.active.reconcile(generation, persisted_id) {
                         cx.emit(this.changed_event());
                         cx.notify();
                     }
@@ -446,9 +510,16 @@ impl EnvironmentManager {
         Some((id, name, vars))
     }
 
-    /// Update the UI immediately, then coalesce rapid edits into one background
-    /// persistence job. The generation check prevents stale timers from writing.
+    /// Update the UI and enqueue its snapshot immediately. The persistence
+    /// worker coalesces edits; generations protect the UI from stale completions.
     fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.persistence.is_closing()
+            || self
+                .selected_id
+                .is_some_and(|id| self.deleting.contains(&id))
+        {
+            return;
+        }
         let Some((id, name, vars)) = self.snapshot_selected(cx) else {
             return;
         };
@@ -459,29 +530,26 @@ impl EnvironmentManager {
             SaveStatus::InvalidName
         };
         let (generation, save_epoch) = self.save_tracker.begin(id, pending_status);
+        // An invalid name must not discard a valid rename that is still in the
+        // debounce queue. The local model retains the latest valid name.
+        let persisted_name = self
+            .environments
+            .iter()
+            .find(|env| env.id == id)
+            .map(|env| env.name.clone())
+            .unwrap_or(name);
         cx.emit(self.changed_event());
         cx.notify();
 
-        let db = self.db.clone();
+        let task = self.persistence.submit(Some(id), move |db| {
+            db.save_environment_if_current(id, &persisted_name, &vars, save_epoch, generation)
+        });
         cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(180))
-                .await;
-            let is_current = this
-                .update(cx, |this, _| this.save_tracker.is_current(id, generation))
-                .unwrap_or(false);
-            if !is_current {
-                return Ok(());
-            }
-
-            let task = cx.background_spawn(async move {
-                db.save_environment_if_current(id, &name, &vars, save_epoch, generation)
-            });
             let result = task.await;
-            if let Err(error) = &result {
-                log::error!("Failed to save environment: {}", error);
-            }
             this.update(cx, |this, cx| {
+                if !this.save_tracker.is_current(id, generation) {
+                    return;
+                }
                 let status = if result.is_ok() {
                     if name_is_valid {
                         SaveStatus::Saved
@@ -509,6 +577,16 @@ impl EnvironmentManager {
         cx.notify();
     }
 
+    fn toggle_var_visibility(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = self.var_rows.get_mut(index) {
+            row.value_visible = !row.value_visible;
+            row.value_input.update(cx, |input, cx| {
+                input.set_masked(!row.value_visible, window, cx);
+            });
+            cx.notify();
+        }
+    }
+
     fn remove_var_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.var_rows.len() {
             self.var_rows.remove(index);
@@ -528,7 +606,7 @@ impl Render for EnvironmentManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let selected_id = self.selected_id;
-        let active_id = self.active_id;
+        let active_id = self.active.id;
         let viewport = window.viewport_size();
         let geometry = environment_dialog_geometry(viewport.width, viewport.height);
         let save_status = selected_id
@@ -627,7 +705,7 @@ impl Render for EnvironmentManager {
                                             })
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 cx.stop_propagation();
-                                                let new = if this.active_id == Some(id) {
+                                                let new = if this.active.id == Some(id) {
                                                     None
                                                 } else {
                                                     Some(id)
@@ -836,7 +914,21 @@ impl Render for EnvironmentManager {
                                                                         .child(
                                                                             Input::new(&row.value_input)
                                                                                 .small()
-                                                                                .mask_toggle(),
+                                                                                .suffix(
+                                                                                    Button::new(("var-visibility", index))
+                                                                                        .ghost()
+                                                                                        .xsmall()
+                                                                                        .tab_stop(false)
+                                                                                        .icon(Icon::empty().path(if row.value_visible {
+                                                                                            "icons/eye-off.svg"
+                                                                                        } else {
+                                                                                            "icons/eye.svg"
+                                                                                        }))
+                                                                                        .tooltip(if row.value_visible { "Hide value" } else { "Show value" })
+                                                                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                                                                            this.toggle_var_visibility(index, window, cx);
+                                                                                        })),
+                                                                                ),
                                                                         ),
                                                                 )
                                                                 .child(
@@ -924,9 +1016,41 @@ impl Render for EnvironmentManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{SaveStatus, SaveTracker, environment_dialog_geometry, environment_name_is_valid};
+    use super::{
+        ActiveSelection, SaveStatus, SaveTracker, environment_dialog_geometry,
+        environment_name_is_valid,
+    };
     use gpui::px;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn stale_active_completion_cannot_roll_back_a_repeated_selection() {
+        let mut active = ActiveSelection {
+            id: None,
+            generation: 0,
+        };
+        let first_a = active.choose(Some(1));
+        let b = active.choose(Some(2));
+        let latest_a = active.choose(Some(1));
+        assert!(!active.reconcile(first_a, None));
+        assert!(!active.reconcile(b, Some(2)));
+        assert_eq!(active.id, Some(1));
+        // A failure of the current choice reconciles to the database state.
+        assert!(active.reconcile(latest_a, Some(2)));
+        assert_eq!(active.id, Some(2));
+    }
+
+    #[test]
+    fn deletion_invalidates_an_outstanding_active_completion() {
+        let mut active = ActiveSelection {
+            id: None,
+            generation: 0,
+        };
+        let pending = active.choose(Some(1));
+        active.choose(None);
+        assert!(!active.reconcile(pending, Some(1)));
+        assert_eq!(active.id, None);
+    }
 
     #[test]
     fn desktop_dialog_uses_readable_maximum_dimensions() {
