@@ -11,6 +11,7 @@ mod collections_panel;
 mod curl_import;
 mod db;
 mod environment_manager;
+mod environment_persistence;
 mod format;
 mod formdata;
 mod header_completion;
@@ -38,6 +39,38 @@ use std::fs::OpenOptions;
 use std::io::Write;
 
 use crate::app::PoopmanApp;
+
+struct EnvironmentShutdown {
+    persistence: environment_persistence::EnvironmentPersistence,
+    requested: bool,
+}
+
+impl Global for EnvironmentShutdown {}
+
+/// Quit actions and native close buttons share this barrier. GPUI's final quit
+/// hook only allows 100 ms, so drain writes here while the event loop is alive.
+fn request_quit(cx: &mut App) {
+    if !cx.has_global::<EnvironmentShutdown>() {
+        cx.quit();
+        return;
+    }
+    let state = cx.global_mut::<EnvironmentShutdown>();
+    if state.requested {
+        return;
+    }
+    state.requested = true;
+    let flush = state.persistence.shutdown();
+    let timeout = cx
+        .background_executor()
+        .timer(std::time::Duration::from_secs(2));
+    cx.spawn(async move |cx| {
+        if let Err(error) = environment_persistence::finish_shutdown(flush, timeout).await {
+            log::error!("Could not save environments before quitting (2 second limit): {error}");
+        }
+        let _ = cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
 
 /// An asset source that loads assets from the `./assets` folder.
 #[derive(RustEmbed)]
@@ -130,7 +163,7 @@ fn main() {
         // the action being available), bind the key so the menu item carries the
         // Cmd+Q equivalent, and install the menu below. `set_menus` is a harmless
         // no-op on Windows/Linux, which quit via the window's close button.
-        cx.on_action(|_: &crate::app::Quit, cx| cx.quit());
+        cx.on_action(|_: &crate::app::Quit, cx| request_quit(cx));
 
         // Late binding on purpose: gpui gives later-added bindings precedence,
         // so the "Input"-context ctrl-enter shadows gpui-component's own
@@ -155,12 +188,35 @@ fn main() {
         let initial = cx.background_spawn(async { crate::app::AppInitialState::load() });
         cx.spawn(async move |cx| {
             let initial = initial.await?;
+            let persistence = initial.environment_persistence.clone();
+            cx.update(|cx| {
+                cx.set_global(EnvironmentShutdown {
+                    persistence: persistence.clone(),
+                    requested: false,
+                });
+                // Also protect platform-driven termination that bypasses the
+                // action/close handlers. This future needs no live UI entities.
+                cx.on_app_quit(move |_| {
+                    let flush = persistence.shutdown();
+                    async move {
+                        if let Err(error) = flush.await {
+                            log::error!("Environment shutdown flush failed: {error}");
+                        }
+                    }
+                })
+                .detach();
+            })?;
             let window_options = WindowOptions {
                 titlebar: Some(gpui_component::TitleBar::title_bar_options()),
                 window_min_size: Some(size(px(720.), px(480.))),
                 ..Default::default()
             };
             cx.open_window(window_options, |window, cx| {
+                window.on_window_should_close(cx, |_, cx| {
+                    // Defer out of the platform's close callback before quitting.
+                    cx.defer(request_quit);
+                    false
+                });
                 let view = cx.new(|cx| PoopmanApp::new(initial, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })?;

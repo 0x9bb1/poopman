@@ -426,6 +426,13 @@ impl Database {
         Self::spawn(conn)
     }
 
+    #[cfg(test)]
+    pub(crate) fn open_test_file(path: &std::path::Path) -> Self {
+        let conn = Connection::open(path).expect("open test db");
+        Self::init_schema(&conn).expect("init schema");
+        Self::spawn(conn)
+    }
+
     /// Send `f` to the owning thread and block until it returns a result.
     #[cfg_attr(feature = "profile", profiling::function)]
     fn call<T, F>(&self, f: F) -> Result<T>
@@ -1041,8 +1048,16 @@ impl Database {
 
     pub fn delete_environment(&self, id: i64) -> Result<()> {
         self.call(move |conn| {
+            let tx = conn.transaction()?;
             // env_variables rows are removed by ON DELETE CASCADE (foreign_keys = ON).
-            conn.execute("DELETE FROM environments WHERE id = ?1", params![id])?;
+            tx.execute("DELETE FROM environments WHERE id = ?1", params![id])?;
+            // Consult persisted state at execution time. A delayed deletion must
+            // never clear a newer choice of a different environment.
+            tx.execute(
+                "DELETE FROM app_meta WHERE key = 'active_environment_id' AND value = ?1",
+                params![id.to_string()],
+            )?;
+            tx.commit()?;
             Ok(())
         })
     }
