@@ -42,6 +42,7 @@ urlencoding = "2.1"
 
 [dev-dependencies]
 flate2 = "1"
+gpui = { version = "0.2.2", features = ["test-support"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
