@@ -11,7 +11,7 @@ use gpui_component::{
 };
 use std::sync::{Arc, RwLock};
 
-use crate::code_snippet_panel::CodeSnippetPanel;
+use crate::code_snippet_panel::{CodeSnippetPanel, code_snippet_geometry};
 use crate::collections_panel::{
     CollectionTarget, CollectionsChanged, CollectionsPanel, NewRequestRequested,
     SavedRequestClicked,
@@ -340,17 +340,24 @@ impl PoopmanApp {
                 this.code_panel
                     .update(cx, |panel, cx| panel.set_request(req, window, cx));
                 let panel = code_panel_for_sub.clone();
-                window.open_dialog(cx, move |dialog, _window, cx| {
+                window.open_dialog(cx, move |dialog, window, cx| {
                     let theme = cx.theme();
+                    let geometry = code_snippet_geometry(window.viewport_size());
                     dialog
                         .title(
                             div()
+                                .h(px(24.))
+                                .line_height(px(24.))
                                 .text_lg()
                                 .font_weight(gpui::FontWeight::BOLD)
                                 .text_color(theme.foreground)
                                 .child("Code snippet"),
                         )
-                        .w(px(760.))
+                        .w(geometry.width)
+                        .p(px(24.))
+                        .gap(px(16.))
+                        .margin_top(geometry.margin_top)
+                        .max_h(geometry.max_height)
                         .child(panel.clone())
                 });
             },
