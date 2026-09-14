@@ -9,6 +9,7 @@ mod code_gen;
 mod code_snippet_panel;
 mod collections_panel;
 mod curl_import;
+mod data_directory;
 mod db;
 mod environment_manager;
 mod environment_persistence;
