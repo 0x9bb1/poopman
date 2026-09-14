@@ -1265,7 +1265,10 @@ impl Render for PoopmanApp {
                         )
                         .child(crate::menu_bar::edit_menu(
                             cx.entity(),
-                            self.environments.clone(),
+                            self.environments
+                                .iter()
+                                .map(crate::menu_bar::EnvironmentMenuEntry::from)
+                                .collect(),
                             self.active_environment_id,
                         ))
                         .child(

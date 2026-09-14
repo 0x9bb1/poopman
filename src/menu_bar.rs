@@ -16,6 +16,21 @@ use crate::types::Environment;
 const TRIGGER_LABEL_MAX_CHARS: usize = 20;
 const MENU_LABEL_MAX_CHARS: usize = 40;
 
+/// Only the identity and display name belong in the menu's render state.
+pub struct EnvironmentMenuEntry {
+    id: i64,
+    name: String,
+}
+
+impl From<&Environment> for EnvironmentMenuEntry {
+    fn from(environment: &Environment) -> Self {
+        Self {
+            id: environment.id,
+            name: environment.name.clone(),
+        }
+    }
+}
+
 /// Collapse whitespace and cap user-provided environment names without slicing
 /// through a UTF-8 code point. The returned string is presentation-only; the
 /// stored environment name is never changed.
@@ -45,13 +60,13 @@ fn display_environment_name(name: &str, max_chars: usize) -> String {
 }
 
 fn active_environment(
-    environments: &[Environment],
+    environments: &[EnvironmentMenuEntry],
     active_id: Option<i64>,
-) -> Option<&Environment> {
+) -> Option<&EnvironmentMenuEntry> {
     active_id.and_then(|id| environments.iter().find(|environment| environment.id == id))
 }
 
-fn trigger_label(environments: &[Environment], active_id: Option<i64>) -> String {
+fn trigger_label(environments: &[EnvironmentMenuEntry], active_id: Option<i64>) -> String {
     active_environment(environments, active_id)
         .map(|environment| display_environment_name(&environment.name, TRIGGER_LABEL_MAX_CHARS))
         .unwrap_or_else(|| "Environment".to_string())
@@ -73,7 +88,7 @@ fn section_label(label: &'static str) -> PopupMenuItem {
 /// Build the environment dropdown button for the title bar.
 pub fn edit_menu(
     app: Entity<PoopmanApp>,
-    environments: Vec<Environment>,
+    environments: Vec<EnvironmentMenuEntry>,
     active_id: Option<i64>,
 ) -> impl IntoElement {
     let trigger_label = trigger_label(&environments, active_id);
@@ -155,14 +170,12 @@ pub fn edit_menu(
 mod tests {
     // Do not glob-import the parent: that would pull in `gpui::*`, whose
     // `test` attribute macro shadows Rust's built-in `#[test]`.
-    use super::{display_environment_name, trigger_label};
-    use crate::types::Environment;
+    use super::{EnvironmentMenuEntry, display_environment_name, trigger_label};
 
-    fn environment(id: i64, name: &str) -> Environment {
-        Environment {
+    fn environment(id: i64, name: &str) -> EnvironmentMenuEntry {
+        EnvironmentMenuEntry {
             id,
             name: name.to_string(),
-            variables: vec![],
         }
     }
 

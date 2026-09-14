@@ -19,6 +19,9 @@ use crate::theme::METHOD_SELECT_WIDTH;
 use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
 use crate::url_params::{self, QueryParam};
 
+#[cfg(test)]
+mod tests;
+
 /// Event emitted synchronously when a tab starts a request.
 #[derive(Clone)]
 pub struct RequestStarted {
@@ -85,6 +88,8 @@ fn custom_header_key_input<T: 'static>(
 
 /// Header row with key-value inputs and enabled checkbox
 struct HeaderRow {
+    // Drop listeners before their input entities when removing or rebuilding a row.
+    _subscriptions: Vec<Subscription>,
     enabled: bool,
     key_input: Entity<InputState>,
     value_input: Entity<InputState>,
@@ -98,6 +103,8 @@ struct HeaderRow {
 
 /// Query parameter row with key-value inputs and enabled checkbox
 struct ParamRow {
+    // URL rebuilds and row removal cancel these listeners immediately.
+    _subscriptions: Vec<Subscription>,
     enabled: bool,
     key_input: Entity<InputState>,
     value_input: Entity<InputState>,
@@ -121,7 +128,6 @@ pub struct RequestEditor {
     in_flight: std::collections::HashMap<usize, InFlightRequest>,
     next_request_id: u64,
     _subscriptions: Vec<Subscription>, // Permanent: URL input + body editor subscriptions
-    _row_subscriptions: Vec<Subscription>, // Header/param row subscriptions; rebuilt on load
     /// Active environment variables, pushed by PoopmanApp; used at send time.
     env_vars: std::collections::HashMap<String, String>,
     /// Whether the active tab is associated with a request in a collection.
@@ -200,7 +206,6 @@ impl RequestEditor {
             in_flight: std::collections::HashMap::new(),
             next_request_id: 1,
             _subscriptions: vec![],
-            _row_subscriptions: vec![],
             env_vars: std::collections::HashMap::new(),
             is_saved_request: false,
             settings,
@@ -296,6 +301,7 @@ impl RequestEditor {
             });
 
             self.headers.push(HeaderRow {
+                _subscriptions: vec![],
                 enabled: true,
                 key_input,
                 value_input,
@@ -354,10 +360,8 @@ impl RequestEditor {
 
         // Set headers - reinitialize with predefined headers
         self.headers.clear();
-        // Only clear ROW subscriptions (header/param rows). The permanent URL and body
-        // subscriptions in self._subscriptions must survive, otherwise body Content-Type
-        // sync and header auto-add silently break after switching tabs / loading history.
-        self._row_subscriptions.clear();
+        // Dropping rows also drops their subscriptions. Permanent URL and body
+        // subscriptions survive loading requests and switching tabs.
 
         // Clear params to force rebuild with fresh subscriptions.
         self.params.clear();
@@ -398,6 +402,7 @@ impl RequestEditor {
                 });
 
                 self.headers.push(HeaderRow {
+                    _subscriptions: vec![],
                     enabled: true,
                     key_input,
                     value_input,
@@ -551,7 +556,8 @@ impl RequestEditor {
 
         // Rebuild params from saved state
         for param_state in state {
-            let param_row = ParamRow {
+            let mut param_row = ParamRow {
+                _subscriptions: vec![],
                 enabled: param_state.enabled,
                 key_input: cx.new(|cx| {
                     let mut input = InputState::new(window, cx);
@@ -581,8 +587,7 @@ impl RequestEditor {
                 },
             );
 
-            self._row_subscriptions.push(sub1);
-            self._row_subscriptions.push(sub2);
+            param_row._subscriptions = vec![sub1, sub2];
             self.params.push(param_row);
         }
 
@@ -636,7 +641,8 @@ impl RequestEditor {
                 continue;
             }
 
-            let header_row = HeaderRow {
+            let mut header_row = HeaderRow {
+                _subscriptions: vec![],
                 enabled: header_state.enabled,
                 key_input: custom_header_key_input(&header_state.key, window, cx),
                 value_input: cx.new(|cx| {
@@ -650,7 +656,7 @@ impl RequestEditor {
             };
 
             let key_input = header_row.key_input.clone();
-            let key_input_for_closure = key_input.clone();
+            let key_input_id = key_input.entity_id();
             let sub = cx.subscribe_in(
                 &key_input,
                 window,
@@ -662,14 +668,14 @@ impl RequestEditor {
                         if has_key
                             && matches!(last.header_type, HeaderType::Custom)
                             && this.headers.last().map(|h| Entity::entity_id(&h.key_input))
-                                == Some(Entity::entity_id(&key_input_for_closure))
+                                == Some(key_input_id)
                         {
                             this.add_custom_header_row(window, cx);
                         }
                     }
                 },
             );
-            self._row_subscriptions.push(sub);
+            header_row._subscriptions.push(sub);
 
             self.headers.push(header_row);
         }
@@ -725,7 +731,8 @@ impl RequestEditor {
     }
 
     fn add_custom_header_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let new_row = HeaderRow {
+        let mut new_row = HeaderRow {
+            _subscriptions: vec![],
             enabled: true,
             key_input: custom_header_key_input("", window, cx),
             value_input: cx.new(|cx| InputState::new(window, cx).placeholder("Value")),
@@ -736,7 +743,7 @@ impl RequestEditor {
 
         // Subscribe to the key input change
         let key_input = new_row.key_input.clone();
-        let key_input_for_closure = key_input.clone();
+        let key_input_id = key_input.entity_id();
         let sub = cx.subscribe_in(
             &key_input,
             window,
@@ -750,7 +757,7 @@ impl RequestEditor {
                     if has_key
                         && matches!(last.header_type, HeaderType::Custom)
                         && this.headers.last().map(|h| Entity::entity_id(&h.key_input))
-                            == Some(Entity::entity_id(&key_input_for_closure))
+                            == Some(key_input_id)
                     {
                         this.add_custom_header_row(window, cx);
 
@@ -794,7 +801,7 @@ impl RequestEditor {
             },
         );
 
-        self._row_subscriptions.push(sub);
+        new_row._subscriptions.push(sub);
         self.headers.push(new_row);
         cx.notify();
     }
@@ -945,7 +952,8 @@ impl RequestEditor {
         let key_string = key.to_string();
         let value_string = value.to_string();
 
-        let param_row = ParamRow {
+        let mut param_row = ParamRow {
+            _subscriptions: vec![],
             enabled,
             key_input: cx.new(|cx| {
                 let mut input = InputState::new(window, cx);
@@ -975,8 +983,7 @@ impl RequestEditor {
             },
         );
 
-        self._row_subscriptions.push(sub1);
-        self._row_subscriptions.push(sub2);
+        param_row._subscriptions = vec![sub1, sub2];
         self.params.push(param_row);
     }
 
@@ -1044,7 +1051,8 @@ impl RequestEditor {
 
     /// Add a new param row with auto-add functionality
     fn add_param_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let new_row = ParamRow {
+        let mut new_row = ParamRow {
+            _subscriptions: vec![],
             enabled: true,
             key_input: cx.new(|cx| InputState::new(window, cx).placeholder("Parameter")),
             value_input: cx.new(|cx| InputState::new(window, cx).placeholder("Value")),
@@ -1052,7 +1060,7 @@ impl RequestEditor {
 
         // Subscribe to key input change for auto-add
         let key_input = new_row.key_input.clone();
-        let key_input_for_closure = key_input.clone();
+        let key_input_id = key_input.entity_id();
         let sub_key = cx.subscribe_in(
             &key_input,
             window,
@@ -1065,7 +1073,7 @@ impl RequestEditor {
                     let has_key = !last.key_input.read(cx).value().is_empty();
                     if has_key
                         && this.params.last().map(|p| Entity::entity_id(&p.key_input))
-                            == Some(Entity::entity_id(&key_input_for_closure))
+                            == Some(key_input_id)
                     {
                         this.add_param_row(window, cx);
 
@@ -1114,8 +1122,7 @@ impl RequestEditor {
             },
         );
 
-        self._row_subscriptions.push(sub_key);
-        self._row_subscriptions.push(sub_value);
+        new_row._subscriptions = vec![sub_key, sub_value];
         self.params.push(new_row);
         cx.notify();
     }

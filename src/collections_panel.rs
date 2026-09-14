@@ -25,6 +25,9 @@ use crate::postman::{self, ImportResult};
 use crate::theme::method_color;
 use crate::types::{Collection, CollectionFolder, SavedRequest};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone)]
 pub struct SavedRequestClicked {
     pub request: SavedRequest,
@@ -330,11 +333,14 @@ impl CollectionsPanel {
         cx.notify();
     }
 
-    fn open_request(&mut self, request: &SavedRequest, cx: &mut Context<Self>) {
-        self.selected = Some(NodeRef::Request(request.id));
-        cx.emit(SavedRequestClicked {
-            request: request.clone(),
-        });
+    fn open_request(&mut self, id: i64, cx: &mut Context<Self>) {
+        // Resolve at click time so rendering never copies request bodies, and a
+        // handler cannot open stale data after a collection reload or deletion.
+        let Some(request) = self.find_request(id).cloned() else {
+            return;
+        };
+        self.selected = Some(NodeRef::Request(id));
+        cx.emit(SavedRequestClicked { request });
         cx.notify();
     }
 
@@ -933,7 +939,6 @@ impl CollectionsPanel {
         let id = request.id;
         let selected = self.selected == Some(NodeRef::Request(id));
         let method = request.request.method;
-        let request_for_click = request.clone();
         let row = h_flex()
             .id(("saved-request-row", id as u64))
             .w_full()
@@ -947,7 +952,7 @@ impl CollectionsPanel {
             .when(selected, |row| row.bg(cx.theme().list_active))
             .hover(|style| style.bg(cx.theme().list_hover))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_request(&request_for_click, cx);
+                this.open_request(id, cx);
             }))
             .child(
                 div()
