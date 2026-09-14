@@ -12,6 +12,19 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+impl RequestEditor {
+    pub(crate) fn focus_body_for_save_test(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.active_tab = 3;
+        self.body_editor
+            .update(cx, |body, cx| body.focus_raw_for_save_test(window, cx));
+        cx.notify();
+    }
+}
+
 fn header() -> HeaderState {
     HeaderState {
         enabled: true,

@@ -4,6 +4,17 @@ use crate::types::{BodyType, FormDataRow, FormDataValue};
 use gpui::{AppContext as _, TestAppContext};
 use gpui_component::{input::InputEvent, select::SelectEvent};
 
+impl BodyEditor {
+    pub(crate) fn focus_raw_for_save_test(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.raw_body_editor
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+}
+
 fn populated_row() -> FormDataRow {
     FormDataRow {
         enabled: true,

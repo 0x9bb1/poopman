@@ -182,6 +182,7 @@ fn main() {
             KeyBinding::new("ctrl-l", crate::app::FocusUrl, None),
             KeyBinding::new("cmd-q", crate::app::Quit, None),
         ]);
+        crate::app::bind_save_request_shortcut(cx);
 
         cx.set_menus(vec![Menu {
             name: "Poopman".into(),
