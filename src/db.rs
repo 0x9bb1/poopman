@@ -777,7 +777,6 @@ impl Database {
 
     /// Update a saved request, including moving it to another folder.
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // Retained for database callers and CRUD round-trip tests.
     pub fn update_saved_request(
         &self,
         id: i64,

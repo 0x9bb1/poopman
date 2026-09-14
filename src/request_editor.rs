@@ -1558,9 +1558,17 @@ impl Render for RequestEditor {
                                         "icons/bookmark.svg"
                                     }))
                                     .tooltip(if self.is_saved_request {
-                                        "Remove from collection"
+                                        if cfg!(target_os = "macos") {
+                                            "Remove from collection (Cmd+S to save changes)"
+                                        } else {
+                                            "Remove from collection (Ctrl+S to save changes)"
+                                        }
                                     } else {
-                                        "Save request"
+                                        if cfg!(target_os = "macos") {
+                                            "Save request (Cmd+S)"
+                                        } else {
+                                            "Save request (Ctrl+S)"
+                                        }
                                     })
                                     .on_click(cx.listener(|_this, _ev, _window, cx| {
                                         cx.emit(ToggleRequestBookmarkRequested);

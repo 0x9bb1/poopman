@@ -9,7 +9,10 @@ use gpui_component::{
     select::{Select, SelectState},
     v_flex,
 };
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, RwLock},
+};
 
 use crate::code_snippet_panel::{CodeSnippetPanel, code_snippet_geometry};
 use crate::collections_panel::{
@@ -36,6 +39,7 @@ actions!(
     poopman,
     [
         SendRequest,
+        SaveRequest,
         NewTab,
         CloseTab,
         NextTab,
@@ -44,6 +48,22 @@ actions!(
         Quit
     ]
 );
+
+pub(crate) const SAVE_REQUEST_KEY: &str = if cfg!(target_os = "macos") {
+    "cmd-s"
+} else {
+    "ctrl-s"
+};
+
+pub(crate) fn bind_save_request_shortcut(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new(SAVE_REQUEST_KEY, SaveRequest, None),
+        KeyBinding::new(SAVE_REQUEST_KEY, SaveRequest, Some("Input")),
+    ]);
+}
+
+#[cfg(test)]
+mod save_tests;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarView {
@@ -119,6 +139,9 @@ pub struct PoopmanApp {
     env_manager: Entity<EnvironmentManager>,
     code_panel: Entity<CodeSnippetPanel>,
     collections_reconcile_generation: u64,
+    /// Serialize saves/bookmark changes per originating tab, including while
+    /// a first save is creating its default collection in the background.
+    saving_tabs: HashSet<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -426,6 +449,7 @@ impl PoopmanApp {
             env_manager,
             code_panel,
             collections_reconcile_generation: 0,
+            saving_tabs: HashSet::new(),
             _subscriptions: vec![
                 request_started_sub,
                 request_sub,
@@ -939,19 +963,88 @@ impl PoopmanApp {
         cx.notify();
     }
 
+    fn save_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A shortcut typed into a dialog must not save the request behind it.
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        self.save_current_tab_state(cx);
+        let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() else {
+            return;
+        };
+        if self.saving_tabs.contains(&tab.id) {
+            return;
+        }
+        let Some(saved_id) = tab.saved_request_id else {
+            self.toggle_request_bookmark(window, cx);
+            return;
+        };
+        let (Some(collection_id), Some(name)) = (tab.collection_id, tab.saved_name) else {
+            app_notice(
+                window,
+                cx,
+                "Save failed",
+                "Reopen this request from Collections and try again.",
+            );
+            return;
+        };
+        let tab_id = tab.id;
+        self.saving_tabs.insert(tab_id);
+        let db = self.db.clone();
+        let task = cx.background_spawn(async move {
+            db.update_saved_request(
+                saved_id,
+                collection_id,
+                tab.folder_id,
+                &name,
+                &tab.request,
+                tab.params_state.as_deref().unwrap_or_default(),
+                tab.headers_state.as_deref().unwrap_or_default(),
+            )
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving_tabs.remove(&tab_id);
+                match result {
+                    Ok(()) => this
+                        .collections_panel
+                        .update(cx, |panel, cx| panel.reload(window, cx)),
+                    Err(error) => app_notice(window, cx, "Save failed", error.to_string()),
+                }
+                // Do not replace the tab's editor state: it may have changed or
+                // the user may have switched tabs while this snapshot was saved.
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
     fn toggle_request_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
         self.save_current_tab_state(cx);
         let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() else {
             return;
         };
         let params_state = tab.params_state.clone().unwrap_or_default();
         let headers_state = tab.headers_state.clone().unwrap_or_default();
+        let tab_id = tab.id;
+        if self.saving_tabs.contains(&tab_id) {
+            return;
+        }
 
         if let Some(saved_id) = tab.saved_request_id {
+            self.saving_tabs.insert(tab_id);
             let db = self.db.clone();
             let task = cx.background_spawn(async move { db.delete_saved_request(saved_id) });
             cx.spawn_in(window, async move |this, cx| {
-                match task.await {
+                let result = task.await;
+                this.update(cx, |this, _| {
+                    this.saving_tabs.remove(&tab_id);
+                })?;
+                match result {
                     Ok(()) => {
                         this.update_in(cx, |this, window, cx| {
                             for tab in &mut this.request_tabs {
@@ -982,6 +1075,7 @@ impl PoopmanApp {
 
         let targets = self.collections_panel.read(cx).request_targets();
         if targets.is_empty() {
+            self.saving_tabs.insert(tab_id);
             let db = self.db.clone();
             let selected = self.collections_panel.read(cx).selected_target();
             let initial_name = if tab.title.trim().is_empty() || tab.title == "New Request" {
@@ -991,7 +1085,11 @@ impl PoopmanApp {
             };
             let task = cx.background_spawn(async move { db.create_collection("My Collection") });
             cx.spawn_in(window, async move |this, cx| {
-                match task.await {
+                let result = task.await;
+                this.update(cx, |this, _| {
+                    this.saving_tabs.remove(&tab_id);
+                })?;
+                match result {
                     Ok(collection_id) => {
                         this.update_in(cx, |this, window, cx| {
                             this.collections_panel
@@ -1161,6 +1259,9 @@ impl PoopmanApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.saving_tabs.insert(tab_id) {
+            return;
+        }
         let db = self.db.clone();
         let collection_id = target.collection_id;
         let folder_id = target.folder_id;
@@ -1180,7 +1281,11 @@ impl PoopmanApp {
             )
         });
         cx.spawn_in(window, async move |this, cx| {
-            match task.await {
+            let result = task.await;
+            this.update(cx, |this, _| {
+                this.saving_tabs.remove(&tab_id);
+            })?;
+            match result {
                 Ok(id) => {
                     this.update_in(cx, |this, window, cx| {
                         if let Some(tab) = this.request_tabs.iter_mut().find(|tab| tab.id == tab_id)
@@ -1226,6 +1331,9 @@ impl Render for PoopmanApp {
             .key_context("Poopman")
             .on_action(cx.listener(|this, _: &SendRequest, window, cx| {
                 this.request_editor.update(cx, |editor, cx| editor.send(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SaveRequest, window, cx| {
+                this.save_request(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.create_new_tab(window, cx);
