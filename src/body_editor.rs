@@ -16,6 +16,9 @@ use crate::types::{BodyDraft, BodyKind, BodyType, FormDataRow, FormDataValue, Ra
 
 use gpui::Subscription;
 
+#[cfg(test)]
+mod tests;
+
 /// Event emitted when body type changes, carrying the computed Content-Type
 #[derive(Clone, Debug)]
 pub struct BodyTypeChanged {
@@ -33,8 +36,13 @@ fn get_placeholder_for_subtype(subtype: RawSubtype) -> &'static str {
     }
 }
 
-/// Per-row input entities for a form-data row: (key input, value input, type select).
-type FormDataRowInputs = (Entity<InputState>, Entity<InputState>, Entity<SelectState<Vec<&'static str>>>);
+/// Input entities and listeners have the same lifetime as their form-data row.
+struct FormDataRowInputs {
+    _subscriptions: [Subscription; 3],
+    key_input: Entity<InputState>,
+    value_input: Entity<InputState>,
+    type_select: Entity<SelectState<Vec<&'static str>>>,
+}
 
 pub struct BodyEditor {
     body_type_index: usize,
@@ -49,9 +57,6 @@ pub struct BodyEditor {
     next_formdata_row_id: u64,
     formdata_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
-    // Subscriptions owned by the current form-data rows. The raw subtype
-    // subscription lives in `_subscriptions` and must survive loading tabs.
-    _formdata_subscriptions: Vec<Subscription>,
     // Format/validation state
     validation_message: Option<String>,
     validation_error: bool,
@@ -71,8 +76,8 @@ impl BodyEditor {
         if let InputChangeEvent::Change = event
             && let Some(index) = self.formdata_row_index(row_id)
         {
-            let (key_input, value_input, _) = &self.formdata_input_states[index];
-            let value = if is_key { key_input } else { value_input }
+            let inputs = &self.formdata_input_states[index];
+            let value = if is_key { &inputs.key_input } else { &inputs.value_input }
                 .read(cx)
                 .value()
                 .to_string();
@@ -126,7 +131,6 @@ impl BodyEditor {
             next_formdata_row_id: 1,
             formdata_scroll_handle: ScrollHandle::new(),
             _subscriptions: vec![],
-            _formdata_subscriptions: vec![],
             validation_message: None,
             validation_error: false,
             env_var_names: HashSet::new(),
@@ -287,10 +291,10 @@ impl BodyEditor {
             .formdata_rows
             .iter()
             .zip(self.formdata_input_states.iter())
-            .map(|(row, (key_input, value_input, _type_select))| {
+            .map(|(row, inputs)| {
                 let mut updated_row = row.clone();
-                updated_row.key = key_input.read(cx).value().to_string();
-                let value = value_input.read(cx).value().to_string();
+                updated_row.key = inputs.key_input.read(cx).value().to_string();
+                let value = inputs.value_input.read(cx).value().to_string();
                 updated_row.value = match &row.value {
                     FormDataValue::Text(_) => FormDataValue::Text(value),
                     FormDataValue::File { .. } => FormDataValue::File { path: value },
@@ -354,7 +358,6 @@ impl BodyEditor {
         self.formdata_rows.clear();
         self.formdata_input_states.clear();
         self.formdata_row_ids.clear();
-        self._formdata_subscriptions.clear();
         for row in draft.formdata_rows.iter().filter(|row| !row.is_blank()) {
             self.add_formdata_row_with_value(row.clone(), window, cx);
         }
@@ -417,26 +420,22 @@ impl BodyEditor {
 
         self.formdata_rows.push(row);
         self.formdata_row_ids.push(row_id);
-        self.formdata_input_states
-            .push((key_input.clone(), value_input.clone(), type_select.clone()));
-
-        self._formdata_subscriptions.push(cx.subscribe_in(
+        let key_subscription = cx.subscribe_in(
             &key_input,
             window,
             move |this, _, event: &InputChangeEvent, window, cx| {
                 this.handle_input_event(row_id, true, event, window, cx);
             },
-        ));
-        self._formdata_subscriptions.push(cx.subscribe_in(
+        );
+        let value_subscription = cx.subscribe_in(
             &value_input,
             window,
             move |this, _, event: &InputChangeEvent, window, cx| {
                 this.handle_input_event(row_id, false, event, window, cx);
             },
-        ));
+        );
 
-        let value_input_for_type = value_input.clone();
-        self._formdata_subscriptions.push(cx.subscribe_in(
+        let type_subscription = cx.subscribe_in(
             &type_select,
             window,
             move |this, _entity, event: &SelectEvent<Vec<&'static str>>, window, cx| {
@@ -454,7 +453,7 @@ impl BodyEditor {
                                 FormDataValue::Text(text) => FormDataValue::File { path: text.clone() },
                                 FormDataValue::File { path } => FormDataValue::Text(path.clone()),
                             };
-                            value_input_for_type.update(cx, |input, cx| {
+                            this.formdata_input_states[index].value_input.update(cx, |input, cx| {
                                 input.set_placeholder(
                                     if should_be_file { "File Path" } else { "Value" },
                                     window,
@@ -466,7 +465,13 @@ impl BodyEditor {
                     }
                 }
             },
-        ));
+        );
+        self.formdata_input_states.push(FormDataRowInputs {
+            _subscriptions: [key_subscription, value_subscription, type_subscription],
+            key_input,
+            value_input,
+            type_select,
+        });
 
         cx.notify();
     }
@@ -575,7 +580,7 @@ impl BodyEditor {
         });
 
         if let Some(index) = self.formdata_row_index(row_id)
-            && let Some((_key_input, value_input, _type_select)) = self.formdata_input_states.get(index).cloned()
+            && let Some(value_input) = self.formdata_input_states.get(index).map(|inputs| inputs.value_input.downgrade())
         {
             cx.spawn_in(window, async move |_, window| {
                 if let Ok(Ok(Some(paths))) = path.await
@@ -584,9 +589,11 @@ impl BodyEditor {
                     // Store and display the full path (used directly when sending).
                     let path_str = selected_path.to_string_lossy().to_string();
                     let _ = window.update(|window, cx| {
-                        value_input.update(cx, |input, cx| {
-                            input.set_value(&path_str, window, cx);
-                        });
+                        if let Some(value_input) = value_input.upgrade() {
+                            value_input.update(cx, |input, cx| {
+                                input.set_value(&path_str, window, cx);
+                            });
+                        }
                     });
                 }
             })
@@ -731,7 +738,7 @@ impl Render for BodyEditor {
                                 .size_full()
                                 .track_scroll(&self.formdata_scroll_handle)
                                 .overflow_scroll()
-                                .children(self.formdata_rows.iter().zip(self.formdata_input_states.iter()).zip(self.formdata_row_ids.iter()).map(|((row, (key_input_entity, value_input_entity, type_select_entity)), row_id)| {
+                                .children(self.formdata_rows.iter().zip(self.formdata_input_states.iter()).zip(self.formdata_row_ids.iter()).map(|((row, inputs), row_id)| {
                                     let row_id = *row_id;
                                     let is_file = matches!(row.value, FormDataValue::File { .. });
 
@@ -754,7 +761,7 @@ impl Render for BodyEditor {
                                             div()
                                                 .flex_1()
                                                 .child(
-                                                    Input::new(key_input_entity)
+                                                    Input::new(&inputs.key_input)
                                                 )
                                         )
                                         .child(
@@ -763,7 +770,7 @@ impl Render for BodyEditor {
                                             div()
                                                 .flex_1()
                                                 .child(
-                                                    Input::new(value_input_entity)
+                                                    Input::new(&inputs.value_input)
                                                         .when(is_file, |input| input.disabled(true))
                                                         .suffix(
                                                             h_flex()
@@ -782,7 +789,7 @@ impl Render for BodyEditor {
                                                                 })
                                                                 .child(
                                                                     // Type selector
-                                                                    Select::new(type_select_entity).xsmall()
+                                                                    Select::new(&inputs.type_select).xsmall()
                                                                 )
                                                                 .child(
                                                                     // Delete button

@@ -26,6 +26,8 @@ mod request_tab;
 mod response_viewer;
 mod settings;
 mod tab_bar;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod types;
 mod ui;
