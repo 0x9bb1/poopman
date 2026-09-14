@@ -10,7 +10,6 @@
 use anyhow::{Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
@@ -384,12 +383,7 @@ pub struct Database {
 impl Database {
     /// Open (or create) the on-disk database and start its owning thread.
     pub fn new() -> Result<Self> {
-        let db_path = Self::get_db_path()?;
-
-        // Create directory if it doesn't exist
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let db_path = crate::data_directory::DatabasePaths::resolve()?.prepare()?;
 
         let conn = Connection::open(&db_path)?;
         Self::init_schema(&conn)?;
@@ -548,12 +542,6 @@ impl Database {
             conn.execute("ALTER TABLE history ADD COLUMN request_auth TEXT", [])?;
         }
         Ok(())
-    }
-
-    /// Get the database file path
-    fn get_db_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow!("Cannot find home directory"))?;
-        Ok(home.join(".poopman").join("history.db"))
     }
 
     /// Insert a new history item (request only, no response - aligned with Postman)
@@ -1214,6 +1202,87 @@ mod tests {
 
     fn mem_db() -> Database {
         Database::new_in_memory()
+    }
+
+    #[test]
+    fn native_directory_migration_preserves_all_persisted_data() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let legacy = home.join(".poopman/history.db");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let db = Database::open_test_file(&legacy);
+        let (request, params, headers) =
+            saved_request_fixture("Saved", "https://api.test/items?page=1");
+        let history_id = db
+            .insert_history(
+                request.method.as_str(),
+                &request.url,
+                &serde_json::to_string(&request.headers).unwrap(),
+                &request.body,
+                &request.auth,
+            )
+            .unwrap();
+        let environment_id = db.create_environment("Production").unwrap();
+        db.replace_variables(
+            environment_id,
+            &[EnvVar {
+                enabled: false,
+                key: "token".into(),
+                value: "preserved value".into(),
+            }],
+        )
+        .unwrap();
+        db.set_active_environment_id(Some(environment_id)).unwrap();
+        let settings = AppSettings {
+            connect_timeout_ms: 1234,
+            ..AppSettings::default()
+        };
+        db.save_app_settings(&settings).unwrap();
+        let collection_id = db.create_collection("Collection").unwrap();
+        let folder_id = db.create_folder(collection_id, None, "Folder").unwrap();
+        db.insert_saved_request(
+            collection_id,
+            Some(folder_id),
+            "Saved",
+            &request,
+            &params,
+            &headers,
+        )
+        .unwrap();
+        let expected_collections = db.load_collections().unwrap();
+
+        let paths =
+            crate::data_directory::DatabasePaths::from_roots(&root.path().join("native"), &home);
+        let destination = paths.prepare().unwrap();
+        let migrated = Database::open_test_file(&destination);
+        let history = migrated.load_recent_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, history_id);
+        assert_eq!(history[0].request, request);
+        let environments = migrated.load_environments().unwrap();
+        assert_eq!(environments.len(), 1);
+        assert_eq!(environments[0].id, environment_id);
+        assert_eq!(environments[0].name, "Production");
+        assert_eq!(environments[0].variables.len(), 1);
+        assert!(!environments[0].variables[0].enabled);
+        assert_eq!(environments[0].variables[0].key, "token");
+        assert_eq!(environments[0].variables[0].value, "preserved value");
+        assert_eq!(
+            migrated.get_active_environment_id().unwrap(),
+            Some(environment_id)
+        );
+        assert_eq!(migrated.load_app_settings().unwrap(), settings);
+        assert_eq!(migrated.load_collections().unwrap(), expected_collections);
+        assert!(legacy.is_file());
+        // Close the file connections on their owner threads before TempDir cleanup.
+        for database in [db, migrated] {
+            database
+                .call(|conn| {
+                    *conn = Connection::open_in_memory()?;
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     #[test]

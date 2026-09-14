@@ -81,10 +81,28 @@ application profiling spans.
 
 ## Data Storage
 
-History and environments live in a SQLite database at:
+History, environments, collections, and settings live in a SQLite database under
+the stable application identity `com.poopman.app`:
 
-- Linux / macOS: `~/.poopman/history.db`
-- Windows: `%USERPROFILE%\.poopman\history.db`
+- Linux: `$XDG_DATA_HOME/com.poopman.app/history.db`, or
+  `~/.local/share/com.poopman.app/history.db` when `XDG_DATA_HOME` is unset.
+- macOS: `~/Library/Application Support/com.poopman.app/history.db`.
+- Windows: `%LOCALAPPDATA%\com.poopman.app\history.db`.
+
+On the first upgraded launch, if the new database is absent, Poopman uses SQLite's
+backup API to copy the legacy `~/.poopman/history.db` (Windows:
+`%USERPROFILE%\.poopman\history.db`), including committed data in its write-ahead
+log. The complete backup is flushed before it is installed without overwriting
+an existing destination. The legacy database is retained as a backup.
+
+If both databases exist, the new location always wins; data is never merged and
+later edits made by an older Poopman version are not imported automatically.
+A migration failure stops database initialization and leaves the legacy database
+available for retry. An interrupted migration is retried on the next launch if
+the destination is still absent. Abandoned `.history-migration-*.db` files in the
+new directory are ignored and can be removed while Poopman is closed. An existing
+destination that cannot be opened produces an error rather than a fallback to
+the legacy database.
 
 ## Architecture
 
@@ -98,6 +116,7 @@ src/
 ├── app.rs                 # Root layout, tabs, dialogs, event wiring
 ├── types.rs               # Core data types (RequestData, ResponseData, BodyType, …)
 ├── db.rs                  # SQLite access — CSP style (see note below)
+├── data_directory.rs      # Native data paths and safe legacy database migration
 ├── http_client.rs         # reqwest wrapper: shared client + shared tokio runtime
 ├── request_editor.rs      # Method / URL / params / headers, send logic
 ├── body_editor.rs         # Request body (Raw + multipart Form-data)
