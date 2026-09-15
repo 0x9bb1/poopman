@@ -11,6 +11,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
     ActiveTheme as _, IndexPath, Sizable as _, h_flex,
+    checkbox::Checkbox,
     input::{Input, InputEvent as InputChangeEvent, InputState},
     scroll::ScrollableElement as _,
     select::{Select, SelectState},
@@ -57,6 +58,7 @@ pub struct SettingsPanel {
     db: Arc<Database>,
     settings: Arc<RwLock<AppSettings>>,
     http_version: Entity<SelectState<Vec<&'static str>>>,
+    connection_reuse: bool,
     connect_timeout: Entity<InputState>,
     read_timeout: Entity<InputState>,
     total_timeout: Entity<InputState>,
@@ -101,6 +103,7 @@ impl SettingsPanel {
             db,
             settings,
             http_version,
+            connection_reuse: current.connection_reuse,
             connect_timeout,
             read_timeout,
             total_timeout,
@@ -160,6 +163,7 @@ impl SettingsPanel {
             return None;
         }
         Some(AppSettings {
+            connection_reuse: self.connection_reuse,
             connect_timeout_ms,
             read_timeout_ms,
             total_timeout_ms,
@@ -375,6 +379,42 @@ impl Render for SettingsPanel {
                                     .w(px(172.))
                                     .flex_shrink_0()
                                     .child(Select::new(&self.http_version)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_6()
+                            .px_5()
+                            .py_3()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.foreground)
+                                            .child("Connection reuse"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Reuse connections across requests. Turn off to start each send with a fresh connection."),
+                                    ),
+                            )
+                            .child(
+                                Checkbox::new("connection-reuse")
+                                    .checked(self.connection_reuse)
+                                    .on_click(cx.listener(|this, checked, window, cx| {
+                                        this.connection_reuse = *checked;
+                                        this.commit(window, cx);
+                                    })),
                             ),
                     )
                     .child(

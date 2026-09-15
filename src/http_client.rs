@@ -166,23 +166,63 @@ impl InFlightRequest {
     }
 }
 
-/// HTTP client that builds reqwest requests natively and manages its own
-/// tokio runtime.
+/// Network service retained by the shared request editor across sends and tabs.
+/// Only transport settings participate in pool replacement; each returned
+/// handle captures the remaining settings for that send or download.
+#[derive(Default)]
+pub struct HttpClientPool {
+    current: Option<(ClientConfig, reqwest::Client)>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ClientConfig {
+    connect_timeout_ms: u64,
+    read_timeout_ms: u64,
+}
+
+impl HttpClientPool {
+    pub fn for_settings(&mut self, settings: AppSettings) -> HttpClient {
+        let settings = settings.normalized();
+        if !settings.connection_reuse {
+            self.current = None;
+            // A private client also prevents cross-send reuse with HTTP/2,
+            // where a Connection header or HTTP/1 idle-pool limit is insufficient.
+            return HttpClient::new(settings);
+        }
+        let config = ClientConfig {
+            connect_timeout_ms: settings.connect_timeout_ms,
+            read_timeout_ms: settings.read_timeout_ms,
+        };
+        if let Some((current_config, client)) = &self.current
+            && *current_config == config
+        {
+            return HttpClient {
+                client: client.clone(),
+                settings,
+            };
+        }
+
+        let handle = HttpClient::new(settings);
+        // In-flight tasks own cloned handles, so replacing this reference does
+        // not interrupt them or change their timeouts.
+        self.current = Some((config, handle.client.clone()));
+        handle
+    }
+}
+
+/// A shared transport handle plus an immutable snapshot of request safeguards.
 pub struct HttpClient {
     client: reqwest::Client,
     settings: AppSettings,
 }
 
 impl HttpClient {
-    /// Build a client for one request. Reqwest's timeout configuration belongs
-    /// to a `Client`, so creating it at this boundary means a General-settings
-    /// edit affects the next request immediately rather than only after restart.
-    pub fn new(settings: AppSettings) -> Self {
+    /// Build a transport when the service has no matching connection pool.
+    fn new(settings: AppSettings) -> Self {
         let settings = settings.normalized();
         let builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(settings.connect_timeout_ms))
             .read_timeout(Duration::from_millis(settings.read_timeout_ms))
-            .timeout(Duration::from_millis(settings.total_timeout_ms))
             // Redirects are followed explicitly in `send_request` so an auth
             // header with an arbitrary name can be removed at an origin boundary.
             .redirect(reqwest::redirect::Policy::none());
@@ -579,6 +619,9 @@ fn format_byte_limit(bytes: u64) -> String {
         format!("{bytes} bytes")
     }
 }
+
+#[cfg(test)]
+mod connection_pool_tests;
 
 #[cfg(test)]
 mod tests {

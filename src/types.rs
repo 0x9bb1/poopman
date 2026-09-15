@@ -8,6 +8,9 @@ use std::fmt;
 /// safeguards, not data that should be saved into a collection or history item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
+    /// Reuse connections across sends; false gives each send a fresh client.
+    #[serde(default = "AppSettings::default_connection_reuse")]
+    pub connection_reuse: bool,
     /// Maximum time allowed to establish a TCP/TLS connection.
     pub connect_timeout_ms: u64,
     /// Maximum period with no response-body bytes arriving.
@@ -19,6 +22,10 @@ pub struct AppSettings {
 }
 
 impl AppSettings {
+    fn default_connection_reuse() -> bool {
+        true
+    }
+
     pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
     pub const DEFAULT_READ_TIMEOUT_MS: u64 = 30_000;
     pub const DEFAULT_TOTAL_TIMEOUT_MS: u64 = 60_000;
@@ -63,6 +70,7 @@ impl AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            connection_reuse: Self::default_connection_reuse(),
             connect_timeout_ms: Self::DEFAULT_CONNECT_TIMEOUT_MS,
             read_timeout_ms: Self::DEFAULT_READ_TIMEOUT_MS,
             total_timeout_ms: Self::DEFAULT_TOTAL_TIMEOUT_MS,
