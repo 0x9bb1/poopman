@@ -11,10 +11,10 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
     ActiveTheme as _, IndexPath, Sizable as _, h_flex,
-    checkbox::Checkbox,
     input::{Input, InputEvent as InputChangeEvent, InputState},
     scroll::ScrollableElement as _,
     select::{Select, SelectState},
+    switch::Switch,
     v_flex,
 };
 
@@ -384,6 +384,8 @@ impl Render for SettingsPanel {
                     .child(
                         h_flex()
                             .w_full()
+                            .border_t_1()
+                            .border_color(theme.border)
                             .items_center()
                             .justify_between()
                             .gap_6()
@@ -405,16 +407,23 @@ impl Render for SettingsPanel {
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
-                                            .child("Reuse connections across requests. Turn off to start each send with a fresh connection."),
+                                            .child("Keep connections open for subsequent requests."),
                                     ),
                             )
                             .child(
-                                Checkbox::new("connection-reuse")
-                                    .checked(self.connection_reuse)
-                                    .on_click(cx.listener(|this, checked, window, cx| {
-                                        this.connection_reuse = *checked;
-                                        this.commit(window, cx);
-                                    })),
+                                h_flex()
+                                    .w(px(172.))
+                                    .flex_shrink_0()
+                                    .justify_end()
+                                    .child(
+                                        Switch::new("connection-reuse")
+                                            .checked(self.connection_reuse)
+                                            .tooltip("Turn off to use a fresh connection for each send.")
+                                            .on_click(cx.listener(|this, checked, window, cx| {
+                                                this.connection_reuse = *checked;
+                                                this.commit(window, cx);
+                                            })),
+                                    ),
                             ),
                     )
                     .child(
