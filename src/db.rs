@@ -1289,6 +1289,7 @@ mod tests {
         let db = mem_db();
         let settings = AppSettings {
             connect_timeout_ms: 1_500,
+            connection_reuse: false,
             read_timeout_ms: 2_500,
             total_timeout_ms: 3_500,
             max_response_size_bytes: 12 * 1024 * 1024,

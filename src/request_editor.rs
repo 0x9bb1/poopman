@@ -135,6 +135,7 @@ pub struct RequestEditor {
     is_saved_request: bool,
     /// App-wide transfer settings shared with the Settings dialog.
     settings: Arc<RwLock<crate::types::AppSettings>>,
+    http_clients: crate::http_client::HttpClientPool,
 }
 
 impl RequestEditor {
@@ -209,6 +210,7 @@ impl RequestEditor {
             env_vars: std::collections::HashMap::new(),
             is_saved_request: false,
             settings,
+            http_clients: crate::http_client::HttpClientPool::default(),
         };
 
         // Subscribe to URL input changes: a pasted `curl …` command imports the
@@ -1367,7 +1369,7 @@ impl RequestEditor {
             .read()
             .expect("settings lock poisoned")
             .clone();
-        let client = crate::http_client::HttpClient::new(settings);
+        let client = self.http_clients.for_settings(settings);
         let auth_header_name = resolved_auth.compute_header().map(|(name, _)| name);
         let wire_headers = crate::types::effective_wire_headers(&headers, &resolved_auth);
         let inflight = match destination {

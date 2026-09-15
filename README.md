@@ -143,8 +143,20 @@ src/
   Callers don't share it behind a `Mutex`; they send jobs over a channel and receive
   results back over a per-call reply channel — "share memory by communicating." One
   owner means no data races and no lock to poison.
-- **HTTP:** a single `reqwest::Client` (connection pool) is shared across requests, and
-  all requests run on one shared multi-threaded tokio runtime, bridged to GPUI's async.
+- **HTTP:** the shared request editor retains a `reqwest::Client` connection pool
+  across tabs, sends, and downloads. Changing the connection or read idle timeout
+  replaces the pool on the next send; in-flight requests keep their original client
+  and settings. Total timeout and decoded response size limits are captured per
+  request without rebuilding the pool. Settings → General → **Connection reuse**
+  defaults to on; turning it off gives each send/download its own client, including
+  for HTTP/2. A redirect chain still uses that send's client. All requests run on
+  one shared multi-threaded tokio runtime, bridged to GPUI's async.
+  HTTP/1.1 `Connection: close` is also respected, but only requests closing the
+  connection after that response; it does not force a fresh connection for that send.
+  Run `cargo test http_client::connection_pool_tests -- --nocapture` to verify actual
+  connection identities with a local keep-alive server and compare first/subsequent
+  send timings. These timings include client setup and local scheduling, not TLS,
+  and are reported without a flaky speed threshold.
 - **Pure modules** (`code_gen`, `variables`, `url_params`, `code_formatter`, parts of
   `types`) are side-effect-free and unit-tested directly.
 
