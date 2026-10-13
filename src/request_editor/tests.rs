@@ -88,7 +88,10 @@ fn row_removal_and_repeated_request_loads_release_listeners(cx: &mut TestAppCont
                     },
                     window,
                     cx,
-                )
+                );
+                cx.emit(crate::body_editor::BodyTypeChanged {
+                    content_type: Some("text/plain".into()),
+                });
             });
         })
     });

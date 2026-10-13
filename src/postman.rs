@@ -9,8 +9,9 @@ use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
 use crate::types::{
-    AuthConfig, AuthType, BodyType, Collection, CollectionFolder, FormDataRow, FormDataValue,
-    HeaderState, HeaderType, HttpMethod, ParamState, RawSubtype, RequestData, SavedRequest,
+    ApiKeyLocation, AuthConfig, AuthType, BodyType, Collection, CollectionFolder, EnvVar,
+    FormDataRow, FormDataValue, HeaderState, HeaderType, HttpMethod, ParamState, RawSubtype,
+    RequestData, SavedRequest,
 };
 
 const V21_SCHEMA: &str = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
@@ -25,6 +26,7 @@ pub struct PostmanWarning {
 pub struct ImportResult {
     pub collection: Collection,
     pub warnings: Vec<PostmanWarning>,
+    pub variables: Vec<EnvVar>,
 }
 
 fn warning(
@@ -53,18 +55,11 @@ fn bool_entry(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-fn parse_method(value: &Value, path: &str, warnings: &mut Vec<PostmanWarning>) -> HttpMethod {
+fn parse_method(value: &Value, path: &str) -> Result<HttpMethod> {
     let method = text(value.get("method"));
-    if let Some(method) = HttpMethod::from_str(&method) {
-        method
-    } else {
-        warning(
-            warnings,
-            path,
-            format!("unsupported or missing HTTP method {method}, defaulted to GET"),
-        );
-        HttpMethod::GET
-    }
+    HttpMethod::from_str(&method)
+        .filter(|parsed| parsed.as_str() == method)
+        .ok_or_else(|| anyhow!("{path}.method: unsupported or missing HTTP method; choose a supported method before importing"))
 }
 
 fn parse_url(
@@ -269,12 +264,20 @@ fn parse_body(
     headers: &[(String, String)],
     path: &str,
     warnings: &mut Vec<PostmanWarning>,
-) -> BodyType {
+) -> Result<BodyType> {
     let Some(body) = value else {
-        return BodyType::None;
+        return Ok(BodyType::None);
     };
+    if bool_entry(body, "disabled") {
+        warning(
+            warnings,
+            path,
+            "Disabled body omitted; select a body mode to add content after import.",
+        );
+        return Ok(BodyType::None);
+    }
     let mode = text(body.get("mode"));
-    match mode.as_str() {
+    Ok(match mode.as_str() {
         "raw" => {
             let content = text(body.get("raw"));
             let language = body
@@ -356,24 +359,167 @@ fn parse_body(
                 subtype: RawSubtype::UrlEncoded,
             }
         }
-        "file" => {
-            warning(
-                warnings,
-                path,
-                "file request bodies are not supported and were ignored",
-            );
-            BodyType::None
-        }
         "" => BodyType::None,
-        other => {
-            warning(
-                warnings,
-                path,
-                format!("unsupported body mode {other} was ignored"),
-            );
-            BodyType::None
+        _ => return Err(anyhow!(
+            "{path}.body: unsupported body mode; convert it to raw, formdata or urlencoded before importing"
+        )),
+    })
+}
+
+fn validate_scope(
+    value: &Value,
+    path: &str,
+    collection: bool,
+    warnings: &mut Vec<PostmanWarning>,
+) -> Result<()> {
+    if let Some(events) = value.get("event").and_then(Value::as_array) {
+        for (index, event) in events.iter().enumerate() {
+            if bool_entry(event, "disabled") {
+                warning(
+                    warnings,
+                    format!("{path}.event[{index}]"),
+                    "Disabled script omitted; it will not run after import.",
+                );
+            } else {
+                return Err(anyhow!(
+                    "{path}.event[{index}]: scripts cannot be executed by this app; remove or disable the script and materialize its request changes before importing"
+                ));
+            }
         }
     }
+    if !collection
+        && value
+            .get("variable")
+            .is_some_and(|v| v.as_array().is_none_or(|v| !v.is_empty()))
+    {
+        return Err(anyhow!(
+            "{path}.variable: folder/request variables cannot be represented; move them to collection variables with unique names before importing"
+        ));
+    }
+    if value
+        .get("protocolProfileBehavior")
+        .is_some_and(|v| v.as_object().is_none_or(|v| !v.is_empty()))
+    {
+        return Err(anyhow!(
+            "{path}.protocolProfileBehavior: custom transport settings cannot be imported; remove them only if the default transport behavior is acceptable"
+        ));
+    }
+    if value.get("auth").is_some_and(|auth| !auth.is_null()) {
+        warning(
+            warnings,
+            format!("{path}.auth"),
+            "Parent authentication is copied into each request. Edit the request Auth tabs to change it after import.",
+        );
+    }
+    Ok(())
+}
+
+fn validate_request(request: &Value, path: &str) -> Result<()> {
+    if request
+        .get("url")
+        .and_then(|url| url.get("variable"))
+        .is_some_and(|v| v.as_array().is_none_or(|v| !v.is_empty()))
+    {
+        return Err(anyhow!(
+            "{path}.url.variable: URL path variables cannot be imported; replace :name with a literal or a collection {{{{variable}}}} before importing"
+        ));
+    }
+    if let Some(body) = request.get("body") {
+        if let Some(rows) = body.get("urlencoded").and_then(Value::as_array) {
+            for (index, row) in rows.iter().enumerate() {
+                if text_entry(row, "key").contains("{{") || text_entry(row, "value").contains("{{")
+                {
+                    return Err(anyhow!(
+                        "{path}.body.urlencoded[{index}]: templated URL-encoded fields cannot be represented safely; resolve the variables before importing"
+                    ));
+                }
+            }
+        }
+        if let Some(rows) = body.get("formdata").and_then(Value::as_array) {
+            for (index, row) in rows.iter().enumerate() {
+                if row.get("contentType").is_some() {
+                    return Err(anyhow!(
+                        "{path}.body.formdata[{index}].contentType: per-part contentType is not supported; use a body without custom part headers"
+                    ));
+                }
+                if row
+                    .get("src")
+                    .and_then(Value::as_array)
+                    .is_some_and(|files| files.len() != 1)
+                {
+                    return Err(anyhow!(
+                        "{path}.body.formdata[{index}].src: use one file per form-data row before importing"
+                    ));
+                }
+                if text_entry(row, "type") == "file" {
+                    let src = row.get("src").and_then(|src| {
+                        src.as_str().or_else(|| {
+                            src.as_array()
+                                .and_then(|files| files.first())
+                                .and_then(Value::as_str)
+                        })
+                    });
+                    if src.is_none_or(|src| src.is_empty() || src.contains("{{")) {
+                        return Err(anyhow!(
+                            "{path}.body.formdata[{index}].src: supply a literal file path before importing"
+                        ));
+                    }
+                }
+                if !matches!(text_entry(row, "type").as_str(), "" | "text" | "file") {
+                    return Err(anyhow!(
+                        "{path}.body.formdata[{index}]: unsupported form field type; use text or file"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_variables(value: Option<&Value>) -> Result<Vec<EnvVar>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .ok_or_else(|| anyhow!("collection.variable: expected an array of variables"))?;
+    let mut keys = std::collections::HashSet::new();
+    let mut variables = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let path = format!("collection.variable[{index}]");
+        let key = text_entry(item, "key");
+        if key.trim().is_empty() || key != key.trim() {
+            return Err(anyhow!(
+                "{path}: variable keys must be nonempty and have no surrounding whitespace"
+            ));
+        }
+        if !keys.insert(key.clone()) {
+            return Err(anyhow!(
+                "{path}: duplicate variable key; give each collection variable a unique key before importing"
+            ));
+        }
+        let value = match item.get("value") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Bool(_) | Value::Number(_)) => item["value"].to_string(),
+            None | Some(Value::Null) => String::new(),
+            _ => {
+                return Err(anyhow!(
+                    "{path}.value: object/array variables cannot be represented; convert the value to a string before importing"
+                ));
+            }
+        };
+        if value.contains("{{") {
+            return Err(anyhow!(
+                "{path}.value: nested variable expansion is not supported; resolve this value before importing"
+            ));
+        }
+        variables.push(EnvVar {
+            enabled: !bool_entry(item, "disabled"),
+            key,
+            value,
+        });
+    }
+    Ok(variables)
 }
 
 fn auth_entry(auth: &Value, section: &str, key: &str) -> String {
@@ -384,12 +530,35 @@ fn auth_entry(auth: &Value, section: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn parse_auth(value: Option<&Value>, path: &str, warnings: &mut Vec<PostmanWarning>) -> AuthConfig {
-    let Some(auth) = value else {
-        return AuthConfig::default();
+fn parse_auth(value: Option<&Value>, inherited: &AuthConfig, path: &str) -> Result<AuthConfig> {
+    let Some(auth) = value.filter(|value| !value.is_null()) else {
+        return Ok(inherited.clone());
     };
     let kind = text(auth.get("type")).to_ascii_lowercase();
-    match kind.as_str() {
+    let supported_keys: &[&str] = match kind.as_str() {
+        "bearer" => &["token"],
+        "basic" => &["username", "password"],
+        "apikey" => &["key", "value", "in"],
+        _ => &[],
+    };
+    if let Some(entries) = auth.get(&kind) {
+        let entries = entries
+            .as_array()
+            .ok_or_else(|| anyhow!("{path}.auth: expected an array of auth parameters"))?;
+        let mut keys = std::collections::HashSet::new();
+        for entry in entries {
+            let key = text_entry(entry, "key");
+            if !supported_keys.contains(&key.as_str())
+                || !keys.insert(key)
+                || entry.get("value").and_then(Value::as_str).is_none()
+            {
+                return Err(anyhow!(
+                    "{path}.auth: unsupported, duplicate or non-string auth parameter; use unique supported string parameters before importing"
+                ));
+            }
+        }
+    }
+    let config = match kind.as_str() {
         "bearer" => AuthConfig {
             auth_type: AuthType::Bearer,
             bearer_token: auth_entry(auth, "bearer", "token"),
@@ -403,64 +572,99 @@ fn parse_auth(value: Option<&Value>, path: &str, warnings: &mut Vec<PostmanWarni
         },
         "apikey" => {
             let location = auth_entry(auth, "apikey", "in").to_ascii_lowercase();
-            if !location.is_empty() && location != "header" {
-                warning(
-                    warnings,
-                    path,
-                    format!("API key location {location} is not supported; imported as a header"),
-                );
-            }
+            let api_key_location = match location.as_str() {
+                "" | "header" => ApiKeyLocation::Header,
+                "query" => ApiKeyLocation::Query,
+                _ => {
+                    return Err(anyhow!(
+                        "{path}.auth: unsupported API key location; choose header or query before importing"
+                    ));
+                }
+            };
             AuthConfig {
+                api_key_location,
                 auth_type: AuthType::ApiKey,
                 api_key_name: auth_entry(auth, "apikey", "key"),
                 api_key_value: auth_entry(auth, "apikey", "value"),
                 ..AuthConfig::default()
             }
         }
-        "" | "noauth" => AuthConfig::default(),
-        "inherit" => {
-            warning(
-                warnings,
-                path,
-                "inherited authentication is not supported; imported as no auth",
-            );
-            AuthConfig::default()
+        "noauth" => AuthConfig::default(),
+        "inherit" => inherited.clone(),
+        _ => {
+            return Err(anyhow!(
+                "{path}.auth: unsupported or missing auth type; use noauth, bearer, basic, apikey or inherit before importing"
+            ));
         }
-        other => {
-            warning(
-                warnings,
-                path,
-                format!("unsupported auth type {other} was imported as no auth"),
-            );
-            AuthConfig::default()
+    };
+    let incomplete = match config.auth_type {
+        AuthType::None => false,
+        AuthType::Bearer => config.bearer_token.is_empty(),
+        AuthType::Basic => config.basic_username.is_empty() && config.basic_password.is_empty(),
+        AuthType::ApiKey => {
+            config.api_key_name.is_empty()
+                || (config.api_key_location == ApiKeyLocation::Header
+                    && (config.api_key_value.is_empty()
+                        || crate::types::is_transport_owned_header(&config.api_key_name)))
         }
+    };
+    if incomplete {
+        return Err(anyhow!(
+            "{path}.auth: empty or transport-owned credentials cannot be represented; supply valid auth fields or choose noauth before importing"
+        ));
     }
+    Ok(config)
 }
 
-fn parse_request(item: &Value, path: &str, warnings: &mut Vec<PostmanWarning>) -> SavedRequest {
-    let request_value = item.get("request").unwrap_or(&Value::Null);
+fn parse_request(
+    item: &Value,
+    inherited: &AuthConfig,
+    path: &str,
+    warnings: &mut Vec<PostmanWarning>,
+) -> Result<SavedRequest> {
+    let mut request_value = item.get("request").cloned().unwrap_or(Value::Null);
+    if let Some(url) = request_value.as_str() {
+        request_value = json!({"method":"GET", "url":url});
+    }
+    validate_request(&request_value, path)?;
     let name = text(item.get("name"));
     let request_path = format!("{path}/request");
     let (url, params_state) = parse_url(request_value.get("url"), &request_path, warnings);
-    let (headers, headers_state) =
+    let (mut headers, mut headers_state) =
         parse_headers(request_value.get("header"), &request_path, warnings);
     let header_values = headers_state
         .iter()
         .map(|header| (header.key.clone(), header.value.clone()))
         .collect::<Vec<_>>();
+    let body = parse_body(
+        request_value.get("body"),
+        &header_values,
+        &request_path,
+        warnings,
+    )?;
+    if let BodyType::Raw { subtype, .. } = &body
+        && !headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+    {
+        let value = subtype.content_type().to_string();
+        headers.push(("Content-Type".into(), value.clone()));
+        headers_state.push(HeaderState {
+            enabled: true,
+            key: "Content-Type".into(),
+            value,
+            header_type: HeaderType::Custom,
+            predefined: None,
+        });
+    }
     let request = RequestData {
-        method: parse_method(request_value, &request_path, warnings),
+        method: parse_method(&request_value, &request_path)?,
         url,
         headers,
-        body: parse_body(
-            request_value.get("body"),
-            &header_values,
-            &request_path,
-            warnings,
-        ),
-        auth: parse_auth(request_value.get("auth"), &request_path, warnings),
+        body,
+        auth: parse_auth(request_value.get("auth"), inherited, &request_path)?,
     };
-    SavedRequest {
+    Ok(SavedRequest {
         id: 0,
         collection_id: 0,
         folder_id: None,
@@ -475,7 +679,7 @@ fn parse_request(item: &Value, path: &str, warnings: &mut Vec<PostmanWarning>) -
         position: 0,
         created_at: String::new(),
         updated_at: String::new(),
-    }
+    })
 }
 
 fn parse_items(
@@ -483,23 +687,27 @@ fn parse_items(
     collection_id: i64,
     parent_id: Option<i64>,
     path: &str,
+    inherited: &AuthConfig,
     warnings: &mut Vec<PostmanWarning>,
-) -> (Vec<CollectionFolder>, Vec<SavedRequest>) {
+) -> Result<(Vec<CollectionFolder>, Vec<SavedRequest>)> {
     let mut folders = Vec::new();
     let mut requests = Vec::new();
     let mut folder_position = 0;
     let mut request_position = 0;
     for (index, item) in items.iter().enumerate() {
         let item_path = format!("{path}/item[{index}]");
+        validate_scope(item, &item_path, false, warnings)?;
         if let Some(children) = item.get("item").and_then(Value::as_array) {
             let name = text(item.get("name"));
+            let auth = parse_auth(item.get("auth"), inherited, &item_path)?;
             let (child_folders, child_requests) = parse_items(
                 children,
                 collection_id,
                 Some(index as i64 + 1),
                 &item_path,
+                &auth,
                 warnings,
-            );
+            )?;
             folders.push(CollectionFolder {
                 id: 0,
                 collection_id,
@@ -515,7 +723,7 @@ fn parse_items(
             });
             folder_position += 1;
         } else if item.get("request").is_some() {
-            let mut request = parse_request(item, &item_path, warnings);
+            let mut request = parse_request(item, inherited, &item_path, warnings)?;
             request.collection_id = collection_id;
             request.folder_id = parent_id;
             request.position = request_position;
@@ -529,7 +737,7 @@ fn parse_items(
             );
         }
     }
-    (folders, requests)
+    Ok((folders, requests))
 }
 
 pub fn import_collection(json_text: &str) -> Result<ImportResult> {
@@ -546,29 +754,23 @@ pub fn import_collection(json_text: &str) -> Result<ImportResult> {
     }
 
     let mut warnings = Vec::new();
-    if root.get("variable").is_some() {
+    validate_scope(&root, "collection", true, &mut warnings)?;
+    let variables = parse_variables(root.get("variable"))?;
+    if !variables.is_empty() {
         warning(
             &mut warnings,
-            "variable",
-            "collection variables are not imported; use Environment instead",
+            "collection.variable",
+            "Collection variables will be saved in a new, uniquely named environment. Select that environment before sending; existing environments and the active selection are not changed.",
         );
     }
-    for field in ["event", "auth"] {
-        if root.get(field).is_some() {
-            warning(
-                &mut warnings,
-                field,
-                format!("collection-level {field} is not imported"),
-            );
-        }
-    }
+    let auth = parse_auth(root.get("auth"), &AuthConfig::default(), "collection")?;
 
     let name = text(root.get("info").and_then(|info| info.get("name")));
     let items = root
         .get("item")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("Postman collection has no item array"))?;
-    let (folders, requests) = parse_items(items, 0, None, "item", &mut warnings);
+    let (folders, requests) = parse_items(items, 0, None, "collection", &auth, &mut warnings)?;
     Ok(ImportResult {
         collection: Collection {
             id: 0,
@@ -582,6 +784,7 @@ pub fn import_collection(json_text: &str) -> Result<ImportResult> {
             requests,
         },
         warnings,
+        variables,
     })
 }
 
@@ -637,14 +840,11 @@ fn export_body(body: &BodyType) -> Option<Value> {
         BodyType::None => None,
         BodyType::Raw { content, subtype } => match subtype {
             RawSubtype::UrlEncoded => {
-                let fields = content
-                    .split('&')
-                    .filter(|field| !field.is_empty())
-                    .map(|field| {
-                        let (key, value) = field.split_once('=').unwrap_or((field, ""));
+                let fields = url::form_urlencoded::parse(content.as_bytes())
+                    .map(|(key, value)| {
                         json!({
-                            "key": urlencoding::decode(key).unwrap_or_else(|_| key.into()).to_string(),
-                            "value": urlencoding::decode(value).unwrap_or_else(|_| value.into()).to_string(),
+                            "key": key,
+                            "value": value,
                             "type": "text",
                         })
                     })
@@ -694,7 +894,10 @@ fn export_auth(auth: &AuthConfig) -> Option<Value> {
             "apikey": [
                 { "key": "key", "value": auth.api_key_name, "type": "string" },
                 { "key": "value", "value": auth.api_key_value, "type": "string" },
-                { "key": "in", "value": "header", "type": "string" },
+                { "key": "in", "value": match auth.api_key_location {
+                    ApiKeyLocation::Header => "header",
+                    ApiKeyLocation::Query => "query",
+                }, "type": "string" },
             ],
         })),
     }
@@ -739,6 +942,9 @@ pub fn export_collection(collection: &Collection) -> Result<String> {
         "item": items,
     }))?)
 }
+
+#[cfg(test)]
+mod fixture_tests;
 
 #[cfg(test)]
 mod tests {
@@ -815,16 +1021,24 @@ mod tests {
 
         let imported = import_collection(&input.to_string()).unwrap();
         let saved = &imported.collection.requests[0];
-        assert!(saved.request.headers.is_empty());
-        assert_eq!(saved.headers_state.len(), 1);
+        assert_eq!(
+            saved.request.headers,
+            vec![("Content-Type".into(), "text/plain".into())]
+        );
+        assert_eq!(saved.headers_state.len(), 2);
         assert_eq!(saved.headers_state[0].key, "X-Trace");
         assert!(!saved.headers_state[0].enabled);
 
         let exported: Value =
             serde_json::from_str(&export_collection(&imported.collection).unwrap()).unwrap();
         let headers = exported["item"][0]["request"]["header"].as_array().unwrap();
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2);
         assert_eq!(headers[0]["key"], "X-Trace");
+        assert!(
+            headers
+                .iter()
+                .all(|header| header["key"] != "Content-Length")
+        );
     }
 
     #[test]

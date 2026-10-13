@@ -63,6 +63,8 @@ pub(crate) fn bind_save_request_shortcut(cx: &mut App) {
 }
 
 #[cfg(test)]
+mod import_tests;
+#[cfg(test)]
 mod save_tests;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -309,6 +311,11 @@ impl PoopmanApp {
             &collections_panel,
             window,
             move |this, _, event: &CollectionsChanged, window, cx| {
+                if let Some(environment) = &event.imported_environment {
+                    this.env_manager.update(cx, |manager, cx| {
+                        manager.add_imported_environment(environment.clone(), cx);
+                    });
+                }
                 this.reconcile_collection_tabs(&event.deleted_request_ids, window, cx);
             },
         );

@@ -363,14 +363,7 @@ impl BodyEditor {
         }
         self.normalize_trailing_formdata_row(window, cx);
 
-        // Emit event after all state updates are complete
-        let content_type = match draft.kind {
-            BodyKind::None => None,
-            BodyKind::Raw => Some(draft.raw_subtype.content_type().to_string()),
-            BodyKind::FormData => Some("multipart/form-data; boundary=<auto>".to_string()),
-        };
-
-        cx.emit(BodyTypeChanged { content_type });
+        cx.notify();
     }
 
     // Form-data table methods

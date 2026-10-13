@@ -48,6 +48,7 @@ pub fn substitute_url(input: &str, vars: &HashMap<String, String>) -> String {
 pub fn substitute_auth(auth: &AuthConfig, vars: &HashMap<String, String>) -> AuthConfig {
     AuthConfig {
         auth_type: auth.auth_type,
+        api_key_location: auth.api_key_location,
         bearer_token: substitute(&auth.bearer_token, vars),
         basic_username: substitute(&auth.basic_username, vars),
         basic_password: substitute(&auth.basic_password, vars),
@@ -193,6 +194,7 @@ mod tests {
             basic_password: "{{pass}}".into(),
             api_key_name: "{{keyname}}".into(),
             api_key_value: "{{keyval}}".into(),
+            ..Default::default()
         };
         let v = vars(&[
             ("token", "abc"), ("user", "u"), ("pass", "p"),

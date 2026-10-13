@@ -16,9 +16,11 @@ use crate::auth_editor::AuthEditor;
 use crate::body_editor::{BodyEditor, BodyTypeChanged};
 use crate::header_completion::HeaderCompletionProvider;
 use crate::theme::METHOD_SELECT_WIDTH;
-use crate::types::{HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
+use crate::types::{BodyType, HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
 use crate::url_params::{self, QueryParam};
 
+#[cfg(test)]
+mod import_tests;
 #[cfg(test)]
 mod tests;
 
@@ -423,7 +425,8 @@ impl RequestEditor {
         // parse_url_to_params would otherwise bail and leave Params empty.
         self.rebuild_params_from_url(window, cx);
 
-        // Force sync Content-Type with body type to auto-correct any inconsistencies in history
+        // Loading a request must preserve its explicit MIME type, including parameters.
+        // User-initiated body type changes still update the default via BodyTypeChanged.
         let loaded_body = body_draft
             .map(crate::types::BodyDraft::selected_body)
             .unwrap_or_else(|| request.body.clone());
@@ -432,7 +435,13 @@ impl RequestEditor {
             crate::types::BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
             crate::types::BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
         };
-        self.update_content_type_from_body(&content_type, window, cx);
+        if !request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            self.update_content_type_from_body(&content_type, window, cx);
+        }
 
         cx.notify();
     }
@@ -610,6 +619,13 @@ impl RequestEditor {
         // states may contain only the rows that appeared in the source request.
         self.headers.clear();
         self.init_predefined_headers(window, cx);
+
+        let content_type = match self.body_editor.read(cx).get_body(cx) {
+            BodyType::None => None,
+            BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
+            BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
+        };
+        self.update_content_type_from_body(&content_type, window, cx);
 
         // Apply saved state on top, normalizing predefined rows and dropping
         // legacy Content-Length values.
@@ -1372,6 +1388,7 @@ impl RequestEditor {
         let client = self.http_clients.for_settings(settings);
         let auth_header_name = resolved_auth.compute_header().map(|(name, _)| name);
         let wire_headers = crate::types::effective_wire_headers(&headers, &resolved_auth);
+        let url = resolved_auth.effective_url(&url);
         let inflight = match destination {
             Some(destination) => client.start_download(
                 method,

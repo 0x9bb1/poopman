@@ -43,6 +43,7 @@ pub struct CollectionsChanged {
     /// Requests removed by a collection/folder/request deletion. Tabs pointing
     /// at these rows must become ordinary unsaved tabs.
     pub deleted_request_ids: Vec<i64>,
+    pub imported_environment: Option<crate::types::Environment>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -552,6 +553,7 @@ impl CollectionsPanel {
                         this.reload(window, cx);
                         cx.emit(CollectionsChanged {
                             deleted_request_ids,
+                            ..Default::default()
                         });
                     })?;
                 }
@@ -612,16 +614,22 @@ impl CollectionsPanel {
         let db = self.db.clone();
         let name_for_db = name.clone();
         let task = cx.background_spawn(async move {
-            db.insert_collection_tree(&imported.collection, &name_for_db)
+            db.insert_collection_import(&imported.collection, &name_for_db, &imported.variables)
         });
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
-                Ok(id) => {
+                Ok((id, imported_environment)) => {
                     this.update_in(cx, |this, window, cx| {
                         this.selected = Some(NodeRef::Collection(id));
                         this.expanded_collections.insert(id);
                         this.reload(window, cx);
-                        cx.emit(CollectionsChanged::default());
+                        let environment_notice = imported_environment.as_ref().map(|env| {
+                            format!("\n\nVariables saved in environment \"{}\". Select it from the Environment menu before sending. Existing environments were not changed.", env.name)
+                        }).unwrap_or_default();
+                        cx.emit(CollectionsChanged {
+                            imported_environment,
+                            ..Default::default()
+                        });
 
                         if warnings.is_empty() {
                             panel_notice(
@@ -641,7 +649,7 @@ impl CollectionsPanel {
                                 window,
                                 cx,
                                 "Collection imported with warnings",
-                                format!("Imported {}.\n\n{}", name, details),
+                                format!("Imported {}.{}\n\n{}", name, environment_notice, details),
                             );
                         }
                     })?;

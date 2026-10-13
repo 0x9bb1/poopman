@@ -242,6 +242,19 @@ impl EnvironmentManager {
         this
     }
 
+    pub fn add_imported_environment(&mut self, environment: Environment, cx: &mut Context<Self>) {
+        if self
+            .environments
+            .iter()
+            .any(|existing| existing.id == environment.id)
+        {
+            return;
+        }
+        self.environments.push(environment);
+        cx.emit(self.changed_event());
+        cx.notify();
+    }
+
     /// (Re)subscribe to the name + variable inputs so any edit auto-saves.
     fn wire_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name_input.clone();

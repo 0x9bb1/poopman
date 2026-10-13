@@ -1,0 +1,19 @@
+{
+  "info": {"name": "Inherited auth", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{token}}"}]},
+  "item": [
+    {"name": "Implicit collection auth", "request": {"method": "GET", "url": "https://example.test"}},
+    {"name": "Explicit inheritance", "request": {"method": "GET", "url": "https://example.test", "auth": {"type": "inherit"}}},
+    {"name": "Null inheritance", "request": {"method": "GET", "url": "https://example.test", "auth": null}},
+    {"name": "No auth", "request": {"method": "GET", "url": "https://example.test", "auth": {"type": "noauth"}}},
+    {"name": "Basic folder", "auth": {"type": "basic", "basic": [{"key": "username", "value": "user"}, {"key": "password", "value": "pass"}]}, "item": [
+      {"name": "Inherit basic", "request": {"method": "GET", "url": "https://example.test"}},
+      {"name": "Nested", "item": [{"name": "Deep inheritance", "request": {"method": "GET", "url": "https://example.test", "auth": {"type": "inherit"}}}]},
+      {"name": "Query key", "request": {"method": "GET", "url": "https://example.test?q=1&api-key=stale&%61pi-key=stale2&API-KEY=keep#results", "header": [{"key":"api-key", "value":"manual"}], "auth": {"type": "apikey", "apikey": [{"key": "in", "value": "query"}, {"key": "key", "value": "api-key"}, {"key": "value", "value": "{{key}}"}]}}}
+    ]},
+    {"name": "Noauth folder", "auth": {"type": "noauth"}, "item": [
+      {"name": "No inherited auth", "request": {"method": "GET", "url": "https://example.test"}},
+      {"name": "Override", "request": {"method": "GET", "url": "https://example.test", "auth": {"type":"bearer", "bearer":[{"key":"token", "value":"local"}]}}}
+    ]}
+  ]
+}

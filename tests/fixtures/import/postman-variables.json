@@ -1,0 +1,12 @@
+{
+  "info": {"name": "Scoped API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "variable": [
+    {"key": "base_url", "value": "https://example.test"},
+    {"key": "token", "value": "imported-token"},
+    {"key": "disabled", "value": "do-not-send", "disabled": true},
+    {"key": "count", "value": 10},
+    {"key": "flag", "value": true}
+  ],
+  "auth": {"type":"apikey", "apikey":[{"key":"in", "value":"query"}, {"key":"key", "value":"api_key"}, {"key":"value", "value":"{{token}}"}]},
+  "item": [{"name":"List", "request":{"method":"GET", "url":"{{base_url}}/items?count={{count}}"}}]
+}

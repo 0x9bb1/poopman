@@ -50,6 +50,45 @@ fn split_url(url: &str) -> UrlParts<'_> {
     }
 }
 
+pub fn set_query_param(url: &str, key: &str, value: &str) -> String {
+    let parts = split_url(url);
+    let mut query: Vec<&str> = parts
+        .query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|field| !field.is_empty())
+        .filter(|field| {
+            url::form_urlencoded::parse(field.as_bytes())
+                .next()
+                .is_none_or(|(name, _)| name != key)
+        })
+        .collect();
+    let encoded = format!(
+        "{}={}",
+        urlencoding::encode(key),
+        urlencoding::encode(value)
+    );
+    query.push(&encoded);
+    append_query(&extract_base_url(url), &query.join("&"))
+}
+
+pub fn append_query(url: &str, encoded_query: &str) -> String {
+    let (base, fragment) = url.split_once('#').unwrap_or((url, ""));
+    let separator = if base.ends_with('?') {
+        ""
+    } else if base.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
+    let mut result = format!("{base}{separator}{encoded_query}");
+    if url.contains('#') {
+        result.push('#');
+        result.push_str(fragment);
+    }
+    result
+}
+
 /// Extract the URL without its query string while preserving any fragment.
 ///
 /// # Examples
