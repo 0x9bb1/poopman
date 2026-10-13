@@ -1,0 +1,12 @@
+{
+  "info":{"name":"Bodies", "schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "event":[{"disabled":true, "listen":"prerequest", "script":{"exec":["ignored();"]}}],
+  "item":[
+    {"name":"Raw", "request":{"method":"POST", "url":"https://example.test", "body":{"mode":"raw", "raw":"{\"token\":\"{{token}}\"}", "options":{"raw":{"language":"json"}}}}},
+    {"name":"Encoded", "request":{"method":"POST", "url":"https://example.test", "body":{"mode":"urlencoded", "urlencoded":[{"key":"q", "value":"a b&你好"}, {"key":"off", "value":"ignored", "disabled":true}]}}},
+    {"name":"Multipart", "request":{"method":"POST", "url":"https://example.test", "body":{"mode":"formdata", "formdata":[{"key":"text", "type":"text", "value":"{{token}}"}, {"key":"file", "type":"file", "src":["a.txt"]}, {"key":"off", "value":"ignored", "disabled":true}]}}},
+    {"name":"Disabled body", "request":{"method":"POST", "url":"https://example.test", "body":{"disabled":true, "mode":"raw", "raw":"must-not-send"}}},
+    {"name":"URL shorthand", "request":"https://example.test/path?q=1"},
+    {"name":"Empty query key value", "request":{"method":"GET", "url":"https://example.test", "auth":{"type":"apikey", "apikey":[{"key":"key", "value":"token"}, {"key":"value", "value":""}, {"key":"in", "value":"query"}]}}}
+  ]
+}

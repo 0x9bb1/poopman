@@ -913,16 +913,62 @@ impl Database {
         })
     }
 
-    /// Import or copy a complete collection tree in one transaction.
-    pub fn insert_collection_tree(&self, collection: &Collection, name: &str) -> Result<i64> {
+    pub fn insert_collection_import(
+        &self,
+        collection: &Collection,
+        name: &str,
+        variables: &[EnvVar],
+    ) -> Result<(i64, Option<Environment>)> {
         let name = require_name(name)?;
         let collection = collection.clone();
+        let variables = variables.to_vec();
         self.call(move |conn| {
             let tx = conn.transaction()?;
             let id = insert_collection_tree_tx(&tx, &collection, &name)?;
+            let environment = if variables.is_empty() {
+                None
+            } else {
+                let mut environment_name = format!("{name} (Imported)");
+                let mut suffix = 2;
+                while tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM environments WHERE name = ?1)",
+                    [&environment_name],
+                    |row| row.get::<_, bool>(0),
+                )? {
+                    environment_name = format!("{name} (Imported {suffix})");
+                    suffix += 1;
+                }
+                tx.execute(
+                    "INSERT INTO environments (name, position) VALUES (?1, (SELECT COALESCE(MAX(position), 0) + 1 FROM environments))",
+                    [&environment_name],
+                )?;
+                let environment_id = tx.last_insert_rowid();
+                for (position, variable) in variables.iter().enumerate() {
+                    tx.execute(
+                        "INSERT INTO env_variables (environment_id, enabled, key, value, position) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            environment_id,
+                            variable.enabled,
+                            variable.key,
+                            variable.value,
+                            position as i64,
+                        ],
+                    )?;
+                }
+                Some(Environment {
+                    id: environment_id,
+                    name: environment_name,
+                    variables,
+                })
+            };
             tx.commit()?;
-            Ok(id)
+            Ok((id, environment))
         })
+    }
+
+    pub fn insert_collection_tree(&self, collection: &Collection, name: &str) -> Result<i64> {
+        self.insert_collection_import(collection, name, &[])
+            .map(|(id, _)| id)
     }
 
     pub fn duplicate_collection(&self, id: i64) -> Result<i64> {
@@ -1194,6 +1240,9 @@ impl Database {
 }
 
 #[cfg(test)]
+mod import_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1462,6 +1511,7 @@ mod tests {
             basic_password: "must-not-persist".into(),
             api_key_name: "must-not-persist".into(),
             api_key_value: "must-not-persist".into(),
+            ..Default::default()
         };
 
         db.insert_history(

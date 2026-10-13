@@ -21,6 +21,8 @@ pub enum CurlImportError {
     InvalidOptionValue { option: String, expected: &'static str },
     EmptyUrl,
     MultipleUrls,
+    UnclosedQuote,
+    UnsupportedSemantics(&'static str),
 }
 
 impl fmt::Display for CurlImportError {
@@ -37,7 +39,17 @@ impl fmt::Display for CurlImportError {
                 f,
                 "cURL option `{option}` has an invalid value; expected {expected}. The command was not imported."
             ),
-            Self::EmptyUrl => write!(f, "The cURL command contains an empty URL and was not imported."),
+            Self::UnclosedQuote => write!(
+                f,
+                "Unclosed quote in cURL command. Paste the complete command and try again."
+            ),
+            Self::UnsupportedSemantics(message) => {
+                write!(f, "{message} The command was not imported.")
+            }
+            Self::EmptyUrl => write!(
+                f,
+                "The cURL command contains an empty URL and was not imported."
+            ),
             Self::MultipleUrls => write!(
                 f,
                 "The cURL command contains more than one URL. Import one request at a time."
@@ -51,7 +63,7 @@ impl std::error::Error for CurlImportError {}
 /// Shell-style tokenizer. Single quotes take content verbatim; double quotes
 /// honor `\"` and `\\`; outside quotes a backslash escapes the next char,
 /// except before whitespace where it is a token break (see module docs).
-fn tokenize(input: &str) -> Vec<String> {
+fn tokenize(input: &str) -> Result<Vec<String>, CurlImportError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut has_token = false;
@@ -61,18 +73,27 @@ fn tokenize(input: &str) -> Vec<String> {
         match c {
             '\'' => {
                 has_token = true;
+                let mut closed = false;
                 for q in chars.by_ref() {
                     if q == '\'' {
+                        closed = true;
                         break;
                     }
                     current.push(q);
                 }
+                if !closed {
+                    return Err(CurlImportError::UnclosedQuote);
+                }
             }
             '"' => {
                 has_token = true;
+                let mut closed = false;
                 while let Some(q) = chars.next() {
                     match q {
-                        '"' => break,
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
                         '\\' => {
                             if let Some(&next) = chars.peek()
                                 && (next == '"' || next == '\\')
@@ -85,6 +106,9 @@ fn tokenize(input: &str) -> Vec<String> {
                         }
                         _ => current.push(q),
                     }
+                }
+                if !closed {
+                    return Err(CurlImportError::UnclosedQuote);
                 }
             }
             '\\' => {
@@ -119,7 +143,34 @@ fn tokenize(input: &str) -> Vec<String> {
     if has_token {
         tokens.push(current);
     }
-    tokens
+    Ok(tokens)
+}
+
+fn data_part(option: &str, value: String) -> Result<String, CurlImportError> {
+    let file_error = || {
+        CurlImportError::UnsupportedSemantics(
+            "File/stdin data is not supported during import. Paste the file contents as inline data (use --data-raw for a literal leading @).",
+        )
+    };
+    if option == "--data-urlencode" {
+        // curl checks '=' before '@'; the name is already URL-encoded.
+        if let Some((name, content)) = value.split_once('=') {
+            let encoded = urlencoding::encode(content).replace("%20", "+");
+            return Ok(if name.is_empty() {
+                encoded
+            } else {
+                format!("{name}={encoded}")
+            });
+        }
+        if value.contains('@') {
+            return Err(file_error());
+        }
+        return Ok(urlencoding::encode(&value).replace("%20", "+"));
+    }
+    if option != "--data-raw" && value.starts_with('@') {
+        return Err(file_error());
+    }
+    Ok(value)
 }
 
 /// Extract a flag's value: attached (`-XPOST`), separate (`-X POST`), or
@@ -194,12 +245,16 @@ fn set_url(url: &mut Option<String>, value: String) -> Result<(), CurlImportErro
 /// `curl`, or it has no URL). Unsafe, unsupported, or ambiguous commands return
 /// a visible error to the caller instead of a partially imported request.
 pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
-    let tokens = tokenize(input);
+    if !input.trim_start().starts_with("curl") {
+        return Ok(None);
+    }
+    let tokens = tokenize(input)?;
     if tokens.first().map(String::as_str) != Some("curl") {
         return Ok(None);
     }
 
     let mut method: Option<HttpMethod> = None;
+    let mut get = false;
     let mut url: Option<String> = None;
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut data_parts: Vec<String> = Vec::new();
@@ -214,26 +269,32 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
             set_url(&mut url, tok)?;
         } else if tok == "--" {
             end_of_options = true;
+        } else if tok == "-G" || tok == "--get" {
+            get = true;
+        } else if tok == "--no-get" {
+            get = false;
         } else if matches_flag(&tok, "-X", "--request") {
             let v = flag_value(&tokens, &mut i, "-X", "--request")?;
-            method = Some(HttpMethod::from_str(&v).ok_or_else(|| {
-                CurlImportError::InvalidOptionValue {
-                    option: tok.clone(),
-                    expected: "a supported HTTP method",
-                }
-            })?);
+            method = Some(
+                HttpMethod::from_str(&v)
+                    .filter(|method| method.as_str() == v)
+                    .ok_or_else(|| CurlImportError::InvalidOptionValue {
+                        option: tok.clone(),
+                        expected: "a supported HTTP method",
+                    })?,
+            );
         } else if matches_flag(&tok, "-H", "--header") {
             let v = flag_value(&tokens, &mut i, "-H", "--header")?;
-            let (k, val) = v.split_once(':').ok_or_else(|| {
-                CurlImportError::InvalidOptionValue {
-                    option: tok.clone(),
-                    expected: "a `Name: value` header",
-                }
-            })?;
-            if k.trim().is_empty() {
+            let (k, val) =
+                v.split_once(':')
+                    .ok_or_else(|| CurlImportError::InvalidOptionValue {
+                        option: tok.clone(),
+                        expected: "a `Name: value` header",
+                    })?;
+            if k.trim().is_empty() || val.trim().is_empty() {
                 return Err(CurlImportError::InvalidOptionValue {
                     option: tok,
-                    expected: "a `Name: value` header",
+                    expected: "a nonempty `Name: value` header; header suppression and empty header values cannot be represented",
                 });
             }
             if !is_transport_owned_header(k.trim()) {
@@ -242,17 +303,23 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
         } else if matches_flag(&tok, "", "--data-raw")
             || matches_flag(&tok, "", "--data-binary")
             || matches_flag(&tok, "", "--data-urlencode")
+            || matches_flag(&tok, "", "--data-ascii")
         {
             let long = if tok.starts_with("--data-raw") {
                 "--data-raw"
             } else if tok.starts_with("--data-binary") {
                 "--data-binary"
+            } else if tok.starts_with("--data-ascii") {
+                "--data-ascii"
             } else {
                 "--data-urlencode"
             };
-            data_parts.push(flag_value(&tokens, &mut i, "", long)?);
+            data_parts.push(data_part(long, flag_value(&tokens, &mut i, "", long)?)?);
         } else if matches_flag(&tok, "-d", "--data") {
-            data_parts.push(flag_value(&tokens, &mut i, "-d", "--data")?);
+            data_parts.push(data_part(
+                "--data",
+                flag_value(&tokens, &mut i, "-d", "--data")?,
+            )?);
         } else if matches_flag(&tok, "-F", "--form") {
             let v = flag_value(&tokens, &mut i, "-F", "--form")?;
             let (k, val) = v.split_once('=').ok_or_else(|| {
@@ -267,6 +334,16 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
                     expected: "a `name=value` form field",
                 });
             }
+            if val.starts_with('<')
+                || val.contains(';')
+                || val.starts_with('(')
+                || (val.starts_with('@')
+                    && (val.contains(',') || val == "@-" || val == "@" || val.contains('"')))
+            {
+                return Err(CurlImportError::UnsupportedSemantics(
+                    "Complex form fields are not supported. Use separate plain name=value or name=@path form fields without modifiers.",
+                ));
+            }
             let value = match val.strip_prefix('@') {
                 Some(path) => FormDataValue::File { path: path.to_string() },
                 None => FormDataValue::Text(val.to_string()),
@@ -277,21 +354,26 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
             // curl reads the -b argument as cookie data when it contains '=',
             // otherwise as a cookie-jar filename (which we cannot load).
             // Browser "Copy as cURL" always emits cookie data as a -b string.
-            if v.contains('=') {
-                headers.push(("Cookie".to_string(), v));
+            if !v.contains('=') {
+                return Err(CurlImportError::UnsupportedSemantics(
+                    "A cookie file cannot be imported. Supply inline cookies with --cookie 'name=value' instead.",
+                ));
             }
+            headers.push(("Cookie".to_string(), v));
         } else if matches_flag(&tok, "-u", "--user") {
             let v = flag_value(&tokens, &mut i, "-u", "--user")?;
-            // Split on the first ':' into user/pass; a value with no ':' is a
-            // username with an empty password (curl then prompts, we don't).
-            let (user, pass) = match v.split_once(':') {
-                Some((u, p)) => (u.to_string(), p.to_string()),
-                None => (v, String::new()),
-            };
+            let (user, pass) = v.split_once(':').ok_or(CurlImportError::UnsupportedSemantics(
+                "Interactive password prompts are not supported. Supply --user 'username:password' (or 'username:' for an empty password).",
+            ))?;
+            if user.is_empty() && pass.is_empty() {
+                return Err(CurlImportError::UnsupportedSemantics(
+                    "Empty Basic auth cannot be represented. Supply credentials or an explicit Authorization header instead.",
+                ));
+            }
             auth = AuthConfig {
                 auth_type: AuthType::Basic,
-                basic_username: user,
-                basic_password: pass,
+                basic_username: user.to_string(),
+                basic_password: pass.to_string(),
                 ..AuthConfig::default()
             };
         } else if matches_flag(&tok, "", "--url") {
@@ -308,13 +390,50 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
         i += 1;
     }
 
-    let Some(url) = url else {
+    if auth.auth_type != AuthType::None
+        && headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+    {
+        return Err(CurlImportError::UnsupportedSemantics(
+            "Combining --user and an Authorization header cannot be imported faithfully. Keep only the intended authentication source.",
+        ));
+    }
+    if !form_rows.is_empty() && (get || !data_parts.is_empty()) {
+        return Err(CurlImportError::UnsupportedSemantics(
+            "Cannot combine --form with --get or --data options. Import a single request body mode.",
+        ));
+    }
+    let Some(mut url) = url else {
         return Ok(None);
     };
+    if get && !data_parts.is_empty() {
+        let query = data_parts.join("&");
+        if query
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '#')
+        {
+            return Err(CurlImportError::UnsupportedSemantics(
+                "GET data contains unsafe query characters. Use --data-urlencode to encode the query values.",
+            ));
+        }
+        url = crate::url_params::append_query(&url, &query);
+    }
 
-    let body = if !form_rows.is_empty() {
+    let body = if get {
+        BodyType::None
+    } else if !form_rows.is_empty() {
         BodyType::FormData(form_rows)
     } else if !data_parts.is_empty() {
+        if !headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push((
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            ));
+        }
         let content_type = headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
@@ -326,6 +445,8 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
             RawSubtype::Xml
         } else if content_type.contains("javascript") {
             RawSubtype::JavaScript
+        } else if content_type.contains("application/x-www-form-urlencoded") {
+            RawSubtype::UrlEncoded
         } else {
             RawSubtype::Text
         };
@@ -342,6 +463,9 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
 
     Ok(Some(RequestData { method, url, headers, body, auth }))
 }
+
+#[cfg(test)]
+mod fixture_tests;
 
 #[cfg(test)]
 mod tests {
@@ -421,7 +545,13 @@ mod tests {
         );
         assert_eq!(
             r.headers,
-            vec![("X-Trace".to_string(), "kept".to_string())]
+            vec![
+                ("X-Trace".to_string(), "kept".to_string()),
+                (
+                    "Content-Type".to_string(),
+                    "application/x-www-form-urlencoded".to_string()
+                )
+            ]
         );
     }
 
@@ -452,7 +582,7 @@ mod tests {
         match r.body {
             BodyType::Raw { content, subtype } => {
                 assert_eq!(content, "a=1&b=2");
-                assert_eq!(subtype, RawSubtype::Text);
+                assert_eq!(subtype, RawSubtype::UrlEncoded);
             }
             other => panic!("expected raw body, got {:?}", other),
         }
@@ -495,8 +625,8 @@ mod tests {
     }
 
     #[test]
-    fn user_flag_without_colon_is_username_only() {
-        let r = parse("curl -u alice https://example.com");
+    fn user_flag_with_explicit_empty_password() {
+        let r = parse("curl -u alice: https://example.com");
         assert_eq!(r.auth.auth_type, crate::types::AuthType::Basic);
         assert_eq!(r.auth.basic_username, "alice");
         assert_eq!(r.auth.basic_password, "");
@@ -584,11 +714,8 @@ mod tests {
 
     #[test]
     fn cookie_jar_filename_is_not_treated_as_data() {
-        // A -b argument without '=' is a cookie-jar filename in curl; we can't load
-        // it, so it must not become a bogus Cookie header.
-        let r = parse("curl -b cookies.txt https://example.com");
-        assert!(r.headers.is_empty(), "headers = {:?}", r.headers);
-        assert_eq!(r.url, "https://example.com");
+        let error = parse_error("curl -b cookies.txt https://example.com");
+        assert!(error.to_string().contains("cookie file"));
     }
 
     #[test]

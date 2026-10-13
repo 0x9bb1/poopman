@@ -380,22 +380,40 @@ pub enum AuthType {
     ApiKey,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApiKeyLocation {
+    #[default]
+    Header,
+    Query,
+}
+
 /// Config-based auth: a flat struct (all fields always present) so switching
 /// type in the UI preserves each type's previously-typed values, matching
-/// Postman. The wire header is *computed* from this — auth is never stored as a
-/// header row.
+/// Postman. Wire credentials are computed from this, not stored in header or
+/// query editor rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub auth_type: AuthType,
     pub bearer_token: String,
     pub basic_username: String,
     pub basic_password: String,
-    /// Header name for API-Key auth, e.g. "X-API-Key".
     pub api_key_name: String,
     pub api_key_value: String,
+    #[serde(default)]
+    pub api_key_location: ApiKeyLocation,
 }
 
 impl AuthConfig {
+    pub fn effective_url(&self, url: &str) -> String {
+        if self.auth_type != AuthType::ApiKey
+            || self.api_key_location != ApiKeyLocation::Query
+            || self.api_key_name.is_empty()
+        {
+            return url.to_string();
+        }
+        crate::url_params::set_query_param(url, &self.api_key_name, &self.api_key_value)
+    }
+
     /// Return the portion of this configuration that belongs to the selected
     /// auth mode.
     ///
@@ -420,6 +438,7 @@ impl AuthConfig {
                 auth_type: AuthType::ApiKey,
                 api_key_name: self.api_key_name.clone(),
                 api_key_value: self.api_key_value.clone(),
+                api_key_location: self.api_key_location,
                 ..Self::default()
             },
         }
@@ -453,7 +472,10 @@ impl AuthConfig {
                 }
             }
             AuthType::ApiKey => {
-                if self.api_key_name.is_empty() || self.api_key_value.is_empty() {
+                if self.api_key_location != ApiKeyLocation::Header
+                    || self.api_key_name.is_empty()
+                    || self.api_key_value.is_empty()
+                {
                     None
                 } else {
                     Some((self.api_key_name.clone(), self.api_key_value.clone()))
@@ -475,7 +497,11 @@ pub fn effective_wire_headers(
     let claimed_header = match auth.auth_type {
         AuthType::None => None,
         AuthType::Bearer | AuthType::Basic => Some("Authorization"),
-        AuthType::ApiKey if !auth.api_key_name.is_empty() => Some(auth.api_key_name.as_str()),
+        AuthType::ApiKey
+            if auth.api_key_location == ApiKeyLocation::Header && !auth.api_key_name.is_empty() =>
+        {
+            Some(auth.api_key_name.as_str())
+        }
         AuthType::ApiKey => None,
     };
 
@@ -1041,6 +1067,7 @@ mod tests {
                 basic_password: "inactive-password".into(),
                 api_key_name: "X-Inactive-Key".into(),
                 api_key_value: "inactive-api-key".into(),
+                ..Default::default()
             },
         };
 
@@ -1066,6 +1093,7 @@ mod tests {
             basic_password: "inactive-password".into(),
             api_key_name: "X-Inactive-Key".into(),
             api_key_value: "inactive-api-key".into(),
+            ..Default::default()
         };
 
         assert_eq!(request.history_snapshot().auth, AuthConfig::default());
@@ -1094,6 +1122,7 @@ mod tests {
             basic_password: "pass".into(),
             api_key_name: "X-Key".into(),
             api_key_value: "key-value".into(),
+            ..Default::default()
         };
 
         assert_eq!(

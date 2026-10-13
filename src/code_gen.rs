@@ -190,6 +190,7 @@ pub fn generate(target: CodeTarget, req: &RequestData) -> String {
     // shared with the send path. When auth is None this is a no-op copy.
     let mut merged = req.clone();
     merged.headers = crate::types::effective_wire_headers(&req.headers, &req.auth);
+    merged.url = req.auth.effective_url(&req.url);
     let req = &merged;
 
     match target {

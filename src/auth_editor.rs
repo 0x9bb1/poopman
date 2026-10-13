@@ -2,12 +2,12 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::px;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, h_flex,
+    ActiveTheme as _, Selectable as _, h_flex,
     input::{Input, InputState},
     v_flex,
 };
 
-use crate::types::{AuthConfig, AuthType};
+use crate::types::{ApiKeyLocation, AuthConfig, AuthType};
 
 /// Auth sub-tab editor. A flat set of input fields (one per auth field) plus a
 /// type selector; only the active type's fields render. Values persist across
@@ -20,12 +20,14 @@ pub struct AuthEditor {
     basic_password: Entity<InputState>,
     api_key_name: Entity<InputState>,
     api_key_value: Entity<InputState>,
+    api_key_location: ApiKeyLocation,
 }
 
 impl AuthEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             auth_type_index: 0,
+            api_key_location: ApiKeyLocation::Header,
             bearer_token: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("Token")
@@ -61,11 +63,13 @@ impl AuthEditor {
             basic_password: self.basic_password.read(cx).value().to_string(),
             api_key_name: self.api_key_name.read(cx).value().to_string(),
             api_key_value: self.api_key_value.read(cx).value().to_string(),
+            api_key_location: self.api_key_location,
         }
     }
 
     /// Load an auth configuration into the UI (used by `load_request`).
     pub fn set_auth(&mut self, auth: &AuthConfig, window: &mut Window, cx: &mut Context<Self>) {
+        self.api_key_location = auth.api_key_location;
         self.auth_type_index = match auth.auth_type {
             AuthType::None => 0,
             AuthType::Bearer => 1,
@@ -163,7 +167,11 @@ impl Render for AuthEditor {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("The auth header is added when the request is sent and overrides a manually-typed header of the same name."),
+                    .child(if self.auth_type_index == 3 && self.api_key_location == ApiKeyLocation::Query {
+                        "The API key is added when sending and replaces query parameters with the same name."
+                    } else {
+                        "The auth header is added when the request is sent and overrides a manually-typed header of the same name."
+                    }),
             )
             // Active type's fields.
             .when(self.auth_type_index == 0, |this| {
@@ -197,6 +205,23 @@ impl Render for AuthEditor {
             .when(self.auth_type_index == 3, |this| {
                 this.child(Self::field_row("Key", &self.api_key_name, false, theme))
                     .child(Self::field_row("Value", &self.api_key_value, true, theme))
+                    .child(
+                        h_flex().gap_3().items_center()
+                            .child(div().w(px(120.)).flex_shrink_0().text_sm()
+                                .text_color(theme.muted_foreground).child("Add to"))
+                            .children(
+                                [(ApiKeyLocation::Header, "Header"), (ApiKeyLocation::Query, "Query")]
+                                    .into_iter().enumerate().map(|(index, (location, label))| {
+                                        gpui_component::button::Button::new(("api-key-location", index))
+                                            .label(label)
+                                            .selected(self.api_key_location == location)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.api_key_location = location;
+                                                cx.notify();
+                                            }))
+                                    }),
+                            ),
+                    )
             })
     }
 }

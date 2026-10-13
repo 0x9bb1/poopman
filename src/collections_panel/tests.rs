@@ -5,6 +5,40 @@ use gpui::{AppContext as _, TestAppContext};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 #[gpui::test]
+fn importing_variables_publishes_persisted_environment(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let db = Arc::new(Database::new_in_memory());
+    let imported = crate::postman::import_collection(include_str!(
+        "../../tests/fixtures/import/postman-variables.json"
+    ))
+    .unwrap();
+    let mut panel = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| CollectionsPanel::new(db.clone(), Vec::new(), window, cx));
+        panel = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let panel = panel.unwrap();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let _subscription = cx.update(|_, cx| {
+        let events = events.clone();
+        cx.subscribe(&panel, move |_, event: &super::CollectionsChanged, _| {
+            if let Some(environment) = &event.imported_environment {
+                events.borrow_mut().push(environment.clone());
+            }
+        })
+    });
+    cx.update(|window, cx| panel.update(cx, |panel, cx| panel.import_data(imported, window, cx)));
+    cx.run_until_parked();
+    assert_eq!(db.load_collections().unwrap().len(), 1);
+    assert_eq!(events.borrow().len(), 1);
+    let environments = db.load_environments().unwrap();
+    assert_eq!(environments[0].id, events.borrow()[0].id);
+    assert_eq!(environments[0].variables.len(), 5);
+    assert_eq!(db.get_active_environment_id().unwrap(), None);
+}
+
+#[gpui::test]
 fn opening_by_id_uses_current_nested_request_and_ignores_deleted_requests(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let db = Arc::new(Database::new_in_memory());
