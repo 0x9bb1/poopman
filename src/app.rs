@@ -1,12 +1,10 @@
 use gpui::px;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, IndexPath, Root, Sizable as _, TitleBar, WindowExt,
+    ActiveTheme as _, Root, Sizable as _, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
     h_flex,
-    input::{Input, InputState},
     resizable::{h_resizable, resizable_panel, v_resizable},
-    select::{Select, SelectState},
     v_flex,
 };
 use std::{
@@ -16,8 +14,7 @@ use std::{
 
 use crate::code_snippet_panel::{CodeSnippetPanel, code_snippet_geometry};
 use crate::collections_panel::{
-    CollectionTarget, CollectionsChanged, CollectionsPanel, NewRequestRequested,
-    SavedRequestClicked,
+    CollectionsChanged, CollectionsPanel, NewRequestRequested, SavedRequestClicked,
 };
 use crate::db::Database;
 use crate::environment_manager::{
@@ -26,7 +23,7 @@ use crate::environment_manager::{
 use crate::history_panel::{HistoryItemClicked, HistoryPanel};
 use crate::request_editor::{
     OpenCodeSnippet, RequestCancelled, RequestCompleted, RequestEditor, RequestStarted,
-    ToggleRequestBookmarkRequested,
+    SaveRequestRequested,
 };
 use crate::request_tab::RequestTab;
 use crate::response_viewer::ResponseViewer;
@@ -62,10 +59,16 @@ pub(crate) fn bind_save_request_shortcut(cx: &mut App) {
     ]);
 }
 
+mod request_saving;
+
 #[cfg(test)]
 mod import_tests;
 #[cfg(test)]
 mod save_tests;
+#[cfg(test)]
+mod dirty_tests;
+#[cfg(test)]
+mod save_ui_tests;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarView {
@@ -141,7 +144,7 @@ pub struct PoopmanApp {
     env_manager: Entity<EnvironmentManager>,
     code_panel: Entity<CodeSnippetPanel>,
     collections_reconcile_generation: u64,
-    /// Serialize saves/bookmark changes per originating tab, including while
+    /// Serialize saves per originating tab, including while
     /// a first save is creating its default collection in the background.
     saving_tabs: HashSet<usize>,
     _subscriptions: Vec<Subscription>,
@@ -417,19 +420,23 @@ impl PoopmanApp {
             },
         );
 
-        let bookmark_toggle_sub = cx.subscribe_in(
+        let save_sub = cx.subscribe_in(
             &request_editor,
             window,
-            move |this, _, _event: &ToggleRequestBookmarkRequested, window, cx| {
-                this.toggle_request_bookmark(window, cx);
+            move |this, _, event: &SaveRequestRequested, window, cx| {
+                this.save_active_request(event.save_as, window, cx);
             },
         );
+        let editor_changes = cx.observe_in(&request_editor, window, |this, _, _, cx| {
+            this.save_current_tab_state(cx);
+            this.update_tab_bar(cx);
+        });
 
         // Push the initial tab into the tab bar so the first request shows as a
         // tab immediately (the TabBar entity starts empty; without this the bar
         // would show only the "+" until the first tab action).
         tab_bar.update(cx, |bar, cx| {
-            bar.update_tabs(request_tabs.clone(), active_tab_index, cx);
+            bar.update_tabs(&request_tabs, active_tab_index, cx);
         });
 
         // Focus the root so the window's focus is never `None` — see the field's
@@ -470,7 +477,8 @@ impl PoopmanApp {
                 env_changed_sub,
                 open_code_sub,
                 cancel_sub,
-                bookmark_toggle_sub,
+                save_sub,
+                editor_changes,
             ],
         }
     }
@@ -679,6 +687,35 @@ impl PoopmanApp {
 
     /// Close a tab
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        self.save_current_tab_state(cx);
+        let Some(tab) = self.request_tabs.get(index) else {
+            return;
+        };
+        if self.saving_tabs.contains(&tab.id) {
+            app_notice(
+                window,
+                cx,
+                "Save in progress",
+                "Wait for this request to finish saving before closing it.",
+            );
+            return;
+        }
+        if tab.is_dirty() {
+            self.prompt_close_tab(tab.id, window, cx);
+        } else {
+            self.close_tab_without_prompt(index, window, cx);
+        }
+    }
+
+    fn close_tab_without_prompt(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(closing_tab_id) = self.request_tabs.get(index).map(|tab| tab.id) else {
             return;
         };
@@ -858,6 +895,10 @@ impl PoopmanApp {
                 editor.load_headers_state(headers_state, window, cx);
             }
         });
+        if tab.needs_baseline() {
+            self.save_current_tab_state(cx);
+            self.request_tabs[self.active_tab_index].establish_baseline();
+        }
     }
 
     fn load_tab_response(
@@ -933,10 +974,7 @@ impl PoopmanApp {
                                 .filter(|tab| tab.saved_request_id == Some(saved_id))
                             {
                                 if let Some(saved) = &saved {
-                                    tab.collection_id = Some(saved.collection_id);
-                                    tab.folder_id = saved.folder_id;
-                                    tab.saved_name = Some(saved.name.clone());
-                                    tab.update_title_from_saved_name();
+                                    tab.reconcile_saved_metadata(saved);
                                 } else {
                                     tab.saved_request_id = None;
                                     tab.collection_id = None;
@@ -970,361 +1008,11 @@ impl PoopmanApp {
         cx.notify();
     }
 
-    fn save_request(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A shortcut typed into a dialog must not save the request behind it.
-        if window.has_active_dialog(cx) {
-            return;
-        }
-        self.save_current_tab_state(cx);
-        let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() else {
-            return;
-        };
-        if self.saving_tabs.contains(&tab.id) {
-            return;
-        }
-        let Some(saved_id) = tab.saved_request_id else {
-            self.toggle_request_bookmark(window, cx);
-            return;
-        };
-        let (Some(collection_id), Some(name)) = (tab.collection_id, tab.saved_name) else {
-            app_notice(
-                window,
-                cx,
-                "Save failed",
-                "Reopen this request from Collections and try again.",
-            );
-            return;
-        };
-        let tab_id = tab.id;
-        self.saving_tabs.insert(tab_id);
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move {
-            db.update_saved_request(
-                saved_id,
-                collection_id,
-                tab.folder_id,
-                &name,
-                &tab.request,
-                tab.params_state.as_deref().unwrap_or_default(),
-                tab.headers_state.as_deref().unwrap_or_default(),
-            )
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            this.update_in(cx, |this, window, cx| {
-                this.saving_tabs.remove(&tab_id);
-                match result {
-                    Ok(()) => this
-                        .collections_panel
-                        .update(cx, |panel, cx| panel.reload(window, cx)),
-                    Err(error) => app_notice(window, cx, "Save failed", error.to_string()),
-                }
-                // Do not replace the tab's editor state: it may have changed or
-                // the user may have switched tabs while this snapshot was saved.
-            })?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .detach();
-    }
-
-    fn toggle_request_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
-            return;
-        }
-        self.save_current_tab_state(cx);
-        let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() else {
-            return;
-        };
-        let params_state = tab.params_state.clone().unwrap_or_default();
-        let headers_state = tab.headers_state.clone().unwrap_or_default();
-        let tab_id = tab.id;
-        if self.saving_tabs.contains(&tab_id) {
-            return;
-        }
-
-        if let Some(saved_id) = tab.saved_request_id {
-            self.saving_tabs.insert(tab_id);
-            let db = self.db.clone();
-            let task = cx.background_spawn(async move { db.delete_saved_request(saved_id) });
-            cx.spawn_in(window, async move |this, cx| {
-                let result = task.await;
-                this.update(cx, |this, _| {
-                    this.saving_tabs.remove(&tab_id);
-                })?;
-                match result {
-                    Ok(()) => {
-                        this.update_in(cx, |this, window, cx| {
-                            for tab in &mut this.request_tabs {
-                                if tab.saved_request_id == Some(saved_id) {
-                                    tab.saved_request_id = None;
-                                    tab.collection_id = None;
-                                    tab.folder_id = None;
-                                    tab.saved_name = None;
-                                    tab.update_title();
-                                }
-                            }
-                            this.refresh_saved_tab_ui(cx);
-                            this.collections_panel
-                                .update(cx, |panel, cx| panel.reload(window, cx));
-                        })?;
-                    }
-                    Err(error) => {
-                        cx.update(|window, cx| {
-                            app_notice(window, cx, "Remove bookmark failed", error.to_string())
-                        })?;
-                    }
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .detach();
-            return;
-        }
-
-        let targets = self.collections_panel.read(cx).request_targets();
-        if targets.is_empty() {
-            self.saving_tabs.insert(tab_id);
-            let db = self.db.clone();
-            let selected = self.collections_panel.read(cx).selected_target();
-            let initial_name = if tab.title.trim().is_empty() || tab.title == "New Request" {
-                format!("{} request", tab.request.method.as_str())
-            } else {
-                tab.title.clone()
-            };
-            let task = cx.background_spawn(async move { db.create_collection("My Collection") });
-            cx.spawn_in(window, async move |this, cx| {
-                let result = task.await;
-                this.update(cx, |this, _| {
-                    this.saving_tabs.remove(&tab_id);
-                })?;
-                match result {
-                    Ok(collection_id) => {
-                        this.update_in(cx, |this, window, cx| {
-                            this.collections_panel
-                                .update(cx, |panel, cx| panel.reload(window, cx));
-                            this.open_new_save_dialog(
-                                tab.id,
-                                initial_name,
-                                tab.request,
-                                params_state,
-                                headers_state,
-                                vec![CollectionTarget {
-                                    collection_id,
-                                    folder_id: None,
-                                    label: "My Collection".to_string(),
-                                }],
-                                selected,
-                                window,
-                                cx,
-                            );
-                        })?;
-                    }
-                    Err(error) => {
-                        cx.update(|window, cx| {
-                            app_notice(window, cx, "Save failed", error.to_string())
-                        })?;
-                    }
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .detach();
-            return;
-        }
-        let selected = self.collections_panel.read(cx).selected_target();
-        let initial_name = if tab.title.trim().is_empty() || tab.title == "New Request" {
-            format!("{} request", tab.request.method.as_str())
-        } else {
-            tab.title.clone()
-        };
-        self.open_new_save_dialog(
-            tab.id,
-            initial_name,
-            tab.request,
-            params_state,
-            headers_state,
-            targets,
-            selected,
-            window,
-            cx,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn open_new_save_dialog(
-        &mut self,
-        tab_id: usize,
-        initial_name: String,
-        request: crate::types::RequestData,
-        params_state: Vec<crate::types::ParamState>,
-        headers_state: Vec<crate::types::HeaderState>,
-        targets: Vec<CollectionTarget>,
-        selected: Option<CollectionTarget>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("Request name");
-            input.set_value(&initial_name, window, cx);
-            input
-        });
-        let labels = targets
-            .iter()
-            .map(|target| target.label.clone())
-            .collect::<Vec<_>>();
-        let selected_index = selected
-            .as_ref()
-            .and_then(|selected| targets.iter().position(|target| target == selected))
-            .unwrap_or(0);
-        let target_select = cx.new(|cx| {
-            SelectState::new(
-                labels,
-                Some(IndexPath::default().row(selected_index)),
-                window,
-                cx,
-            )
-        });
-        // Dialogs are absolutely positioned by gpui-component. Without a
-        // viewport-relative bound, the fixed 520px dialog can extend past a
-        // compact window and its footer gets clipped by the window edge.
-        let viewport = window.viewport_size();
-        let max_dialog_width = (viewport.width - px(32.)).max(px(360.));
-        let max_dialog_height = (viewport.height - px(32.)).max(px(220.));
-        let app = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
-            let name_input_for_ok = name_input.clone();
-            let target_select_for_ok = target_select.clone();
-            let targets_for_ok = targets.clone();
-            let request_for_ok = request.clone();
-            let params_for_ok = params_state.clone();
-            let headers_for_ok = headers_state.clone();
-            let app = app.clone();
-            dialog
-                .title(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::BOLD)
-                        .child("Save request"),
-                )
-                .w(px(520.))
-                .max_w(max_dialog_width)
-                .max_h(max_dialog_height)
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Request name"))
-                                .child(Input::new(&name_input)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_sm().child("Collection / folder"))
-                                .child(Select::new(&target_select)),
-                        ),
-                )
-                .confirm()
-                .on_ok(move |_, window, cx: &mut App| {
-                    let name = name_input_for_ok.read(cx).value().trim().to_string();
-                    if name.is_empty() {
-                        return false;
-                    }
-                    let index = target_select_for_ok
-                        .read(cx)
-                        .selected_index(cx)
-                        .map(|index| index.row)
-                        .unwrap_or(0);
-                    let Some(target) = targets_for_ok.get(index).cloned() else {
-                        return false;
-                    };
-                    app.update(cx, |app, cx| {
-                        app.persist_new_saved_request(
-                            tab_id,
-                            &name,
-                            target,
-                            &request_for_ok,
-                            &params_for_ok,
-                            &headers_for_ok,
-                            window,
-                            cx,
-                        );
-                    });
-                    true
-                })
-        });
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn persist_new_saved_request(
-        &mut self,
-        tab_id: usize,
-        name: &str,
-        target: CollectionTarget,
-        request: &crate::types::RequestData,
-        params_state: &[crate::types::ParamState],
-        headers_state: &[crate::types::HeaderState],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.saving_tabs.insert(tab_id) {
-            return;
-        }
-        let db = self.db.clone();
-        let collection_id = target.collection_id;
-        let folder_id = target.folder_id;
-        let name = name.to_string();
-        let request = request.clone();
-        let params_state = params_state.to_vec();
-        let headers_state = headers_state.to_vec();
-        let name_for_db = name.clone();
-        let task = cx.background_spawn(async move {
-            db.insert_saved_request(
-                collection_id,
-                folder_id,
-                &name_for_db,
-                &request,
-                &params_state,
-                &headers_state,
-            )
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            this.update(cx, |this, _| {
-                this.saving_tabs.remove(&tab_id);
-            })?;
-            match result {
-                Ok(id) => {
-                    this.update_in(cx, |this, window, cx| {
-                        if let Some(tab) = this.request_tabs.iter_mut().find(|tab| tab.id == tab_id)
-                        {
-                            tab.saved_request_id = Some(id);
-                            tab.collection_id = Some(collection_id);
-                            tab.folder_id = folder_id;
-                            tab.saved_name = Some(name);
-                            tab.update_title_from_saved_name();
-                        }
-                        this.refresh_saved_tab_ui(cx);
-                        this.collections_panel
-                            .update(cx, |panel, cx| panel.reload(window, cx));
-                    })?;
-                }
-                Err(error) => {
-                    cx.update(|window, cx| {
-                        app_notice(window, cx, "Save failed", error.to_string())
-                    })?;
-                }
-            }
-            Ok::<_, anyhow::Error>(())
-        })
-        .detach();
-    }
-
     /// Update tab bar with current tabs
     #[cfg_attr(feature = "profile", profiling::function)]
     fn update_tab_bar(&mut self, cx: &mut Context<Self>) {
         self.tab_bar.update(cx, |tab_bar, cx| {
-            tab_bar.update_tabs(self.request_tabs.clone(), self.active_tab_index, cx);
-            cx.notify();
+            tab_bar.update_tabs(&self.request_tabs, self.active_tab_index, cx);
         });
     }
 }

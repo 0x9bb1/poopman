@@ -44,6 +44,65 @@ fn param() -> ParamState {
 }
 
 #[gpui::test]
+fn field_edits_notify_the_request_owner(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let editor = cx.update(|window, cx| {
+        cx.new(|cx| RequestEditor::new(Arc::new(RwLock::new(AppSettings::default())), window, cx))
+    });
+    let changes = cx.update(|_, cx| {
+        cx.new(|cx| {
+            cx.observe(&editor, |count: &mut usize, _, _| *count += 1)
+                .detach();
+            0usize
+        })
+    });
+    cx.run_until_parked();
+    for field in 0..5 {
+        let before = cx.update(|_, cx| *changes.read(cx));
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| match field {
+                0 => editor.headers[0]
+                    .value_input
+                    .update(cx, |input, cx| input.set_value("edited", window, cx)),
+                1 => editor
+                    .headers
+                    .last()
+                    .unwrap()
+                    .key_input
+                    .update(cx, |input, cx| input.set_value("X-Edited", window, cx)),
+                2 => {
+                    let row = editor
+                        .headers
+                        .iter()
+                        .find(|row| row.key_input.read(cx).value().as_str() == "X-Edited")
+                        .unwrap();
+                    row.value_input
+                        .update(cx, |input, cx| input.set_value("value", window, cx));
+                }
+                3 => editor.params[0].value_input.update(cx, |input, cx| {
+                    input.set_value("disabled draft", window, cx)
+                }),
+                _ => editor.method_select.update(cx, |select, cx| {
+                    select.set_selected_index(
+                        Some(gpui_component::IndexPath::default().row(1)),
+                        window,
+                        cx,
+                    );
+                    cx.emit(
+                        gpui_component::select::SelectEvent::<Vec<&'static str>>::Confirm(Some(
+                            "POST",
+                        )),
+                    );
+                }),
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(*changes.read(cx) > before, "field {field}"));
+    }
+}
+
+#[gpui::test]
 fn row_removal_and_repeated_request_loads_release_listeners(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let cx = cx.add_empty_window();
@@ -63,15 +122,27 @@ fn row_removal_and_repeated_request_loads_release_listeners(cx: &mut TestAppCont
                 for row in &mut editor.params {
                     tracker.track(&mut row._subscriptions);
                 }
-                assert_eq!(tracker.live(), 6);
+                let total = editor
+                    .headers
+                    .iter()
+                    .map(|row| row._subscriptions.len())
+                    .sum::<usize>()
+                    + editor
+                        .params
+                        .iter()
+                        .map(|row| row._subscriptions.len())
+                        .sum::<usize>();
+                assert_eq!(tracker.live(), total);
                 let index = editor
                     .headers
                     .iter()
                     .position(|row| row.header_type == HeaderType::Custom)
                     .unwrap();
+                let removed = editor.headers[index]._subscriptions.len()
+                    + editor.params[0]._subscriptions.len();
                 editor.remove_header_row(index, &ClickEvent::default(), window, cx);
                 editor.remove_param(0, window, cx);
-                assert_eq!(tracker.live(), 3);
+                assert_eq!(tracker.live(), total - removed);
                 editor.load_request(&request, window, cx);
                 assert_eq!(tracker.live(), 0);
             })

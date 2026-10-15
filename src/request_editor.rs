@@ -3,9 +3,14 @@ use gpui::px;
 use gpui::*;
 use gpui_component::input::InputEvent;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, WindowExt, button::*,
-    checkbox::Checkbox, input::*, menu::PopupMenuItem, scroll::ScrollableElement as _,
-    select::*, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IndexPath, Sizable as _, WindowExt,
+    button::*,
+    checkbox::Checkbox,
+    input::*,
+    menu::{DropdownMenu as _, PopupMenuItem},
+    scroll::ScrollableElement as _,
+    select::*,
+    v_flex,
 };
 use std::{
     path::PathBuf,
@@ -60,10 +65,21 @@ struct InFlightRequest {
     abort_handle: tokio::task::AbortHandle,
 }
 
-/// Emitted when the user toggles the current request's collection bookmark.
-/// The app saves an unbookmarked request or removes an existing bookmark.
 #[derive(Clone)]
-pub struct ToggleRequestBookmarkRequested;
+pub struct SaveRequestRequested {
+    pub save_as: bool,
+}
+
+fn watch_header_changes(row: &mut HeaderRow, cx: &mut Context<RequestEditor>) {
+    for input in [&row.key_input, &row.value_input] {
+        row._subscriptions
+            .push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+    }
+}
 
 /// Create a header-name input carrying the standard-header typeahead.
 ///
@@ -129,11 +145,9 @@ pub struct RequestEditor {
     /// run concurrently without sharing loading or cancellation state.
     in_flight: std::collections::HashMap<usize, InFlightRequest>,
     next_request_id: u64,
-    _subscriptions: Vec<Subscription>, // Permanent: URL input + body editor subscriptions
+    _subscriptions: Vec<Subscription>,
     /// Active environment variables, pushed by PoopmanApp; used at send time.
     env_vars: std::collections::HashMap<String, String>,
-    /// Whether the active tab is associated with a request in a collection.
-    /// Saved requests use a filled bookmark in the request bar.
     is_saved_request: bool,
     /// App-wide transfer settings shared with the Settings dialog.
     settings: Arc<RwLock<crate::types::AppSettings>>,
@@ -186,6 +200,13 @@ impl RequestEditor {
         let body_editor = cx.new(|cx| BodyEditor::new(window, cx));
         let auth_editor = cx.new(|cx| AuthEditor::new(window, cx));
 
+        let body_changes = cx.observe(&body_editor, |_, _, cx| cx.notify());
+        let auth_changes = cx.observe(&auth_editor, |_, _, cx| cx.notify());
+        let method_changes = cx.subscribe(
+            &method_select,
+            |_, _, _: &SelectEvent<Vec<&'static str>>, cx| cx.notify(),
+        );
+
         // Subscribe to body type changes to auto-update Content-Type header
         let body_sub = cx.subscribe_in(
             &body_editor,
@@ -208,7 +229,7 @@ impl RequestEditor {
             active_request_tab_id: 0,
             in_flight: std::collections::HashMap::new(),
             next_request_id: 1,
-            _subscriptions: vec![],
+            _subscriptions: vec![body_changes, auth_changes, method_changes],
             env_vars: std::collections::HashMap::new(),
             is_saved_request: false,
             settings,
@@ -258,7 +279,7 @@ impl RequestEditor {
         editor
     }
 
-    /// Update the collection state represented by the bookmark button.
+    /// Update the save action's collection state.
     pub fn set_is_saved_request(&mut self, is_saved: bool, cx: &mut Context<Self>) {
         if self.is_saved_request != is_saved {
             self.is_saved_request = is_saved;
@@ -304,7 +325,7 @@ impl RequestEditor {
                 input
             });
 
-            self.headers.push(HeaderRow {
+            let mut row = HeaderRow {
                 _subscriptions: vec![],
                 enabled: true,
                 key_input,
@@ -312,7 +333,9 @@ impl RequestEditor {
                 header_type,
                 predefined: Some(predefined),
                 last_key_len: predefined.name().chars().count(),
-            });
+            };
+            watch_header_changes(&mut row, cx);
+            self.headers.push(row);
         }
     }
 
@@ -405,7 +428,7 @@ impl RequestEditor {
                     input
                 });
 
-                self.headers.push(HeaderRow {
+                let mut row = HeaderRow {
                     _subscriptions: vec![],
                     enabled: true,
                     key_input,
@@ -413,7 +436,9 @@ impl RequestEditor {
                     header_type: HeaderType::Custom,
                     predefined: None,
                     last_key_len: key.chars().count(),
-                });
+                };
+                watch_header_changes(&mut row, cx);
+                self.headers.push(row);
             }
         }
 
@@ -544,6 +569,9 @@ impl RequestEditor {
                     return None;
                 }
                 let value = header_row.value_input.read(cx).value().to_string();
+                if key.is_empty() && value.is_empty() {
+                    return None;
+                }
                 Some(crate::types::HeaderState {
                     enabled: header_row.enabled,
                     key,
@@ -694,7 +722,7 @@ impl RequestEditor {
                 },
             );
             header_row._subscriptions.push(sub);
-
+            watch_header_changes(&mut header_row, cx);
             self.headers.push(header_row);
         }
 
@@ -820,6 +848,7 @@ impl RequestEditor {
         );
 
         new_row._subscriptions.push(sub);
+        watch_header_changes(&mut new_row, cx);
         self.headers.push(new_row);
         cx.notify();
     }
@@ -898,6 +927,7 @@ impl RequestEditor {
     /// This function synchronizes the params list with the URL's query string.
     /// It uses pure functions from url_params module for parsing logic.
     fn parse_url_to_params(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.notify();
         // Focus arbitration: only parse when the URL input is the focused widget.
         // sync_params_to_url's programmatic set_value also emits InputEvent::Change,
         // but the URL input is not focused then, so this returns early and the
@@ -1010,6 +1040,7 @@ impl RequestEditor {
     /// This function rebuilds the URL query string from the current params list
     /// and updates the URL input. Uses pure functions from url_params module.
     fn sync_params_to_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.notify();
         // Focus arbitration: only sync when a param input is the focused widget.
         // Otherwise this Change was triggered by a programmatic set_value (e.g. from
         // parse_url_to_params rebuilding rows), and syncing back would loop.
@@ -1524,7 +1555,7 @@ impl EventEmitter<RequestStarted> for RequestEditor {}
 impl EventEmitter<RequestCompleted> for RequestEditor {}
 impl EventEmitter<OpenCodeSnippet> for RequestEditor {}
 impl EventEmitter<RequestCancelled> for RequestEditor {}
-impl EventEmitter<ToggleRequestBookmarkRequested> for RequestEditor {}
+impl EventEmitter<SaveRequestRequested> for RequestEditor {}
 
 impl Render for RequestEditor {
     #[cfg_attr(feature = "profile", profiling::function)]
@@ -1561,38 +1592,47 @@ impl Render for RequestEditor {
                         .child(
                             // URL input - takes all remaining space
                             div()
+                                .debug_selector(|| "request-url-input".into())
                                 .flex_1()
                                 .overflow_hidden()
                                 .child(Input::new(&self.url_input)),
                         )
                         .child(
-                            // Collection bookmark toggle. A filled icon means
-                            // clicking it removes the request from its collection.
-                            div().flex_shrink_0().child(
-                                Button::new("save-request-btn")
-                                    .ghost()
-                                    .icon(Icon::empty().path(if self.is_saved_request {
-                                        "icons/bookmark-filled.svg"
-                                    } else {
-                                        "icons/bookmark.svg"
-                                    }))
-                                    .tooltip(if self.is_saved_request {
-                                        if cfg!(target_os = "macos") {
-                                            "Remove from collection (Cmd+S to save changes)"
-                                        } else {
-                                            "Remove from collection (Ctrl+S to save changes)"
-                                        }
-                                    } else {
-                                        if cfg!(target_os = "macos") {
-                                            "Save request (Cmd+S)"
-                                        } else {
-                                            "Save request (Ctrl+S)"
-                                        }
-                                    })
-                                    .on_click(cx.listener(|_this, _ev, _window, cx| {
-                                        cx.emit(ToggleRequestBookmarkRequested);
-                                    })),
-                            ),
+                            div()
+                                .debug_selector(|| "request-save-actions".into())
+                                .flex()
+                                .items_center()
+                                .flex_shrink_0()
+                                .child(
+                                    Button::new("save-request-btn")
+                                        .ghost()
+                                        .icon(Icon::empty().path("icons/save.svg"))
+                                        .tooltip(match (self.is_saved_request, cfg!(target_os = "macos")) {
+                                            (true, true) => "Save changes (Cmd+S)",
+                                            (true, false) => "Save changes (Ctrl+S)",
+                                            (false, true) => "Save request (Cmd+S)",
+                                            (false, false) => "Save request (Ctrl+S)",
+                                        })
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(SaveRequestRequested { save_as: false });
+                                        })),
+                                )
+                                .child({
+                                    let editor = cx.entity();
+                                    Button::new("save-request-menu")
+                                        .ghost()
+                                        .small()
+                                        .w(px(20.))
+                                        .h(px(32.))
+                                        .text_color(theme.muted_foreground)
+                                        .icon(Icon::empty().path("icons/chevron-down.svg"))
+                                        .dropdown_menu_with_anchor(Corner::TopRight, move |menu, _, _| {
+                                            let editor = editor.clone();
+                                            menu.item(PopupMenuItem::new("Save As…").on_click(move |_, _, cx| {
+                                                editor.update(cx, |_, cx| cx.emit(SaveRequestRequested { save_as: true }));
+                                            }))
+                                        })
+                                }),
                         )
                         .child(
                             // Code snippet button (</>) - opens the code dialog
@@ -1608,7 +1648,7 @@ impl Render for RequestEditor {
                         .child(
                             // Send button - prevent it from shrinking.
                             // While loading it becomes a Cancel button.
-                            div().flex_shrink_0().child(if active_tab_is_loading {
+                            div().debug_selector(|| "request-send-actions".into()).flex_shrink_0().child(if active_tab_is_loading {
                                 Button::new("cancel-btn")
                                     .danger()
                                     .label("Cancel")

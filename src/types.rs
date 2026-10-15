@@ -308,16 +308,16 @@ impl Default for BodyType {
 /// Selected body panel in the editor. Unlike [`BodyType`], this does not own
 /// the panel contents, which lets inactive Raw and Form-data drafts survive a
 /// tab switch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BodyKind {
     None,
     Raw,
     FormData,
 }
 
-/// Complete, per-tab body editor state. Only `selected_body` is persisted or
-/// sent; the other fields are private drafts for inactive body panels.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Complete, per-tab body editor state. Only `selected_body` is sent;
+/// collections also retain inactive drafts so saving never discards edits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BodyDraft {
     pub kind: BodyKind,
     pub raw_content: String,
@@ -733,6 +733,8 @@ pub struct SavedRequest {
     pub folder_id: Option<i64>,
     pub name: String,
     pub request: RequestData,
+    #[serde(default)]
+    pub body_draft: Option<BodyDraft>,
     pub params_state: Vec<ParamState>,
     pub headers_state: Vec<HeaderState>,
     pub position: i64,

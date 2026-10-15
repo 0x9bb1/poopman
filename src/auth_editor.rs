@@ -3,11 +3,14 @@ use gpui::px;
 use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Selectable as _, h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     v_flex,
 };
 
 use crate::types::{ApiKeyLocation, AuthConfig, AuthType};
+
+#[cfg(test)]
+mod tests;
 
 /// Auth sub-tab editor. A flat set of input fields (one per auth field) plus a
 /// type selector; only the active type's fields render. Values persist across
@@ -21,11 +24,12 @@ pub struct AuthEditor {
     api_key_name: Entity<InputState>,
     api_key_value: Entity<InputState>,
     api_key_location: ApiKeyLocation,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl AuthEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
+        let mut editor = Self {
             auth_type_index: 0,
             api_key_location: ApiKeyLocation::Header,
             bearer_token: cx.new(|cx| {
@@ -46,7 +50,24 @@ impl AuthEditor {
                     .placeholder("Value")
                     .masked(true)
             }),
+            _subscriptions: Vec::new(),
+        };
+        for input in [
+            &editor.bearer_token,
+            &editor.basic_username,
+            &editor.basic_password,
+            &editor.api_key_name,
+            &editor.api_key_value,
+        ] {
+            editor
+                ._subscriptions
+                .push(cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }));
         }
+        editor
     }
 
     /// Read the current auth configuration from the UI fields.

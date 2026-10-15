@@ -155,6 +155,7 @@ impl BodyEditor {
             |this: &mut BodyEditor, _, event: &InputChangeEvent, window, cx| {
                 if matches!(event, InputChangeEvent::Change) {
                     this.schedule_raw_diagnostics(true, window, cx);
+                    cx.notify();
                 }
             },
         );

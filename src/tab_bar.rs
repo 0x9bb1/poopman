@@ -22,9 +22,17 @@ pub struct TabCloseClicked {
     pub tab_index: usize,
 }
 
+#[derive(PartialEq, Eq)]
+struct TabSummary {
+    id: usize,
+    title: String,
+    method: crate::types::HttpMethod,
+    dirty: bool,
+}
+
 /// Tab bar component for managing multiple request tabs
 pub struct TabBar {
-    tabs: Vec<RequestTab>,
+    tabs: Vec<TabSummary>,
     active_tab_index: usize,
     scroll_handle: ScrollHandle,
 }
@@ -39,9 +47,26 @@ impl TabBar {
     }
 
     /// Update tabs and active index
-    pub fn update_tabs(&mut self, tabs: Vec<RequestTab>, active_index: usize, _cx: &mut Context<Self>) {
+    pub fn update_tabs(
+        &mut self,
+        tabs: &[RequestTab],
+        active_index: usize,
+        cx: &mut Context<Self>,
+    ) {
         let active_changed = self.active_tab_index != active_index;
-        self.tabs = tabs;
+        let summaries: Vec<_> = tabs
+            .iter()
+            .map(|tab| TabSummary {
+                id: tab.id,
+                title: tab.title.clone(),
+                method: tab.request.method,
+                dirty: tab.is_dirty(),
+            })
+            .collect();
+        if active_changed || self.tabs != summaries {
+            self.tabs = summaries;
+            cx.notify();
+        }
         self.active_tab_index = active_index;
 
         // Ctrl+Tab can select a tab that is scrolled out of view. Indices line up
@@ -106,9 +131,9 @@ impl Render for TabBar {
                             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
                                 let is_active = index == active_index;
                                 let tab_index = index;
-                                let method = tab.request.method.as_str();
+                                let method = tab.method.as_str();
 
-                                let verb_color = method_color(tab.request.method, theme);
+                                let verb_color = method_color(tab.method, theme);
 
                                 h_flex()
                                     .id(("tab", tab.id))
@@ -142,6 +167,16 @@ impl Render for TabBar {
                                             .text_ellipsis()
                                             .child(tab.title.clone())
                                     )
+                                    .when(tab.dirty, |tab| {
+                                        tab.child(
+                                            div()
+                                                .id("unsaved-indicator")
+                                                .debug_selector(|| "unsaved-request-tab".into())
+                                                .text_xs()
+                                                .text_color(theme.primary)
+                                                .child("●"),
+                                        )
+                                    })
                                     .child(
                                         // Close button
                                         div()
