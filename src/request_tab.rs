@@ -1,6 +1,53 @@
 use std::sync::Arc;
 
-use crate::types::{BodyDraft, BodyType, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, ResponseData};
+use crate::types::{
+    BodyDraft, BodyType, HeaderState, HeaderType, HistoryItem, HttpMethod, ParamState,
+    PredefinedHeader, RequestData, ResponseData,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestSnapshot {
+    pub request: RequestData,
+    pub body_draft: BodyDraft,
+    pub params_state: Vec<ParamState>,
+    pub headers_state: Vec<HeaderState>,
+    pub saved_name: Option<String>,
+    pub collection_id: Option<i64>,
+    pub folder_id: Option<i64>,
+}
+
+impl RequestSnapshot {
+    fn matches(&self, tab: &RequestTab) -> bool {
+        let (Some(params), Some(headers)) = (&tab.params_state, &tab.headers_state) else {
+            return *self == tab.snapshot();
+        };
+        self.request.method == tab.request.method
+            && self.request.url == tab.request.url
+            && self.request.body == tab.request.body
+            && self.request.auth == tab.request.auth
+            && self.body_draft.kind == tab.body_draft.kind
+            && self.body_draft.raw_content == tab.body_draft.raw_content
+            && self.body_draft.raw_subtype == tab.body_draft.raw_subtype
+            && self.body_draft.formdata_rows.iter().eq(tab
+                .body_draft
+                .formdata_rows
+                .iter()
+                .filter(|row| !row.is_blank()))
+            && self.params_state.iter().eq(params
+                .iter()
+                .filter(|param| !param.key.is_empty() || !param.value.is_empty()))
+            && self
+                .headers_state
+                .iter()
+                .eq(headers.iter().filter(|header| {
+                    !header.is_transport_owned()
+                        && (!header.key.is_empty() || !header.value.is_empty())
+                }))
+            && self.saved_name == tab.saved_name
+            && self.collection_id == tab.collection_id
+            && self.folder_id == tab.folder_id
+    }
+}
 
 /// Represents a single request tab
 #[derive(Debug, Clone)]
@@ -17,7 +64,6 @@ pub struct RequestTab {
     pub active_request_id: Option<u64>,
     /// Persisted response-panel state for a canceled request.
     pub response_canceled: bool,
-    // UI state (not persisted to database)
     pub params_state: Option<Vec<ParamState>>,
     pub headers_state: Option<Vec<HeaderState>>,
     /// Associated history item ID (if opened from history)
@@ -29,6 +75,7 @@ pub struct RequestTab {
     pub collection_id: Option<i64>,
     pub folder_id: Option<i64>,
     pub saved_name: Option<String>,
+    baseline: Option<Arc<RequestSnapshot>>,
 }
 
 impl RequestTab {
@@ -41,7 +88,7 @@ impl RequestTab {
             body: BodyType::default(),
             auth: crate::types::AuthConfig::default(),
         };
-        Self {
+        let mut tab = Self {
             id,
             title: "New Request".to_string(),
             body_draft: BodyDraft::from_body(&request.body),
@@ -56,7 +103,10 @@ impl RequestTab {
             collection_id: None,
             folder_id: None,
             saved_name: None,
-        }
+            baseline: None,
+        };
+        tab.establish_baseline();
+        tab
     }
 
     /// Create a request tab from history item
@@ -76,6 +126,7 @@ impl RequestTab {
             collection_id: None,
             folder_id: None,
             saved_name: None,
+            baseline: None,
         }
     }
 
@@ -85,7 +136,10 @@ impl RequestTab {
             id,
             title: saved.name.clone(),
             request: saved.request.clone(),
-            body_draft: BodyDraft::from_body(&saved.request.body),
+            body_draft: saved
+                .body_draft
+                .clone()
+                .unwrap_or_else(|| BodyDraft::from_body(&saved.request.body)),
             response: None,
             active_request_id: None,
             response_canceled: false,
@@ -96,7 +150,107 @@ impl RequestTab {
             collection_id: Some(saved.collection_id),
             folder_id: saved.folder_id,
             saved_name: Some(saved.name.clone()),
+            baseline: None,
         }
+    }
+
+    pub fn snapshot(&self) -> RequestSnapshot {
+        let mut headers = self.headers_state.clone().unwrap_or_else(|| {
+            let mut headers: Vec<_> = PredefinedHeader::editable()
+                .into_iter()
+                .map(|header| HeaderState {
+                    enabled: true,
+                    key: header.name().into(),
+                    value: header.default_value().into(),
+                    header_type: HeaderType::Predefined,
+                    predefined: Some(header),
+                })
+                .collect();
+            for (key, value) in &self.request.headers {
+                if let Some(header) = headers
+                    .iter_mut()
+                    .find(|header| header.key.eq_ignore_ascii_case(key))
+                {
+                    header.value = value.clone();
+                } else {
+                    headers.push(HeaderState {
+                        enabled: true,
+                        key: key.clone(),
+                        value: value.clone(),
+                        header_type: HeaderType::Custom,
+                        predefined: None,
+                    });
+                }
+            }
+            headers
+        });
+        headers.retain(|header| {
+            !header.is_transport_owned() && (!header.key.is_empty() || !header.value.is_empty())
+        });
+        let mut request = self.request.clone();
+        request.headers = headers
+            .iter()
+            .filter(|header| header.enabled && !header.key.is_empty())
+            .map(|header| (header.key.clone(), header.value.clone()))
+            .collect();
+        let params = self
+            .params_state
+            .clone()
+            .unwrap_or_else(|| {
+                crate::url_params::parse_query_params(&request.url)
+                    .into_iter()
+                    .map(|(key, value)| ParamState {
+                        enabled: true,
+                        key,
+                        value,
+                    })
+                    .collect()
+            })
+            .into_iter()
+            .filter(|param| !param.key.is_empty() || !param.value.is_empty())
+            .collect();
+        let mut body_draft = self.body_draft.clone();
+        body_draft.formdata_rows.retain(|row| !row.is_blank());
+        RequestSnapshot {
+            request,
+            body_draft,
+            params_state: params,
+            headers_state: headers,
+            saved_name: self.saved_name.clone(),
+            collection_id: self.collection_id,
+            folder_id: self.folder_id,
+        }
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.baseline
+            .as_ref()
+            .is_some_and(|baseline| !baseline.matches(self))
+    }
+
+    pub fn needs_baseline(&self) -> bool {
+        self.baseline.is_none()
+    }
+
+    pub fn establish_baseline(&mut self) {
+        self.mark_saved(self.snapshot());
+    }
+
+    pub fn mark_saved(&mut self, snapshot: RequestSnapshot) {
+        self.baseline = Some(Arc::new(snapshot));
+    }
+
+    pub fn reconcile_saved_metadata(&mut self, saved: &crate::types::SavedRequest) {
+        self.collection_id = Some(saved.collection_id);
+        self.folder_id = saved.folder_id;
+        self.saved_name = Some(saved.name.clone());
+        if let Some(baseline) = &mut self.baseline {
+            let baseline = Arc::make_mut(baseline);
+            baseline.collection_id = self.collection_id;
+            baseline.folder_id = self.folder_id;
+            baseline.saved_name = self.saved_name.clone();
+        }
+        self.update_title_from_saved_name();
     }
 
     /// Generate a display title from request data
@@ -171,27 +325,24 @@ impl RequestTab {
         true
     }
 
-    /// A pristine scratch tab — the default tab at startup, or an untouched
-    /// "New Request". Opening a history item fills such a tab in place instead
-    /// of spawning a sibling.
-    ///
-    /// Headers are ignored on purpose: a fresh tab's saved request always
-    /// carries the enabled predefined headers (Content-Type, Cache-Control,
-    /// ...), so those are not a signal that the user has done anything. What
-    /// marks a tab as used is a typed URL, body content, a response, or having
-    /// been opened from history.
     pub fn is_blank(&self) -> bool {
         self.history_id.is_none()
             && self.saved_request_id.is_none()
             && self.response.is_none()
-            && self.request.url.trim().is_empty()
-            && match &self.request.body {
-                BodyType::None => true,
-                BodyType::Raw { content, .. } => content.trim().is_empty(),
-                BodyType::FormData(rows) => rows.is_empty(),
+            && self.active_request_id.is_none()
+            && !self.response_canceled
+            && !self.is_dirty()
+            && {
+                static EMPTY: std::sync::OnceLock<RequestSnapshot> = std::sync::OnceLock::new();
+                EMPTY
+                    .get_or_init(|| Self::new_empty(0).snapshot())
+                    .matches(self)
             }
     }
 }
+
+#[cfg(test)]
+mod snapshot_tests;
 
 #[cfg(test)]
 mod tests {

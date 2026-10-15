@@ -9,7 +9,7 @@ use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use gpui_component::{Root, WindowExt as _};
 use std::sync::Arc;
 
-fn setup(
+pub(super) fn setup(
     cx: &mut TestAppContext,
     db: Arc<Database>,
 ) -> (Entity<PoopmanApp>, &mut VisualTestContext) {
@@ -39,7 +39,7 @@ fn setup(
     (app.unwrap(), cx)
 }
 
-fn saved_fixture(db: &Database) -> SavedRequest {
+pub(super) fn saved_fixture(db: &Database) -> SavedRequest {
     let collection_id = db.create_collection("API").unwrap();
     let folder_id = db.create_folder(collection_id, None, "Folder").unwrap();
     let request = RequestData::new(HttpMethod::GET, "https://example.test/original".into());
@@ -56,7 +56,7 @@ fn saved_fixture(db: &Database) -> SavedRequest {
     db.load_saved_request(id).unwrap().unwrap()
 }
 
-fn edited_request() -> RequestData {
+pub(super) fn edited_request() -> RequestData {
     RequestData {
         method: HttpMethod::POST,
         url: "https://example.test/edited?q=1".into(),
@@ -159,6 +159,7 @@ fn shortcut_updates_original_record_from_url_and_body_inputs(cx: &mut TestAppCon
         cx.update(|window, cx| {
             assert!(!window.has_active_dialog(cx));
             assert!(app.read(cx).saving_tabs.is_empty());
+            assert!(!app.read(cx).request_tabs[0].is_dirty());
         });
     }
 }
@@ -233,6 +234,7 @@ fn failed_update_preserves_edits_and_reports_error(cx: &mut TestAppContext) {
         assert!(window.has_active_dialog(cx));
         let app = app.read(cx);
         assert!(app.saving_tabs.is_empty());
+        assert!(app.request_tabs[0].is_dirty());
         assert_eq!(app.request_tabs[0].saved_request_id, Some(saved.id));
         assert_eq!(
             app.request_editor.read(cx).get_current_request_data(cx),
@@ -278,6 +280,7 @@ fn pending_save_keeps_its_snapshot_and_originating_tab(cx: &mut TestAppContext) 
         app.update(cx, |app, cx| {
             assert_eq!(app.active_tab_index, 1);
             assert!(app.saving_tabs.is_empty());
+            assert!(app.request_tabs[0].is_dirty());
             app.switch_to_tab(0, window, cx);
             assert_eq!(
                 app.request_editor

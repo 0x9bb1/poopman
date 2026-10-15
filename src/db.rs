@@ -18,8 +18,8 @@ use std::sync::{
 use std::thread;
 
 use crate::types::{
-    AppSettings, AuthConfig, BodyType, Collection, CollectionFolder, EnvVar, Environment,
-    HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
+    AppSettings, AuthConfig, BodyDraft, BodyType, Collection, CollectionFolder, EnvVar,
+    Environment, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
 };
 
 /// A unit of work executed on the database's owning thread.
@@ -89,8 +89,17 @@ struct SavedRequestRow {
     updated_at: String,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredRequest {
+    #[serde(flatten)]
+    request: RequestData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body_draft: Option<BodyDraft>,
+}
+
 fn decode_saved_request(row: SavedRequestRow) -> Result<SavedRequest> {
-    let mut request: RequestData = serde_json::from_str(&row.request_json)?;
+    let stored: StoredRequest = serde_json::from_str(&row.request_json)?;
+    let mut request = stored.request;
     request.strip_transport_owned_headers();
     let mut headers_state = serde_json::from_str::<Vec<HeaderState>>(&row.headers_json)?;
     headers_state.retain(|header| !header.is_transport_owned());
@@ -101,6 +110,7 @@ fn decode_saved_request(row: SavedRequestRow) -> Result<SavedRequest> {
         folder_id: row.folder_id,
         name: row.name,
         request,
+        body_draft: stored.body_draft,
         params_state: serde_json::from_str::<Vec<ParamState>>(&row.params_json)?,
         headers_state,
         position: row.position,
@@ -231,6 +241,7 @@ fn encode_saved_request(
     request: &RequestData,
     params_state: &[ParamState],
     headers_state: &[HeaderState],
+    body_draft: Option<&BodyDraft>,
 ) -> Result<(String, String, String)> {
     let mut request = request.clone();
     request.strip_transport_owned_headers();
@@ -239,7 +250,10 @@ fn encode_saved_request(
         .filter(|header| !header.is_transport_owned())
         .collect();
     Ok((
-        serde_json::to_string(&request)?,
+        serde_json::to_string(&StoredRequest {
+            request,
+            body_draft: body_draft.cloned(),
+        })?,
         serde_json::to_string(params_state)?,
         serde_json::to_string(&headers_state)?,
     ))
@@ -255,10 +269,11 @@ fn insert_saved_request_tx(
     params_state: &[ParamState],
     headers_state: &[HeaderState],
     position: Option<i64>,
+    body_draft: Option<&BodyDraft>,
 ) -> Result<i64> {
     validate_folder_parent(tx, collection_id, folder_id)?;
     let (request_json, params_json, headers_json) =
-        encode_saved_request(request, params_state, headers_state)?;
+        encode_saved_request(request, params_state, headers_state, body_draft)?;
     let position = match position {
         Some(position) => position,
         None => tx.query_row(
@@ -319,6 +334,7 @@ fn insert_folder_tree_tx(
             &request.params_state,
             &request.headers_state,
             None,
+            request.body_draft.as_ref(),
         )?;
     }
     for child in &folder.folders {
@@ -353,6 +369,7 @@ fn insert_collection_tree_tx(
             &request.params_state,
             &request.headers_state,
             None,
+            request.body_draft.as_ref(),
         )?;
     }
     for folder in &collection.folders {
@@ -744,7 +761,7 @@ impl Database {
         })
     }
 
-    /// Insert a saved request and return its ID.
+    #[cfg(test)]
     pub fn insert_saved_request(
         &self,
         collection_id: i64,
@@ -754,28 +771,19 @@ impl Database {
         params_state: &[ParamState],
         headers_state: &[HeaderState],
     ) -> Result<i64> {
-        let name = require_name(name)?;
-        let request = request.clone();
-        let params_state = params_state.to_vec();
-        let headers_state = headers_state.to_vec();
-        self.call(move |conn| {
-            let tx = conn.transaction()?;
-            let id = insert_saved_request_tx(
-                &tx,
-                collection_id,
-                folder_id,
-                &name,
-                &request,
-                &params_state,
-                &headers_state,
-                None,
-            )?;
-            tx.commit()?;
-            Ok(id)
-        })
+        self.save_request_draft(
+            None,
+            collection_id,
+            folder_id,
+            name,
+            request,
+            params_state,
+            headers_state,
+            None,
+        )
     }
 
-    /// Update a saved request, including moving it to another folder.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn update_saved_request(
         &self,
@@ -787,15 +795,56 @@ impl Database {
         params_state: &[ParamState],
         headers_state: &[HeaderState],
     ) -> Result<()> {
+        self.save_request_draft(
+            Some(id),
+            collection_id,
+            folder_id,
+            name,
+            request,
+            params_state,
+            headers_state,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_request_draft(
+        &self,
+        id: Option<i64>,
+        collection_id: i64,
+        folder_id: Option<i64>,
+        name: &str,
+        request: &RequestData,
+        params_state: &[ParamState],
+        headers_state: &[HeaderState],
+        body_draft: Option<&BodyDraft>,
+    ) -> Result<i64> {
         let name = require_name(name)?;
         let request = request.clone();
         let params_state = params_state.to_vec();
         let headers_state = headers_state.to_vec();
+        let body_draft = body_draft.cloned();
         self.call(move |conn| {
             let tx = conn.transaction()?;
+            let Some(id) = id else {
+                let id = insert_saved_request_tx(
+                    &tx,
+                    collection_id,
+                    folder_id,
+                    &name,
+                    &request,
+                    &params_state,
+                    &headers_state,
+                    None,
+                    body_draft.as_ref(),
+                )?;
+                tx.commit()?;
+                return Ok(id);
+            };
             validate_folder_parent(&tx, collection_id, folder_id)?;
             let (request_json, params_json, headers_json) =
-                encode_saved_request(&request, &params_state, &headers_state)?;
+                encode_saved_request(&request, &params_state, &headers_state, body_draft.as_ref())?;
             let now = chrono::Utc::now().to_rfc3339();
             let changed = tx.execute(
                 "UPDATE saved_requests
@@ -818,7 +867,7 @@ impl Database {
                 return Err(anyhow!("saved request {} does not exist", id));
             }
             tx.commit()?;
-            Ok(())
+            Ok(id)
         })
     }
 
@@ -1007,13 +1056,15 @@ impl Database {
             .load_saved_request(id)?
             .ok_or_else(|| anyhow!("saved request {} does not exist", id))?;
         let name = copy_name(&request.name);
-        self.insert_saved_request(
+        self.save_request_draft(
+            None,
             request.collection_id,
             request.folder_id,
             &name,
             &request.request,
             &request.params_state,
             &request.headers_state,
+            request.body_draft.as_ref(),
         )
     }
 
@@ -1943,6 +1994,7 @@ mod tests {
                         folder_id: Some(1000),
                         name: "Imported".into(),
                         request,
+                        body_draft: None,
                         params_state: params,
                         headers_state: headers,
                         position: 0,
