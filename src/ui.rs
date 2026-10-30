@@ -1,10 +1,26 @@
 //! Shared visual primitives for the floating-card UI: panel cards and
 //! segmented pill tab strips. All helpers are callback-free — callers attach
 //! `.id(...)`/`.on_click(...)` themselves so the helpers stay generic.
+//! Also the app-wide error toast, so every background failure looks the same.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{Theme, h_flex, v_flex};
+use gpui_component::notification::Notification;
+use gpui_component::{Theme, WindowExt as _, h_flex, v_flex};
+
+/// Report a failed background operation the way Postman does: a toast that
+/// hides itself, never a modal. Only pass database or file-system errors —
+/// transport errors can embed a resolved URL carrying environment secrets.
+pub fn error_toast(
+    window: &mut Window,
+    cx: &mut App,
+    title: impl Into<SharedString>,
+    error: impl std::fmt::Display,
+) {
+    let title = title.into();
+    log::error!("{title}: {error}");
+    window.push_notification(Notification::error(error.to_string()).title(title), cx);
+}
 
 /// A floating panel card: white-ish surface, hairline border, large radius,
 /// soft shadow, clipped contents. Wrap a panel's content in this.

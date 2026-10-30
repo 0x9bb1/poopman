@@ -120,13 +120,15 @@ impl CollectionsPanel {
         let task = cx.background_spawn(async move { db.load_collections() });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 if this.reload_generation != generation {
                     return;
                 }
                 match result {
                     Ok(collections) => this.apply_loaded_collections(collections, cx),
-                    Err(error) => log::error!("Failed to reload collections: {}", error),
+                    Err(error) => {
+                        crate::ui::error_toast(window, cx, "Could not load collections", error)
+                    }
                 }
             })?;
             Ok::<_, anyhow::Error>(())
@@ -398,6 +400,13 @@ impl CollectionsPanel {
         let db = self.db.clone();
         let name = name.to_string();
         let action_for_ui = action.clone();
+        let failure_title = match action {
+            NameAction::CreateCollection => "Could not create collection",
+            NameAction::CreateFolder { .. } => "Could not create folder",
+            NameAction::RenameCollection(_) => "Could not rename collection",
+            NameAction::RenameFolder(_) => "Could not rename folder",
+            NameAction::RenameRequest(_) => "Could not rename request",
+        };
         let task = cx.background_spawn(async move {
             match action {
                 NameAction::CreateCollection => db
@@ -435,11 +444,22 @@ impl CollectionsPanel {
                         cx.emit(CollectionsChanged::default());
                     })?;
                 }
-                Err(error) => log::error!("Failed to update collection tree: {}", error),
+                Err(error) => {
+                    cx.update(|window, cx| crate::ui::error_toast(window, cx, failure_title, error))?
+                }
             }
             Ok::<_, anyhow::Error>(())
         })
         .detach();
+    }
+
+    fn failure_title(verb: &str, node: NodeRef) -> String {
+        let kind = match node {
+            NodeRef::Collection(_) => "collection",
+            NodeRef::Folder(_) => "folder",
+            NodeRef::Request(_) => "request",
+        };
+        format!("Could not {verb} {kind}")
     }
 
     fn request_ids_in_folder(folder: &CollectionFolder, ids: &mut Vec<i64>) {
@@ -557,7 +577,9 @@ impl CollectionsPanel {
                         });
                     })?;
                 }
-                Err(error) => log::error!("Failed to delete collection item: {}", error),
+                Err(error) => cx.update(|window, cx| {
+                    crate::ui::error_toast(window, cx, Self::failure_title("delete", node), error)
+                })?,
             }
             Ok::<_, anyhow::Error>(())
         })
@@ -586,7 +608,9 @@ impl CollectionsPanel {
                         cx.emit(CollectionsChanged::default());
                     })?;
                 }
-                Err(error) => log::error!("Failed to duplicate collection item: {}", error),
+                Err(error) => cx.update(|window, cx| {
+                    crate::ui::error_toast(window, cx, Self::failure_title("duplicate", node), error)
+                })?,
             }
             Ok::<_, anyhow::Error>(())
         })

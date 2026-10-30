@@ -4,7 +4,7 @@ use crate::types::{
     AppSettings, BodyType, HeaderState, HeaderType, HttpMethod, ParamState, PredefinedHeader,
     RawSubtype, RequestData,
 };
-use gpui::{AppContext as _, ClickEvent, TestAppContext};
+use gpui::{AppContext as _, ClickEvent, Focusable as _, TestAppContext};
 use gpui_component::input::InputEvent;
 use std::{
     cell::Cell,
@@ -267,4 +267,50 @@ fn removed_param_events_do_not_sync_url_but_live_rows_still_do(cx: &mut TestAppC
                 .is_empty()
         );
     });
+}
+
+#[gpui::test]
+fn empty_url_marks_and_focuses_the_field_without_sending(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let editor = cx.update(|window, cx| {
+        cx.new(|cx| RequestEditor::new(Arc::new(RwLock::new(AppSettings::default())), window, cx))
+    });
+    let started = Rc::new(Cell::new(0usize));
+    let _subscription = cx.update(|_, cx| {
+        let started = started.clone();
+        cx.subscribe(&editor, move |_, _: &super::RequestStarted, _| {
+            started.set(started.get() + 1)
+        })
+    });
+
+    // Let the edit's Change event settle first, as typing does before a click:
+    // a Change still queued behind send() would clear the marker it sets.
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor
+                .url_input
+                .update(cx, |input, cx| input.set_value("   ", window, cx))
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| editor.update(cx, |editor, cx| editor.send(window, cx)));
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        let editor = editor.read(cx);
+        assert!(editor.url_error);
+        assert!(editor.url_input.read(cx).focus_handle(cx).is_focused(window));
+    });
+    assert_eq!(started.get(), 0, "an empty URL is never sent");
+
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor
+                .url_input
+                .update(cx, |input, cx| input.set_value("api.example.test", window, cx))
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| assert!(!editor.read(cx).url_error));
 }

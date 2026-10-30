@@ -149,6 +149,9 @@ pub struct RequestEditor {
     /// Active environment variables, pushed by PoopmanApp; used at send time.
     env_vars: std::collections::HashMap<String, String>,
     is_saved_request: bool,
+    /// Set when Send is pressed with an empty URL; paints the URL input red
+    /// until it is edited, as Postman does. Never set for any other reason.
+    url_error: bool,
     /// App-wide transfer settings shared with the Settings dialog.
     settings: Arc<RwLock<crate::types::AppSettings>>,
     http_clients: crate::http_client::HttpClientPool,
@@ -232,6 +235,7 @@ impl RequestEditor {
             _subscriptions: vec![body_changes, auth_changes, method_changes],
             env_vars: std::collections::HashMap::new(),
             is_saved_request: false,
+            url_error: false,
             settings,
             http_clients: crate::http_client::HttpClientPool::default(),
         };
@@ -243,6 +247,7 @@ impl RequestEditor {
             window,
             |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.url_error = false;
                     let value = this.url_input.read(cx).value().to_string();
                     if value.trim_start().starts_with("curl ") {
                         match crate::curl_import::parse_curl(&value) {
@@ -357,7 +362,9 @@ impl RequestEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Set URL
+        // Set URL. Clear the empty-URL marker explicitly: setting an unchanged
+        // value need not emit Change, and the marker must not follow tabs.
+        self.url_error = false;
         self.url_input.update(cx, |input, cx| {
             input.set_value(&request.url, window, cx);
         });
@@ -1269,6 +1276,50 @@ impl RequestEditor {
         window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
     }
 
+    fn take_request_id(&mut self) -> u64 {
+        let request_id = self.next_request_id;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .expect("request id space exhausted");
+        request_id
+    }
+
+    /// Report a request that never reached the network exactly like a
+    /// transport failure, as Postman does: the error is shown in the response
+    /// pane and the attempt is still logged to History. `message` must not
+    /// contain the resolved URL, which may carry environment secrets.
+    fn fail_before_send(
+        &mut self,
+        request: RequestData,
+        history_request: RequestData,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = self.active_request_tab_id;
+        let request_id = self.take_request_id();
+        cx.emit(RequestStarted {
+            tab_id,
+            request_id,
+            request,
+        });
+        cx.emit(RequestCompleted {
+            tab_id,
+            request_id,
+            history_request,
+            response: std::sync::Arc::new(ResponseData {
+                status: None,
+                duration_ms: 0,
+                headers: vec![],
+                body: message.as_bytes().to_vec(),
+                is_text: true,
+                downloaded_to: None,
+                downloaded_bytes: None,
+            }),
+        });
+        cx.notify();
+    }
+
     /// Send the current request. Public so the ctrl-enter action can trigger
     /// it from PoopmanApp; no-op while a request is already in flight (the
     /// button is swapped to Cancel then, but the keyboard path isn't).
@@ -1296,9 +1347,16 @@ impl RequestEditor {
             .trim()
             .to_string();
         if url.is_empty() {
-            log::warn!("Cannot send request: URL is empty");
+            // Postman never sends an empty URL: it marks the field and focuses it.
+            self.url_error = true;
+            self.url_input
+                .update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
             return;
         }
+
+        let editor_request_snapshot = self.get_current_request_data(cx);
+        let history_request_snapshot = editor_request_snapshot.history_snapshot();
 
         // Substitute {{env vars}} BEFORE scheme normalization/validation, so a
         // value like "https://host" doesn't get an extra "http://" prefix.
@@ -1307,15 +1365,17 @@ impl RequestEditor {
         // Scheme detection and normalization are delegated to structured URL
         // parsing, which correctly accepts case-insensitive HTTP(S) schemes.
         let Some(parsed_url) = url_params::normalize_http_url(&url) else {
-            log::error!("Invalid URL format after normalization");
+            self.fail_before_send(
+                editor_request_snapshot,
+                history_request_snapshot,
+                "Could not send request: invalid URL",
+                cx,
+            );
             return;
         };
         url = parsed_url.into();
 
         log::debug!("Sending request");
-
-        let editor_request_snapshot = self.get_current_request_data(cx);
-        let history_request_snapshot = editor_request_snapshot.history_snapshot();
 
         // Get selected method
         let method_index = self
@@ -1400,11 +1460,7 @@ impl RequestEditor {
         let resolved_auth = crate::variables::substitute_auth(&unresolved_active_auth, env);
 
         let tab_id = self.active_request_tab_id;
-        let request_id = self.next_request_id;
-        self.next_request_id = self
-            .next_request_id
-            .checked_add(1)
-            .expect("request id space exhausted");
+        let request_id = self.take_request_id();
 
         log::debug!("Starting {} request", method.as_str());
 
@@ -1595,7 +1651,10 @@ impl Render for RequestEditor {
                                 .debug_selector(|| "request-url-input".into())
                                 .flex_1()
                                 .overflow_hidden()
-                                .child(Input::new(&self.url_input)),
+                                .child(Input::new(&self.url_input).when(
+                                    self.url_error,
+                                    |input| input.border_color(cx.theme().danger),
+                                )),
                         )
                         .child(
                             div()

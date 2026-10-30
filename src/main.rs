@@ -25,6 +25,7 @@ mod request_editor;
 mod request_tab;
 mod response_viewer;
 mod settings;
+mod startup_error;
 mod tab_bar;
 #[cfg(test)]
 mod test_support;
@@ -191,7 +192,13 @@ fn main() {
 
         let initial = cx.background_spawn(async { crate::app::AppInitialState::load() });
         cx.spawn(async move |cx| {
-            let initial = initial.await?;
+            let initial = match initial.await {
+                Ok(initial) => initial,
+                Err(error) => {
+                    log::error!("Startup failed: {error:#}");
+                    return cx.update(|cx| startup_error::open(&error, cx))?;
+                }
+            };
             let persistence = initial.environment_persistence.clone();
             cx.update(|cx| {
                 cx.set_global(EnvironmentShutdown {
@@ -226,6 +233,6 @@ fn main() {
             })?;
             Ok::<_, anyhow::Error>(())
         })
-        .detach();
+        .detach_and_log_err(cx);
     });
 }
