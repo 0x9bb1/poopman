@@ -203,11 +203,12 @@ impl SettingsPanel {
                 if this.save_generation != generation {
                     return;
                 }
-                this.status = if result.is_ok() {
-                    SaveStatus::Saved
-                } else {
-                    log::error!("Failed to save settings: {}", result.unwrap_err());
-                    SaveStatus::Failed
+                this.status = match result {
+                    Ok(()) => SaveStatus::Saved,
+                    Err(error) => {
+                        log::error!("Failed to save settings: {}", error);
+                        SaveStatus::Failed
+                    }
                 };
                 cx.notify();
             })?;
@@ -551,7 +552,7 @@ mod tests {
     #[test]
     fn response_limit_bounds_cover_a_useful_range() {
         assert_eq!(MIN_RESPONSE_LIMIT_MIB, 1);
-        assert!(MAX_RESPONSE_LIMIT_MIB >= 1_024);
+        const { assert!(MAX_RESPONSE_LIMIT_MIB >= 1_024) };
     }
 
     #[test]

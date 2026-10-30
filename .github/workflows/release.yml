@@ -134,6 +134,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Keep in sync with the list in ci.yml and README "Linux".
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |

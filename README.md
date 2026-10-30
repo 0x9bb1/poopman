@@ -36,8 +36,23 @@ viewer is on the bottom-right.
 
 - Rust (2024 edition).
 - A GPU-capable environment — GPUI requires GPU acceleration.
-- **Not supported under WSL2** (no GPU surface). Build/test there is fine; run the app
-  on native Linux / macOS / Windows.
+- **Not supported under WSL2** (no GPU surface). `cargo check` / `cargo clippy` work
+  there; run the app on native Linux / macOS / Windows.
+
+### Linux
+
+Building and linking need these native packages (the same list CI and the release
+build install). On Debian / Ubuntu:
+
+```bash
+sudo apt-get install -y build-essential pkg-config libssl-dev \
+  libfontconfig1-dev libfreetype6-dev libexpat1-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+```
+
+`cargo test` needs only these to link; the UI tests use GPUI's headless test
+platform. Running the app additionally needs a Vulkan-capable GPU driver and an X11
+or Wayland session.
 
 ## Build & Run
 
@@ -45,6 +60,18 @@ viewer is on the bottom-right.
 cargo run                 # debug
 cargo build --release     # optimized binary at target/release/poopman[.exe]
 cargo test                # unit tests (pure modules: code_gen, variables, url_params, db, …)
+```
+
+### Checks
+
+CI (`.github/workflows/ci.yml`) runs these on every pull request and push to `main`;
+run them locally before pushing:
+
+```bash
+cargo fmt --all -- --check
+cargo check --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
 ```
 
 ### Profiling
