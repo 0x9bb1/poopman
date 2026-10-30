@@ -31,11 +31,13 @@ Windows builds need `GPUI_FXC_PATH` pointing at the Windows SDK `fxc.exe`, and a
 
 ### CI
 
-`.github/workflows/ci.yml` runs on every PR and push to `main`: `cargo fmt --check`, `check` and `clippy -D warnings` (both `--all-targets --all-features`), and `cargo test` on ubuntu-22.04. The test step sets `HTTP(S)_PROXY`/`ALL_PROXY` to a closed port, so loopback wire tests must bypass proxies (the test-build `HttpClient` uses `.no_proxy()`; spawned tools need `NO_PROXY`). Its apt package list mirrors release.yml and README "Linux" — change all three together.
+`.github/workflows/ci.yml` runs on every PR and push to `main`: `cargo fmt --check`, `check` and `clippy -D warnings` (both `--all-targets --all-features`), and `cargo test` on ubuntu-22.04. The test step sets `HTTP(S)_PROXY`/`ALL_PROXY` to a closed port, so loopback wire tests must bypass proxies (the test-build `HttpClient` uses `.no_proxy()`; spawned tools need `NO_PROXY`). Its apt package list mirrors release.yml and README "Linux" — change all three together. A separate `release-scripts` job runs shellcheck and `.github/scripts/release.test.sh`. ci.yml is also a reusable workflow (`workflow_call`) that release.yml runs before building.
 
 ### Releases
 
-`.github/workflows/release.yml` is `workflow_dispatch`-only: the typed version is written into **both** `[package]` and `[package.metadata.bundle]` versions in Cargo.toml, committed, then built for Linux/macOS (x64+arm)/Windows. Don't hand-bump versions or push tags.
+`.github/workflows/release.yml` is `workflow_dispatch`-only and transactional. `prepare` pins `github.sha`, validates the version and writes it into **both** `[package]` and `[package.metadata.bundle]` in Cargo.toml (uploaded as an artifact, not committed); CI and the Linux/macOS (x64+arm)/Windows builds run on that tree; only then does `publish` (the sole `contents: write` job) commit `chore: release vX [skip ci]` and push main + tag atomically, refusing if main moved. A failure before `publish` changes nothing — just dispatch again. A failure inside `publish` is finished with **"Re-run failed jobs"** (not "Re-run all jobs"): the release commit is deterministic, so the rerun recognizes an already-pushed tag, and the GitHub release stays a draft until every asset is uploaded. `dry_run: true` runs everything but `publish`, from any branch (`gh workflow run release.yml --ref <branch> -f version=X -f dry_run=true`).
+
+The version input reaches shell only via `env:` — never put `${{ inputs.* }}` inside `run:`. Release shell logic lives in `.github/scripts/release.sh` (validate / bump / publish-commit) with bare-repo tests in `release.test.sh`. Don't hand-bump versions or push tags.
 
 ## Architecture
 

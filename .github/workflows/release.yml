@@ -1,10 +1,20 @@
 name: Build and Release
 
-# Releasing is dispatch-driven so Cargo.toml can never drift from the tag:
-# the version you type here is written into Cargo.toml and committed FIRST,
-# and everything downstream builds from that commit. There is deliberately no
-# `push: tags` trigger — a hand-pushed tag would bypass the bump and
-# reintroduce the drift this workflow exists to prevent.
+# Releasing is dispatch-driven so Cargo.toml can never drift from the tag: the
+# version you type here is written into Cargo.toml, and that bump commit is
+# what gets tagged. There is deliberately no `push: tags` trigger — a
+# hand-pushed tag would bypass the bump and reintroduce the drift this
+# workflow exists to prevent.
+#
+# Transactional: CI and every platform build run on the pinned source with the
+# bumped manifest first. Only the final `publish` job writes to the repo, and
+# it moves main and the tag in one atomic push. A failure before that leaves
+# main, tags and releases untouched; a failure after it is finished by
+# "Re-run failed jobs" (see release.sh publish-commit).
+#
+# The version input only ever reaches shell code through an environment
+# variable — never `${{ inputs.* }}` inside `run:` — and is validated by
+# .github/scripts/release.sh before any other use.
 on:
   workflow_dispatch:
     inputs:
@@ -12,59 +22,66 @@ on:
         description: 'Version to release, without the leading v (e.g. 0.3.3)'
         required: true
         type: string
+      dry_run:
+        description: 'Run every check and build, but publish nothing'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Two releases racing would both pass the "main has not moved" check.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  bump:
-    name: Bump Cargo.toml and push
+  prepare:
+    name: Validate and bump
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
-      sha: ${{ steps.commit.outputs.sha }}
+      sha: ${{ steps.pin.outputs.sha }}
+      version: ${{ steps.bump.outputs.version }}
+      prerelease: ${{ steps.bump.outputs.prerelease }}
+      commit_epoch: ${{ steps.pin.outputs.commit_epoch }}
     steps:
-      - name: Checkout main
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Validate input
+      # github.sha is main's tip at dispatch time. Every later job builds and
+      # tags exactly this commit, even if main moves on meanwhile.
+      - name: Pin the source revision
+        id: pin
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          VERSION="${{ inputs.version }}"
-          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::'$VERSION' is not a semver version. Pass it without the leading v, e.g. 0.3.3"
+          if [ "$DRY_RUN" != true ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::releases must be dispatched from main (got $GITHUB_REF); use dry_run to test another branch"
             exit 1
           fi
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          # Fixed once here so a rerun of `publish` rebuilds the identical commit.
+          echo "commit_epoch=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pin.outputs.sha }}
+
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          bash .github/scripts/release.sh validate "$VERSION"
+          if git ls-remote --exit-code origin "refs/tags/v$VERSION" >/dev/null; then
             echo "::error::tag v$VERSION already exists"
             exit 1
           fi
 
       - name: Set the crate version
+        id: bump
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${{ inputs.version }}"
-          # Section-aware on purpose. Two versions have to move together:
-          # [package] and [package.metadata.bundle], the latter being what
-          # cargo-bundle stamps into the macOS .app/.dmg. A blanket sed would
-          # also rewrite dependency versions; a first-match-only edit would
-          # silently leave the macOS bundle on the old version forever.
-          # Cargo.toml is CRLF in this repo, so the section header carries a
-          # trailing \r that has to come off before comparing.
-          awk -v v="$VERSION" '
-            /^\[/ { sect = $0; sub(/\r$/, "", sect) }
-            /^version = / && (sect == "[package]" || sect == "[package.metadata.bundle]") {
-              sub(/"[^"]*"/, "\"" v "\"")
-            }
-            { print }
-          ' Cargo.toml > Cargo.toml.new
-          mv Cargo.toml.new Cargo.toml
-
-          # Both must now read the new version, or the edit missed one.
-          if [ "$(grep -c "^version = \"$VERSION\"" Cargo.toml)" -ne 2 ]; then
-            echo "::error::expected 2 version lines at $VERSION, got:"
-            grep -n '^version' Cargo.toml
-            exit 1
-          fi
+          bash .github/scripts/release.sh bump "$VERSION"
           grep -n '^version' Cargo.toml
 
           # Syncs Cargo.lock's poopman entry without compiling and without
@@ -72,24 +89,34 @@ jobs:
           # lock here, and `cargo generate-lockfile` would re-resolve everything.
           cargo update --workspace
 
-      - name: Commit and push
-        id: commit
-        run: |
-          VERSION="${{ inputs.version }}"
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
           if git diff --quiet; then
             echo "::error::Cargo.toml is already at $VERSION — nothing to release"
             exit 1
           fi
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore: release v$VERSION"
-          git push origin main
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git diff --stat
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          case "$VERSION" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Upload bumped manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: |
+            Cargo.toml
+            Cargo.lock
+
+  # The same gates a pull request must pass, on the pinned revision.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
 
   build:
     name: Build ${{ matrix.target }}
-    needs: bump
+    needs: [prepare, ci]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -117,12 +144,22 @@ jobs:
             asset_name: Poopman-windows-x86_64
 
     steps:
-      # The bump commit, not main's tip — the binaries must carry the version
-      # that was just written, and main may have moved on.
-      - name: Checkout the bump commit
+      # The pinned revision plus the bumped manifest is exactly the tree the
+      # release commit will have, so the binaries carry the new version.
+      - name: Checkout the pinned revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.bump.outputs.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Download bumped manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: release-manifest
+          path: release-manifest
+
+      - name: Apply bumped manifest
+        shell: bash
+        run: cp release-manifest/Cargo.toml release-manifest/Cargo.lock .
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -163,7 +200,7 @@ jobs:
         run: cargo install cargo-bundle
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Create app bundle (macOS)
         if: runner.os == 'macOS'
@@ -222,41 +259,68 @@ jobs:
           name: ${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}.zip
 
-  release:
-    name: Create Release
-    needs: [bump, build]
+  publish:
+    name: Publish
+    needs: [prepare, build]
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
+    # The only job allowed to write to the repository.
     permissions:
       contents: write
-
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      BASE_SHA: ${{ needs.prepare.outputs.sha }}
+      COMMIT_EPOCH: ${{ needs.prepare.outputs.commit_epoch }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Checkout the bump commit
+      - name: Checkout the pinned revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.bump.outputs.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
 
-      - name: Download all artifacts
+      - name: Download bumped manifest
         uses: actions/download-artifact@v4
         with:
+          name: release-manifest
+          path: release-manifest
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Poopman-*
           path: artifacts
 
       - name: Display structure of downloaded files
         run: ls -R artifacts
 
-      # Creates the tag as well, on the bump commit. Tagging here rather than
-      # in the bump job means a failed build leaves no dangling tag.
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ inputs.version }}
-          target_commitish: ${{ needs.bump.outputs.sha }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
+      # main and the tag move together in one atomic push, only if main is
+      # still at the pinned revision. On a rerun after this succeeded, the
+      # identical commit is rebuilt and recognized, and nothing is pushed.
+      - name: Push the release commit and tag
+        run: |
+          cp release-manifest/Cargo.toml release-manifest/Cargo.lock .
+          bash .github/scripts/release.sh publish-commit "$VERSION" "$BASE_SHA" "$COMMIT_EPOCH"
+
+      # Built as a draft and published last, so nobody sees a release with
+      # missing assets. A rerun finds the draft and re-uploads over it.
+      - name: Create the GitHub release
+        run: |
+          tag="v$VERSION"
+          files=(
             artifacts/Poopman-linux-x86_64/Poopman-linux-x86_64.tar.gz
             artifacts/Poopman-macos-x86_64/Poopman-macos-x86_64.dmg
             artifacts/Poopman-macos-aarch64/Poopman-macos-aarch64.dmg
             artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            prerelease_flag=()
+            if [ "$PRERELEASE" = true ]; then prerelease_flag=(--prerelease); fi
+            gh release create "$tag" "${files[@]}" \
+              --verify-tag --draft --generate-notes --title "$tag" "${prerelease_flag[@]}"
+          fi
+          gh release edit "$tag" --draft=false
