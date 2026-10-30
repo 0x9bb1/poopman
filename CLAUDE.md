@@ -37,7 +37,7 @@ Windows builds need `GPUI_FXC_PATH` pointing at the Windows SDK `fxc.exe`, and a
 
 `.github/workflows/release.yml` is `workflow_dispatch`-only and transactional. `prepare` pins `github.sha`, validates the version and writes it into **both** `[package]` and `[package.metadata.bundle]` in Cargo.toml (uploaded as an artifact, not committed); CI and the Linux/macOS (x64+arm)/Windows builds run on that tree; only then does `publish` (the sole `contents: write` job) commit `chore: release vX [skip ci]` and push main + tag atomically, refusing if main moved. A failure before `publish` changes nothing — just dispatch again. A failure inside `publish` is finished with **"Re-run failed jobs"** (not "Re-run all jobs"): the release commit is deterministic, so the rerun recognizes an already-pushed tag, and the GitHub release stays a draft until every asset is uploaded. `dry_run: true` runs everything but `publish`, from any branch (`gh workflow run release.yml --ref <branch> -f version=X -f dry_run=true`).
 
-The version input reaches shell only via `env:` — never put `${{ inputs.* }}` inside `run:`. Release shell logic lives in `.github/scripts/release.sh` (validate / bump / publish-commit) with bare-repo tests in `release.test.sh`. Don't hand-bump versions or push tags.
+The version input reaches shell only via `env:` — never put `${{ inputs.* }}` inside `run:`. Release shell logic lives in `.github/scripts/release.sh` (validate / bump / publish-commit) with bare-repo tests in `release.test.sh`. Don't hand-bump versions or push tags. Never quote the CI-skip marker (`[skip ci]`, `[ci skip]`, …) in any other commit message: GitHub skips push *and* pull_request CI when the head commit's message contains it anywhere.
 
 ## Architecture
 
