@@ -55,9 +55,8 @@ pub fn format_relative_time(timestamp: &str, now: DateTime<Utc>) -> String {
     };
     let elapsed = now.signed_duration_since(then);
 
-    let plural = |n: i64, unit: &str| {
-        format!("{} {}{} ago", n, unit, if n == 1 { "" } else { "s" })
-    };
+    let plural =
+        |n: i64, unit: &str| format!("{} {}{} ago", n, unit, if n == 1 { "" } else { "s" });
 
     if elapsed.num_seconds() < 60 {
         "just now".to_string()
@@ -136,37 +135,67 @@ mod tests {
     #[test]
     fn relative_under_a_minute_is_just_now() {
         let now = Utc::now();
-        assert_eq!(format_relative_time(&ts(now, Duration::seconds(30)), now), "just now");
-        assert_eq!(format_relative_time(&ts(now, Duration::seconds(0)), now), "just now");
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::seconds(30)), now),
+            "just now"
+        );
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::seconds(0)), now),
+            "just now"
+        );
     }
 
     #[test]
     fn relative_future_timestamp_is_just_now() {
         // Clock skew: a timestamp slightly in the future must not underflow.
         let now = Utc::now();
-        assert_eq!(format_relative_time(&ts(now, Duration::seconds(-5)), now), "just now");
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::seconds(-5)), now),
+            "just now"
+        );
     }
 
     #[test]
     fn relative_minutes() {
         let now = Utc::now();
-        assert_eq!(format_relative_time(&ts(now, Duration::minutes(1)), now), "1 min ago");
-        assert_eq!(format_relative_time(&ts(now, Duration::minutes(5)), now), "5 min ago");
-        assert_eq!(format_relative_time(&ts(now, Duration::minutes(59)), now), "59 min ago");
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::minutes(1)), now),
+            "1 min ago"
+        );
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::minutes(5)), now),
+            "5 min ago"
+        );
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::minutes(59)), now),
+            "59 min ago"
+        );
     }
 
     #[test]
     fn relative_hours_pluralized() {
         let now = Utc::now();
-        assert_eq!(format_relative_time(&ts(now, Duration::minutes(90)), now), "1 hour ago");
-        assert_eq!(format_relative_time(&ts(now, Duration::hours(5)), now), "5 hours ago");
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::minutes(90)), now),
+            "1 hour ago"
+        );
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::hours(5)), now),
+            "5 hours ago"
+        );
     }
 
     #[test]
     fn relative_days_pluralized() {
         let now = Utc::now();
-        assert_eq!(format_relative_time(&ts(now, Duration::hours(25)), now), "1 day ago");
-        assert_eq!(format_relative_time(&ts(now, Duration::days(3)), now), "3 days ago");
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::hours(25)), now),
+            "1 day ago"
+        );
+        assert_eq!(
+            format_relative_time(&ts(now, Duration::days(3)), now),
+            "3 days ago"
+        );
     }
 
     #[test]

@@ -35,8 +35,8 @@ pub fn format_json(input: &str) -> Result<String, String> {
         return Err("Empty input".to_string());
     }
 
-    let value: serde_json::Value = serde_json::from_str(input)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
+    let value: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| format!("JSON parse error: {}", e))?;
 
     pretty_json_4(&value)
 }

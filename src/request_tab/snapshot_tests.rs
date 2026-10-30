@@ -129,7 +129,10 @@ fn editor_fast_path_agrees_with_full_snapshot_comparison() {
 
     let mut cases: Vec<(&str, RequestTab)> = vec![("unchanged", base.clone())];
     let mut tab = base.clone();
-    tab.headers_state.as_mut().unwrap().push(blank_header.clone());
+    tab.headers_state
+        .as_mut()
+        .unwrap()
+        .push(blank_header.clone());
     tab.params_state.as_mut().unwrap().push(ParamState {
         enabled: true,
         key: String::new(),
@@ -177,11 +180,7 @@ fn editor_fast_path_agrees_with_full_snapshot_comparison() {
     let baseline = base.baseline.clone().unwrap();
     for (name, tab) in &cases {
         assert!(tab.params_state.is_some() && tab.headers_state.is_some());
-        assert_eq!(
-            baseline.matches(tab),
-            *baseline == tab.snapshot(),
-            "{name}"
-        );
+        assert_eq!(baseline.matches(tab), *baseline == tab.snapshot(), "{name}");
     }
     let dirty: Vec<_> = cases
         .iter()

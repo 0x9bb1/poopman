@@ -64,8 +64,7 @@ impl RequestSnapshot {
                 .iter()
                 .filter(|param| !param.key.is_empty() || !param.value.is_empty()))
             && headers_state.iter().eq(headers.iter().filter(|header| {
-                !header.is_transport_owned()
-                    && (!header.key.is_empty() || !header.value.is_empty())
+                !header.is_transport_owned() && (!header.key.is_empty() || !header.value.is_empty())
             }))
             && *saved_name == tab.saved_name
             && *collection_id == tab.collection_id
@@ -324,11 +323,7 @@ impl RequestTab {
     }
 
     /// Apply a response only when it belongs to this tab's current request.
-    pub fn complete_request(
-        &mut self,
-        request_id: u64,
-        response: Arc<ResponseData>,
-    ) -> bool {
+    pub fn complete_request(&mut self, request_id: u64, response: Arc<ResponseData>) -> bool {
         if self.active_request_id != Some(request_id) {
             return false;
         }
@@ -465,7 +460,10 @@ mod tests {
     #[test]
     fn completion_after_switch_updates_only_its_originating_tab() {
         let mut tabs = [RequestTab::new_empty(10), RequestTab::new_empty(20)];
-        tabs[0].begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
+        tabs[0].begin_request(
+            101,
+            RequestData::new(HttpMethod::GET, "https://a.test".into()),
+        );
 
         // The user switched to tab B before A completed. Routing uses tab id,
         // never the active index.
@@ -492,8 +490,14 @@ mod tests {
     fn concurrent_out_of_order_completions_stay_with_their_tabs() {
         let mut a = RequestTab::new_empty(10);
         let mut b = RequestTab::new_empty(20);
-        a.begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
-        b.begin_request(102, RequestData::new(HttpMethod::GET, "https://b.test".into()));
+        a.begin_request(
+            101,
+            RequestData::new(HttpMethod::GET, "https://a.test".into()),
+        );
+        b.begin_request(
+            102,
+            RequestData::new(HttpMethod::GET, "https://b.test".into()),
+        );
 
         assert!(b.complete_request(102, response(202)));
         assert!(a.complete_request(101, response(201)));
@@ -505,8 +509,14 @@ mod tests {
     fn cancel_affects_only_the_matching_tab_and_request() {
         let mut a = RequestTab::new_empty(10);
         let mut b = RequestTab::new_empty(20);
-        a.begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
-        b.begin_request(102, RequestData::new(HttpMethod::GET, "https://b.test".into()));
+        a.begin_request(
+            101,
+            RequestData::new(HttpMethod::GET, "https://a.test".into()),
+        );
+        b.begin_request(
+            102,
+            RequestData::new(HttpMethod::GET, "https://b.test".into()),
+        );
 
         assert!(b.cancel_request(102));
         assert!(b.response_canceled);
@@ -518,8 +528,14 @@ mod tests {
     #[test]
     fn stale_same_tab_completion_cannot_overwrite_a_newer_request() {
         let mut tab = RequestTab::new_empty(10);
-        tab.begin_request(101, RequestData::new(HttpMethod::GET, "https://old.test".into()));
-        tab.begin_request(102, RequestData::new(HttpMethod::GET, "https://new.test".into()));
+        tab.begin_request(
+            101,
+            RequestData::new(HttpMethod::GET, "https://old.test".into()),
+        );
+        tab.begin_request(
+            102,
+            RequestData::new(HttpMethod::GET, "https://new.test".into()),
+        );
 
         assert!(!tab.complete_request(101, response(201)));
         assert!(tab.response.is_none());
@@ -530,7 +546,10 @@ mod tests {
     #[test]
     fn closing_a_running_tab_leaves_no_completion_destination() {
         let mut tabs = vec![RequestTab::new_empty(10), RequestTab::new_empty(20)];
-        tabs[0].begin_request(101, RequestData::new(HttpMethod::GET, "https://a.test".into()));
+        tabs[0].begin_request(
+            101,
+            RequestData::new(HttpMethod::GET, "https://a.test".into()),
+        );
 
         tabs.remove(0);
 

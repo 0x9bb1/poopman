@@ -29,11 +29,17 @@ fn invalid_url_is_reported_in_the_response_and_logged(cx: &mut gpui::TestAppCont
 
     cx.update(|_, cx| {
         let app = app.read(cx);
-        let response = app.request_tabs[0].response.clone().expect("error response");
+        let response = app.request_tabs[0]
+            .response
+            .clone()
+            .expect("error response");
         assert_eq!(response.status, None);
         assert_eq!(response.body, b"Could not send request: invalid URL");
         assert_eq!(
-            app.response_viewer.read(cx).get_response().map(|r| r.status),
+            app.response_viewer
+                .read(cx)
+                .get_response()
+                .map(|r| r.status),
             Some(None)
         );
     });

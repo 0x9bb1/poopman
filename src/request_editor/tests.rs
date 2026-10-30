@@ -300,15 +300,21 @@ fn empty_url_marks_and_focuses_the_field_without_sending(cx: &mut TestAppContext
     cx.update(|window, cx| {
         let editor = editor.read(cx);
         assert!(editor.url_error);
-        assert!(editor.url_input.read(cx).focus_handle(cx).is_focused(window));
+        assert!(
+            editor
+                .url_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
     });
     assert_eq!(started.get(), 0, "an empty URL is never sent");
 
     cx.update(|window, cx| {
         editor.update(cx, |editor, cx| {
-            editor
-                .url_input
-                .update(cx, |input, cx| input.set_value("api.example.test", window, cx))
+            editor.url_input.update(cx, |input, cx| {
+                input.set_value("api.example.test", window, cx)
+            })
         })
     });
     cx.run_until_parked();

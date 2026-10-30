@@ -18,7 +18,10 @@ use crate::types::{
 pub enum CurlImportError {
     UnsupportedOption(String),
     MissingOptionValue(String),
-    InvalidOptionValue { option: String, expected: &'static str },
+    InvalidOptionValue {
+        option: String,
+        expected: &'static str,
+    },
     EmptyUrl,
     MultipleUrls,
     UnclosedQuote,
@@ -33,7 +36,10 @@ impl fmt::Display for CurlImportError {
                 "Unsupported cURL option `{option}`. The command was not imported because this option's arguments or request semantics are unknown."
             ),
             Self::MissingOptionValue(option) => {
-                write!(f, "cURL option `{option}` requires a value. The command was not imported.")
+                write!(
+                    f,
+                    "cURL option `{option}` requires a value. The command was not imported."
+                )
             }
             Self::InvalidOptionValue { option, expected } => write!(
                 f,
@@ -214,7 +220,10 @@ fn flag_value(
 fn matches_flag(tok: &str, short: &str, long: &str) -> bool {
     tok == short
         || tok == long
-        || (!short.is_empty() && tok.starts_with(short) && tok.len() > short.len() && !tok.starts_with(long))
+        || (!short.is_empty()
+            && tok.starts_with(short)
+            && tok.len() > short.len()
+            && !tok.starts_with(long))
         || tok.starts_with(&format!("{}=", long))
 }
 
@@ -322,12 +331,12 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
             )?);
         } else if matches_flag(&tok, "-F", "--form") {
             let v = flag_value(&tokens, &mut i, "-F", "--form")?;
-            let (k, val) = v.split_once('=').ok_or_else(|| {
-                CurlImportError::InvalidOptionValue {
-                    option: tok.clone(),
-                    expected: "a `name=value` form field",
-                }
-            })?;
+            let (k, val) =
+                v.split_once('=')
+                    .ok_or_else(|| CurlImportError::InvalidOptionValue {
+                        option: tok.clone(),
+                        expected: "a `name=value` form field",
+                    })?;
             if k.is_empty() {
                 return Err(CurlImportError::InvalidOptionValue {
                     option: tok,
@@ -345,10 +354,16 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
                 ));
             }
             let value = match val.strip_prefix('@') {
-                Some(path) => FormDataValue::File { path: path.to_string() },
+                Some(path) => FormDataValue::File {
+                    path: path.to_string(),
+                },
                 None => FormDataValue::Text(val.to_string()),
             };
-            form_rows.push(FormDataRow { enabled: true, key: k.to_string(), value });
+            form_rows.push(FormDataRow {
+                enabled: true,
+                key: k.to_string(),
+                value,
+            });
         } else if matches_flag(&tok, "-b", "--cookie") {
             let v = flag_value(&tokens, &mut i, "-b", "--cookie")?;
             // curl reads the -b argument as cookie data when it contains '=',
@@ -450,7 +465,10 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
         } else {
             RawSubtype::Text
         };
-        BodyType::Raw { content: data_parts.join("&"), subtype }
+        BodyType::Raw {
+            content: data_parts.join("&"),
+            subtype,
+        }
     } else {
         BodyType::None
     };
@@ -461,7 +479,13 @@ pub fn parse_curl(input: &str) -> Result<Option<RequestData>, CurlImportError> {
         HttpMethod::POST
     });
 
-    Ok(Some(RequestData { method, url, headers, body, auth }))
+    Ok(Some(RequestData {
+        method,
+        url,
+        headers,
+        body,
+        auth,
+    }))
 }
 
 #[cfg(test)]
@@ -508,25 +532,43 @@ mod tests {
     #[test]
     fn double_quotes_with_escapes() {
         let r = parse(r#"curl -H "X-Note: say \"hi\"" https://example.com"#);
-        assert_eq!(r.headers, vec![("X-Note".to_string(), r#"say "hi""#.to_string())]);
+        assert_eq!(
+            r.headers,
+            vec![("X-Note".to_string(), r#"say "hi""#.to_string())]
+        );
     }
 
     #[test]
     fn explicit_method_flag() {
-        assert_eq!(parse("curl -X PUT https://example.com").method, HttpMethod::PUT);
-        assert_eq!(parse("curl --request DELETE https://example.com").method, HttpMethod::DELETE);
+        assert_eq!(
+            parse("curl -X PUT https://example.com").method,
+            HttpMethod::PUT
+        );
+        assert_eq!(
+            parse("curl --request DELETE https://example.com").method,
+            HttpMethod::DELETE
+        );
     }
 
     #[test]
     fn attached_and_equals_forms() {
-        assert_eq!(parse("curl -XPOST https://example.com").method, HttpMethod::POST);
-        assert_eq!(parse("curl --request=PATCH https://example.com").method, HttpMethod::PATCH);
+        assert_eq!(
+            parse("curl -XPOST https://example.com").method,
+            HttpMethod::POST
+        );
+        assert_eq!(
+            parse("curl --request=PATCH https://example.com").method,
+            HttpMethod::PATCH
+        );
     }
 
     #[test]
     fn headers_split_at_first_colon_and_trim() {
         let r = parse("curl -H 'X-Time: 12:30:00' https://example.com");
-        assert_eq!(r.headers, vec![("X-Time".to_string(), "12:30:00".to_string())]);
+        assert_eq!(
+            r.headers,
+            vec![("X-Time".to_string(), "12:30:00".to_string())]
+        );
     }
 
     #[test]
@@ -534,15 +576,17 @@ mod tests {
         let r = parse("curl -H 'A: 1' -H 'B: 2' https://example.com");
         assert_eq!(
             r.headers,
-            vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+            vec![
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "2".to_string())
+            ]
         );
     }
 
     #[test]
     fn content_length_is_not_imported() {
-        let r = parse(
-            "curl -H 'Content-Length: 1' -H 'X-Trace: kept' -d '你好' https://example.com",
-        );
+        let r =
+            parse("curl -H 'Content-Length: 1' -H 'X-Trace: kept' -d '你好' https://example.com");
         assert_eq!(
             r.headers,
             vec![
@@ -557,9 +601,8 @@ mod tests {
 
     #[test]
     fn data_implies_post_and_json_subtype_from_header() {
-        let r = parse(
-            "curl -H 'Content-Type: application/json' -d '{\"a\":1}' https://example.com",
-        );
+        let r =
+            parse("curl -H 'Content-Type: application/json' -d '{\"a\":1}' https://example.com");
         assert_eq!(r.method, HttpMethod::POST);
         match r.body {
             BodyType::Raw { content, subtype } => {
@@ -598,7 +641,9 @@ mod tests {
                 assert_eq!(rows[0].key, "name");
                 assert!(matches!(&rows[0].value, FormDataValue::Text(t) if t == "alice"));
                 assert_eq!(rows[1].key, "avatar");
-                assert!(matches!(&rows[1].value, FormDataValue::File { path } if path == "/tmp/a.png"));
+                assert!(
+                    matches!(&rows[1].value, FormDataValue::File { path } if path == "/tmp/a.png")
+                );
                 assert!(rows.iter().all(|row| row.enabled));
             }
             other => panic!("expected form body, got {:?}", other),
@@ -612,13 +657,27 @@ mod tests {
         assert_eq!(r.auth.basic_username, "user");
         assert_eq!(r.auth.basic_password, "pass");
         // No Authorization header is synthesized — the config computes it at send time.
-        assert!(r.headers.iter().all(|(k, _)| !k.eq_ignore_ascii_case("authorization")));
+        assert!(
+            r.headers
+                .iter()
+                .all(|(k, _)| !k.eq_ignore_ascii_case("authorization"))
+        );
     }
 
     #[test]
     fn user_flag_long_and_attached_forms() {
-        assert_eq!(parse("curl --user u:p https://example.com").auth.basic_username, "u");
-        assert_eq!(parse("curl --user=u:p https://example.com").auth.basic_password, "p");
+        assert_eq!(
+            parse("curl --user u:p https://example.com")
+                .auth
+                .basic_username,
+            "u"
+        );
+        assert_eq!(
+            parse("curl --user=u:p https://example.com")
+                .auth
+                .basic_password,
+            "p"
+        );
         let r = parse("curl -uadmin:s3cret https://example.com");
         assert_eq!(r.auth.basic_username, "admin");
         assert_eq!(r.auth.basic_password, "s3cret");
@@ -634,8 +693,14 @@ mod tests {
 
     #[test]
     fn url_flag_supports_separate_and_equals_forms() {
-        assert_eq!(parse("curl --url https://a.example").url, "https://a.example");
-        assert_eq!(parse("curl --url=https://b.example").url, "https://b.example");
+        assert_eq!(
+            parse("curl --url https://a.example").url,
+            "https://a.example"
+        );
+        assert_eq!(
+            parse("curl --url=https://b.example").url,
+            "https://b.example"
+        );
     }
 
     #[test]
@@ -668,8 +733,13 @@ mod tests {
         // Cookie passed the -H way still works (regression guard).
         let r = parse("curl 'https://example.com/' -H 'Cookie: sid=abc123; keepLogin=true'");
         assert_eq!(
-            r.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("cookie")),
-            Some(&("Cookie".to_string(), "sid=abc123; keepLogin=true".to_string()))
+            r.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("cookie")),
+            Some(&(
+                "Cookie".to_string(),
+                "sid=abc123; keepLogin=true".to_string()
+            ))
         );
     }
 
@@ -709,7 +779,10 @@ mod tests {
         // -b consumes its own value, so the cookie string is not mistaken for the URL.
         let r = parse("curl -b 'sid=abc; k=v' https://example.com/api");
         assert_eq!(r.url, "https://example.com/api");
-        assert_eq!(r.headers, vec![("Cookie".to_string(), "sid=abc; k=v".to_string())]);
+        assert_eq!(
+            r.headers,
+            vec![("Cookie".to_string(), "sid=abc; k=v".to_string())]
+        );
     }
 
     #[test]

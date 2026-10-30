@@ -480,12 +480,15 @@ impl ResponseViewer {
                         crate::format::format_size(downloaded_bytes as usize)
                     )))
                 })
-                .when(response.downloaded_bytes.is_none() && !response.is_network_error(), |this| {
-                    this.child(div().text_sm().child(format!(
-                        "Size: {}",
-                        crate::format::format_size(response.body.len())
-                    )))
-                })
+                .when(
+                    response.downloaded_bytes.is_none() && !response.is_network_error(),
+                    |this| {
+                        this.child(div().text_sm().child(format!(
+                            "Size: {}",
+                            crate::format::format_size(response.body.len())
+                        )))
+                    },
+                )
         } else {
             h_flex()
                 .px_4()
@@ -658,7 +661,9 @@ impl Render for ResponseViewer {
                                                 .text_color(theme.muted_foreground)
                                                 .child(format!(
                                                     "{} saved to {}",
-                                                    crate::format::format_size(downloaded_bytes as usize),
+                                                    crate::format::format_size(
+                                                        downloaded_bytes as usize
+                                                    ),
                                                     path
                                                 )),
                                         ),

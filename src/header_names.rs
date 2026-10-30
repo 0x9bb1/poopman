@@ -148,7 +148,11 @@ mod tests {
     #[test]
     fn x_dash_yields_only_x_dash_names() {
         let results = suggest("X-");
-        assert!(results.len() > 1, "expected several X- headers, got {:?}", results);
+        assert!(
+            results.len() > 1,
+            "expected several X- headers, got {:?}",
+            results
+        );
         assert!(results.iter().all(|name| name.starts_with("X-")));
     }
 

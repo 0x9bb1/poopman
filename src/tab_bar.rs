@@ -1,7 +1,7 @@
-use gpui::*;
-use gpui::px;
 use gpui::prelude::FluentBuilder as _;
-use gpui_component::{h_flex, scroll::ScrollableElement as _, ActiveTheme as _};
+use gpui::px;
+use gpui::*;
+use gpui_component::{ActiveTheme as _, h_flex, scroll::ScrollableElement as _};
 
 use crate::request_tab::RequestTab;
 use crate::theme::method_color;
@@ -77,17 +77,34 @@ impl TabBar {
         }
     }
 
-    fn on_tab_click(&mut self, tab_index: usize, _event: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_tab_click(
+        &mut self,
+        tab_index: usize,
+        _event: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.emit(TabClicked { tab_index });
         cx.notify();
     }
 
-    fn on_new_tab_click(&mut self, _event: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_new_tab_click(
+        &mut self,
+        _event: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.emit(NewTabClicked);
         cx.notify();
     }
 
-    fn on_close_tab_click(&mut self, tab_index: usize, _event: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_close_tab_click(
+        &mut self,
+        tab_index: usize,
+        _event: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.emit(TabCloseClicked { tab_index });
         cx.notify();
     }
@@ -143,7 +160,11 @@ impl Render for TabBar {
                                     .px_3()
                                     .py_1()
                                     .rounded(theme.radius)
-                                    .bg(if is_active { theme.muted } else { gpui::transparent_black() })
+                                    .bg(if is_active {
+                                        theme.muted
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
                                     .when(!is_active, |s| s.hover(|s| s.bg(theme.list_hover)))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, event, window, cx| {
@@ -154,18 +175,22 @@ impl Render for TabBar {
                                             .text_xs()
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(verb_color)
-                                            .child(method)
+                                            .child(method),
                                     )
                                     .child(
                                         // Tab title
                                         div()
                                             .text_sm()
-                                            .text_color(if is_active { theme.foreground } else { theme.muted_foreground })
+                                            .text_color(if is_active {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
                                             .max_w(px(150.))
                                             .overflow_hidden()
                                             .whitespace_nowrap()
                                             .text_ellipsis()
-                                            .child(tab.title.clone())
+                                            .child(tab.title.clone()),
                                     )
                                     .when(tab.dirty, |tab| {
                                         tab.child(
@@ -185,11 +210,15 @@ impl Render for TabBar {
                                             .text_color(theme.muted_foreground)
                                             .cursor_pointer()
                                             .hover(|style| style.text_color(theme.foreground))
-                                            .on_click(cx.listener(move |this, event, window, cx| {
-                                                cx.stop_propagation();
-                                                this.on_close_tab_click(tab_index, event, window, cx);
-                                            }))
-                                            .child("×")
+                                            .on_click(cx.listener(
+                                                move |this, event, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.on_close_tab_click(
+                                                        tab_index, event, window, cx,
+                                                    );
+                                                },
+                                            ))
+                                            .child("×"),
                                     )
                             })),
                     )
@@ -213,8 +242,8 @@ impl Render for TabBar {
                         div()
                             .text_lg()
                             .font_weight(gpui::FontWeight::BOLD)
-                            .child("+")
-                    )
+                            .child("+"),
+                    ),
             )
     }
 }
