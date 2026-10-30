@@ -444,9 +444,9 @@ impl CollectionsPanel {
                         cx.emit(CollectionsChanged::default());
                     })?;
                 }
-                Err(error) => {
-                    cx.update(|window, cx| crate::ui::error_toast(window, cx, failure_title, error))?
-                }
+                Err(error) => cx.update(|window, cx| {
+                    crate::ui::error_toast(window, cx, failure_title, error)
+                })?,
             }
             Ok::<_, anyhow::Error>(())
         })
@@ -609,7 +609,12 @@ impl CollectionsPanel {
                     })?;
                 }
                 Err(error) => cx.update(|window, cx| {
-                    crate::ui::error_toast(window, cx, Self::failure_title("duplicate", node), error)
+                    crate::ui::error_toast(
+                        window,
+                        cx,
+                        Self::failure_title("duplicate", node),
+                        error,
+                    )
                 })?,
             }
             Ok::<_, anyhow::Error>(())

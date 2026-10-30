@@ -62,11 +62,11 @@ pub(crate) fn bind_save_request_shortcut(cx: &mut App) {
 mod request_saving;
 
 #[cfg(test)]
+mod dirty_tests;
+#[cfg(test)]
 mod import_tests;
 #[cfg(test)]
 mod save_tests;
-#[cfg(test)]
-mod dirty_tests;
 #[cfg(test)]
 mod save_ui_tests;
 #[cfg(test)]
@@ -168,8 +168,7 @@ impl PoopmanApp {
         let settings = Arc::new(RwLock::new(settings));
 
         // Create components
-        let request_editor =
-            cx.new(|cx| RequestEditor::new(settings.clone(), window, cx));
+        let request_editor = cx.new(|cx| RequestEditor::new(settings.clone(), window, cx));
         let response_viewer = cx.new(|cx| ResponseViewer::new(window, cx));
         let history_panel = cx.new(|cx| HistoryPanel::new(db.clone(), history, window, cx));
         let collections_panel =
@@ -212,10 +211,8 @@ impl PoopmanApp {
                 else {
                     return;
                 };
-                this.request_tabs[tab_index]
-                    .begin_request(event.request_id, event.request.clone());
-                if tab_index == this.active_tab_index
-                    && this.response_viewer.read(cx).is_canceled()
+                this.request_tabs[tab_index].begin_request(event.request_id, event.request.clone());
+                if tab_index == this.active_tab_index && this.response_viewer.read(cx).is_canceled()
                 {
                     this.response_viewer.update(cx, |viewer, cx| {
                         viewer.clear_response(window, cx);
@@ -881,12 +878,7 @@ impl PoopmanApp {
     ) {
         self.request_editor.update(cx, |editor, cx| {
             editor.set_active_request_tab(tab.id, cx);
-            editor.load_request_with_body_draft(
-                &tab.request,
-                Some(&tab.body_draft),
-                window,
-                cx,
-            );
+            editor.load_request_with_body_draft(&tab.request, Some(&tab.body_draft), window, cx);
             editor.set_is_saved_request(tab.saved_request_id.is_some(), cx);
             if let Some(params_state) = &tab.params_state
                 && !params_state.is_empty()
@@ -905,12 +897,7 @@ impl PoopmanApp {
         }
     }
 
-    fn load_tab_response(
-        &mut self,
-        tab: &RequestTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn load_tab_response(&mut self, tab: &RequestTab, window: &mut Window, cx: &mut Context<Self>) {
         self.response_viewer.update(cx, |viewer, cx| {
             if tab.response_canceled {
                 viewer.show_canceled(window, cx);

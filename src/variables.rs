@@ -101,7 +101,10 @@ mod tests {
     use super::*;
 
     fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -159,7 +162,11 @@ mod tests {
             },
             auth: crate::types::AuthConfig::default(),
         };
-        let v = vars(&[("base_url", "https://api.test"), ("token", "abc"), ("env", "prod")]);
+        let v = vars(&[
+            ("base_url", "https://api.test"),
+            ("token", "abc"),
+            ("env", "prod"),
+        ]);
         let out = super::substitute_request(&req, &v);
         assert_eq!(out.url, "https://api.test/users");
         assert_eq!(out.headers[0].1, "Bearer abc");
@@ -173,10 +180,7 @@ mod tests {
     fn substitute_url_encodes_resolved_query_without_moving_fragment() {
         let out = substitute_url(
             "{{base_url}}/search?q={{term}}&q=already%20encoded#results",
-            &vars(&[
-                ("base_url", "HTTPS://api.test"),
-                ("term", "a b&c/你好"),
-            ]),
+            &vars(&[("base_url", "HTTPS://api.test"), ("term", "a b&c/你好")]),
         );
         assert_eq!(
             out,
@@ -197,8 +201,11 @@ mod tests {
             ..Default::default()
         };
         let v = vars(&[
-            ("token", "abc"), ("user", "u"), ("pass", "p"),
-            ("keyname", "X-Key"), ("keyval", "kv"),
+            ("token", "abc"),
+            ("user", "u"),
+            ("pass", "p"),
+            ("keyname", "X-Key"),
+            ("keyval", "kv"),
         ]);
         let out = super::substitute_auth(&auth, &v);
         assert_eq!(out.auth_type, AuthType::Bearer);
@@ -217,7 +224,11 @@ mod tests {
             url: "https://api.test".into(),
             headers: vec![],
             body: BodyType::None,
-            auth: AuthConfig { auth_type: AuthType::Bearer, bearer_token: "{{token}}".into(), ..Default::default() },
+            auth: AuthConfig {
+                auth_type: AuthType::Bearer,
+                bearer_token: "{{token}}".into(),
+                ..Default::default()
+            },
         };
         let out = super::substitute_request(&req, &vars(&[("token", "abc")]));
         assert_eq!(out.auth.bearer_token, "abc");

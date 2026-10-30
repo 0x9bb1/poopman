@@ -38,10 +38,8 @@ impl AppSettings {
     /// Protect startup from a malformed or hand-edited persisted value. The UI
     /// performs the same validation before allowing a change to take effect.
     pub fn normalized(mut self) -> Self {
-        self.connect_timeout_ms = Self::valid_timeout(
-            self.connect_timeout_ms,
-            Self::DEFAULT_CONNECT_TIMEOUT_MS,
-        );
+        self.connect_timeout_ms =
+            Self::valid_timeout(self.connect_timeout_ms, Self::DEFAULT_CONNECT_TIMEOUT_MS);
         self.read_timeout_ms =
             Self::valid_timeout(self.read_timeout_ms, Self::DEFAULT_READ_TIMEOUT_MS);
         self.total_timeout_ms =

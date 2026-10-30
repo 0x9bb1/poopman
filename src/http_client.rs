@@ -1,3 +1,6 @@
+use anyhow::Result;
+use futures::StreamExt as _;
+use reqwest::{StatusCode, Url, header::LOCATION};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -6,9 +9,6 @@ use std::{
     },
     time::Duration,
 };
-use anyhow::Result;
-use futures::StreamExt as _;
-use reqwest::{StatusCode, Url, header::LOCATION};
 use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Runtime;
 
@@ -346,12 +346,7 @@ async fn send_request(
         // Same-origin means an exact scheme/host/effective-port tuple. On any
         // boundary (including HTTPS -> HTTP), credentials are removed before
         // constructing the next request and are never reintroduced later.
-        protect_redirect_headers(
-            &mut headers,
-            auth_header_name.as_deref(),
-            &url,
-            &next_url,
-        );
+        protect_redirect_headers(&mut headers, auth_header_name.as_deref(), &url, &next_url);
 
         adjust_redirect_method_and_body(status, &mut method, &mut body, &mut headers);
         url = next_url;
@@ -558,7 +553,10 @@ fn partial_download_path(destination: &Path) -> PathBuf {
     ))
 }
 
-async fn download_response(response: reqwest::Response, destination: PathBuf) -> Result<HttpResponse> {
+async fn download_response(
+    response: reqwest::Response,
+    destination: PathBuf,
+) -> Result<HttpResponse> {
     if destination.exists() {
         return Err(anyhow::anyhow!(
             "The selected download destination already exists. Choose a new filename."
@@ -855,9 +853,7 @@ mod tests {
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf); // consume the request
             stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
                 .unwrap();
         });
 
@@ -887,9 +883,7 @@ mod tests {
             let (mut second, _) = listener.accept().unwrap();
             request_tx.send(read_request(&mut second)).unwrap();
             second
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
         });
 
@@ -935,9 +929,7 @@ mod tests {
             let (mut stream, _) = target.accept().unwrap();
             request_tx.send(read_request(&mut stream)).unwrap();
             stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                )
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .unwrap();
         });
 
@@ -1033,7 +1025,10 @@ mod tests {
             BodyType::None,
         );
         let error = block_on(inflight.wait()).expect_err("stalled request should time out");
-        assert!(error.downcast_ref::<RequestTimedOut>().is_some(), "{error:#}");
+        assert!(
+            error.downcast_ref::<RequestTimedOut>().is_some(),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -1062,7 +1057,10 @@ mod tests {
             BodyType::None,
         );
         let error = block_on(inflight.wait()).expect_err("idle body should time out");
-        assert!(error.downcast_ref::<RequestTimedOut>().is_some(), "{error:#}");
+        assert!(
+            error.downcast_ref::<RequestTimedOut>().is_some(),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -1135,7 +1133,10 @@ mod tests {
             BodyType::None,
         );
         let error = block_on(inflight.wait()).expect_err("decoded gzip body should exceed limit");
-        assert!(error.downcast_ref::<ResponseLimitExceeded>().is_some(), "{error:#}");
+        assert!(
+            error.downcast_ref::<ResponseLimitExceeded>().is_some(),
+            "{error:#}"
+        );
     }
 
     #[test]

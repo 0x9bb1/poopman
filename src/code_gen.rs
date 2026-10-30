@@ -211,7 +211,11 @@ fn gen_curl(req: &RequestData) -> String {
         shell_single(&req.url)
     ));
     for (k, v) in export_headers(req) {
-        lines.push(format!("  --header '{}: {}'", shell_single(k), shell_single(v)));
+        lines.push(format!(
+            "  --header '{}: {}'",
+            shell_single(k),
+            shell_single(v)
+        ));
     }
     for row in form_rows(req) {
         match &row.value {
@@ -357,7 +361,11 @@ fn gen_fetch(req: &RequestData) -> String {
     let mut s = String::new();
     s.push_str("const myHeaders = new Headers();\n");
     for (k, v) in export_headers(req) {
-        s.push_str(&format!("myHeaders.append(\"{}\", \"{}\");\n", dq(k), dq(v)));
+        s.push_str(&format!(
+            "myHeaders.append(\"{}\", \"{}\");\n",
+            dq(k),
+            dq(v)
+        ));
     }
     if !form.is_empty() {
         s.push_str("\nconst formdata = new FormData();\n");
@@ -423,7 +431,10 @@ fn gen_axios(req: &RequestData) -> String {
     }
     s.push('\n');
     s.push_str("const config = {\n");
-    s.push_str(&format!("  method: \"{}\",\n", req.method.as_str().to_lowercase()));
+    s.push_str(&format!(
+        "  method: \"{}\",\n",
+        req.method.as_str().to_lowercase()
+    ));
     s.push_str(&format!("  url: \"{}\",\n", dq(&req.url)));
     let hs = export_headers(req);
     if !form.is_empty() {
@@ -521,14 +532,19 @@ fn gen_go(req: &RequestData) -> String {
                 }
             }
         }
-        s.push_str("\tif err := writer.Close(); err != nil {\n\t\tfmt.Println(err)\n\t\treturn\n\t}\n\n");
+        s.push_str(
+            "\tif err := writer.Close(); err != nil {\n\t\tfmt.Println(err)\n\t\treturn\n\t}\n\n",
+        );
         s.push_str("\tclient := &http.Client{}\n");
         s.push_str("\treq, err := http.NewRequest(method, url, payload)\n");
     } else if let Some(b) = &body {
         // Go raw string literal in backticks; backticks can't be escaped, so fall
         // back to a quoted Go string if the body itself contains a backtick.
         if b.contains('`') {
-            s.push_str(&format!("\tpayload := strings.NewReader(\"{}\")\n\n", dq(b)));
+            s.push_str(&format!(
+                "\tpayload := strings.NewReader(\"{}\")\n\n",
+                dq(b)
+            ));
         } else {
             s.push_str(&format!("\tpayload := strings.NewReader(`{}`)\n\n", b));
         }
@@ -606,7 +622,9 @@ mod tests {
                 FormDataRow {
                     enabled: true,
                     key: "avatar".to_string(),
-                    value: FormDataValue::File { path: "C:\\pics\\me.png".to_string() },
+                    value: FormDataValue::File {
+                        path: "C:\\pics\\me.png".to_string(),
+                    },
                 },
                 FormDataRow {
                     enabled: false,
@@ -622,10 +640,22 @@ mod tests {
     fn code_gen_emits_bearer_auth_header() {
         use crate::types::{AuthConfig, AuthType};
         let mut req = get_req();
-        req.auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "t0ken".into(), ..Default::default() };
-        assert!(generate(CodeTarget::Curl, &req).contains("--header 'Authorization: Bearer t0ken'"));
-        assert!(generate(CodeTarget::PythonRequests, &req).contains("\"Authorization\": \"Bearer t0ken\""));
-        assert!(generate(CodeTarget::GoNetHttp, &req).contains("req.Header.Add(\"Authorization\", \"Bearer t0ken\")"));
+        req.auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "t0ken".into(),
+            ..Default::default()
+        };
+        assert!(
+            generate(CodeTarget::Curl, &req).contains("--header 'Authorization: Bearer t0ken'")
+        );
+        assert!(
+            generate(CodeTarget::PythonRequests, &req)
+                .contains("\"Authorization\": \"Bearer t0ken\"")
+        );
+        assert!(
+            generate(CodeTarget::GoNetHttp, &req)
+                .contains("req.Header.Add(\"Authorization\", \"Bearer t0ken\")")
+        );
     }
 
     #[test]
@@ -654,7 +684,11 @@ mod tests {
         use crate::types::{AuthConfig, AuthType};
         let mut req = get_req();
         req.headers = vec![("Authorization".into(), "Bearer OLD".into())];
-        req.auth = AuthConfig { auth_type: AuthType::Bearer, bearer_token: "NEW".into(), ..Default::default() };
+        req.auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "NEW".into(),
+            ..Default::default()
+        };
         let out = generate(CodeTarget::Curl, &req);
         assert!(out.contains("Bearer NEW"));
         assert!(!out.contains("Bearer OLD"));
@@ -667,7 +701,10 @@ mod tests {
 
         for target in CodeTarget::all() {
             let out = generate(target, &req);
-            assert!(!out.contains("Content-Length"), "generated {target:?}: {out}");
+            assert!(
+                !out.contains("Content-Length"),
+                "generated {target:?}: {out}"
+            );
         }
     }
 
@@ -842,9 +879,7 @@ mod tests {
     #[test]
     fn python_includes_payload_when_body() {
         let out = generate(CodeTarget::PythonRequests, &post_json_req());
-        assert!(out.contains(
-            "payload = \"{\\\"name\\\": \\\"ada\\\"}\".encode(\"utf-8\")"
-        ));
+        assert!(out.contains("payload = \"{\\\"name\\\": \\\"ada\\\"}\".encode(\"utf-8\")"));
         assert!(out.contains("data=payload"));
     }
 
@@ -927,7 +962,10 @@ mod tests {
             assert_eq!(payload, body.as_bytes(), "{runtime} changed {body:?}");
             actual = rest;
         }
-        assert!(actual.is_empty(), "{runtime} emitted unexpected trailing bytes");
+        assert!(
+            actual.is_empty(),
+            "{runtime} emitted unexpected trailing bytes"
+        );
     }
 
     #[cfg(not(windows))]
@@ -1110,7 +1148,10 @@ mod tests {
         assert!(out.contains("--form 'avatar=@\"C:\\\\pics\\\\me.png\"'"));
         assert!(!out.contains("skipme"));
         assert!(!out.contains("not yet supported"));
-        assert!(!out.contains("Content-Type"), "boundary header must not export");
+        assert!(
+            !out.contains("Content-Type"),
+            "boundary header must not export"
+        );
         assert!(out.contains("--header 'Accept: application/json'"));
         assert!(!out.contains("--data"));
     }
@@ -1148,7 +1189,9 @@ mod tests {
         req.body = BodyType::FormData(vec![FormDataRow {
             enabled: true,
             key: "doc".to_string(),
-            value: FormDataValue::File { path: "\\\\server\\share\\a\".png".to_string() },
+            value: FormDataValue::File {
+                path: "\\\\server\\share\\a\".png".to_string(),
+            },
         }]);
         let out = generate(CodeTarget::Curl, &req);
         assert!(out.contains("--form 'doc=@\"\\\\\\\\server\\\\share\\\\a\\\".png\"'"));

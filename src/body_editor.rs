@@ -1,13 +1,22 @@
 use gpui::prelude::FluentBuilder as _;
-use gpui::*;
 use gpui::px;
+use gpui::*;
 use gpui_component::{
-    button::*, checkbox::Checkbox, h_flex, input::{Input, InputState, InputEvent as InputChangeEvent, TabSize},
+    ActiveTheme as _, IndexPath, Sizable as _,
+    button::*,
+    checkbox::Checkbox,
+    h_flex,
+    input::{Input, InputEvent as InputChangeEvent, InputState, TabSize},
     scroll::ScrollableElement as _,
-    select::*, v_flex, ActiveTheme as _, IndexPath, Sizable as _,
+    select::*,
+    v_flex,
 };
 
-use std::{collections::{HashMap, HashSet}, rc::Rc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    time::Duration,
+};
 
 use crate::body_editor_assistance::{
     BodyDiagnosticSeverity, VariableCompletionProvider, compute_body_diagnostics,
@@ -47,8 +56,8 @@ struct FormDataRowInputs {
 pub struct BodyEditor {
     body_type_index: usize,
     raw_subtype_select: Entity<SelectState<Vec<&'static str>>>,
-    raw_body_editor: Entity<InputState>,  // Single editor for all raw types
-    current_raw_subtype: RawSubtype,      // Track current subtype
+    raw_body_editor: Entity<InputState>, // Single editor for all raw types
+    current_raw_subtype: RawSubtype,     // Track current subtype
     formdata_rows: Vec<FormDataRow>,
     formdata_input_states: Vec<FormDataRowInputs>,
     /// Stable identities kept parallel with the row model and input entities.
@@ -77,10 +86,14 @@ impl BodyEditor {
             && let Some(index) = self.formdata_row_index(row_id)
         {
             let inputs = &self.formdata_input_states[index];
-            let value = if is_key { &inputs.key_input } else { &inputs.value_input }
-                .read(cx)
-                .value()
-                .to_string();
+            let value = if is_key {
+                &inputs.key_input
+            } else {
+                &inputs.value_input
+            }
+            .read(cx)
+            .value()
+            .to_string();
             if is_key {
                 self.update_formdata_key(index, value, cx);
             } else {
@@ -90,7 +103,6 @@ impl BodyEditor {
         }
     }
 }
-
 
 impl BodyEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -111,7 +123,10 @@ impl BodyEditor {
                 .code_editor(current_raw_subtype.as_str())
                 .line_number(true)
                 .indent_guides(true)
-                .tab_size(TabSize { tab_size: 4, hard_tabs: false })
+                .tab_size(TabSize {
+                    tab_size: 4,
+                    hard_tabs: false,
+                })
                 .placeholder(get_placeholder_for_subtype(current_raw_subtype));
             input.lsp.completion_provider =
                 Some(Rc::new(VariableCompletionProvider::new(Vec::new())));
@@ -144,7 +159,11 @@ impl BodyEditor {
         let select_subscription = cx.subscribe_in(
             &raw_subtype_select,
             window,
-            |this: &mut BodyEditor, _select, _event: &SelectEvent<Vec<&'static str>>, window, cx| {
+            |this: &mut BodyEditor,
+             _select,
+             _event: &SelectEvent<Vec<&'static str>>,
+             window,
+             cx| {
                 this.handle_subtype_change(window, cx);
             },
         );
@@ -252,7 +271,8 @@ impl BodyEditor {
 
     /// Handle raw subtype change - switch syntax highlighting and placeholder
     fn handle_subtype_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let subtype_index = self.raw_subtype_select
+        let subtype_index = self
+            .raw_subtype_select
             .read(cx)
             .selected_index(cx)
             .map(|idx| idx.row)
@@ -260,8 +280,11 @@ impl BodyEditor {
         let new_subtype = RawSubtype::all()[subtype_index];
 
         if new_subtype != self.current_raw_subtype {
-            log::info!("Switching body editor language from {:?} to {:?}",
-                      self.current_raw_subtype, new_subtype);
+            log::info!(
+                "Switching body editor language from {:?} to {:?}",
+                self.current_raw_subtype,
+                new_subtype
+            );
 
             self.current_raw_subtype = new_subtype;
             self.raw_body_editor.update(cx, |state, cx| {
@@ -339,20 +362,12 @@ impl BodyEditor {
             .position(|subtype| *subtype == draft.raw_subtype)
             .unwrap_or(0);
         self.raw_subtype_select.update(cx, |select, cx| {
-            select.set_selected_index(
-                Some(IndexPath::default().row(subtype_index)),
-                window,
-                cx,
-            );
+            select.set_selected_index(Some(IndexPath::default().row(subtype_index)), window, cx);
         });
         self.raw_body_editor.update(cx, |input, cx| {
             input.set_value(&draft.raw_content, window, cx);
             input.set_highlighter(draft.raw_subtype.as_str(), cx);
-            input.set_placeholder(
-                get_placeholder_for_subtype(draft.raw_subtype),
-                window,
-                cx,
-            );
+            input.set_placeholder(get_placeholder_for_subtype(draft.raw_subtype), window, cx);
         });
         self.schedule_raw_diagnostics(false, window, cx);
 
@@ -369,11 +384,15 @@ impl BodyEditor {
 
     // Form-data table methods
     fn add_formdata_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_formdata_row_with_value(FormDataRow {
-            enabled: true,
-            key: String::new(),
-            value: FormDataValue::Text(String::new()),
-        }, window, cx);
+        self.add_formdata_row_with_value(
+            FormDataRow {
+                enabled: true,
+                key: String::new(),
+                value: FormDataValue::Text(String::new()),
+            },
+            window,
+            cx,
+        );
     }
 
     fn add_formdata_row_with_value(
@@ -444,16 +463,21 @@ impl BodyEditor {
                             && let Some(row) = this.formdata_rows.get_mut(index)
                         {
                             row.value = match &row.value {
-                                FormDataValue::Text(text) => FormDataValue::File { path: text.clone() },
+                                FormDataValue::Text(text) => {
+                                    FormDataValue::File { path: text.clone() }
+                                }
                                 FormDataValue::File { path } => FormDataValue::Text(path.clone()),
                             };
-                            this.formdata_input_states[index].value_input.update(cx, |input, cx| {
-                                input.set_placeholder(
-                                    if should_be_file { "File Path" } else { "Value" },
-                                    window,
-                                    cx,
-                                );
-                            });
+                            this.formdata_input_states[index].value_input.update(
+                                cx,
+                                |input, cx| {
+                                    input.set_placeholder(
+                                        if should_be_file { "File Path" } else { "Value" },
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            );
                             cx.notify();
                         }
                     }
@@ -475,11 +499,7 @@ impl BodyEditor {
     }
 
     /// Keep one (and only one) empty row after the last row containing data.
-    fn normalize_trailing_formdata_row(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn normalize_trailing_formdata_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let desired_len = crate::formdata::desired_editor_len(&self.formdata_rows);
 
         if self.formdata_rows.len() > desired_len {
@@ -492,12 +512,7 @@ impl BodyEditor {
         }
     }
 
-    fn remove_formdata_row(
-        &mut self,
-        row_id: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn remove_formdata_row(&mut self, row_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(index) = self.formdata_row_index(row_id) {
             self.formdata_rows.remove(index);
             self.formdata_input_states.remove(index);
@@ -541,7 +556,8 @@ impl BodyEditor {
             RawSubtype::Json => crate::code_formatter::format_json(&content),
             RawSubtype::Xml => crate::code_formatter::format_xml(&content),
             _ => {
-                self.validation_message = Some("Formatting not supported for this type".to_string());
+                self.validation_message =
+                    Some("Formatting not supported for this type".to_string());
                 self.validation_error = true;
                 cx.notify();
                 return;
@@ -553,7 +569,10 @@ impl BodyEditor {
                 self.raw_body_editor.update(cx, |input, cx| {
                     input.set_value(&formatted, window, cx);
                 });
-                self.validation_message = Some(format!("{} formatted successfully", self.current_raw_subtype.as_str().to_uppercase()));
+                self.validation_message = Some(format!(
+                    "{} formatted successfully",
+                    self.current_raw_subtype.as_str().to_uppercase()
+                ));
                 self.validation_error = false;
             }
             Err(err) => {
@@ -564,8 +583,13 @@ impl BodyEditor {
         cx.notify();
     }
 
-
-    fn select_file_for_row(&mut self, row_id: u64, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_file_for_row(
+        &mut self,
+        row_id: u64,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let path = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -574,7 +598,10 @@ impl BodyEditor {
         });
 
         if let Some(index) = self.formdata_row_index(row_id)
-            && let Some(value_input) = self.formdata_input_states.get(index).map(|inputs| inputs.value_input.downgrade())
+            && let Some(value_input) = self
+                .formdata_input_states
+                .get(index)
+                .map(|inputs| inputs.value_input.downgrade())
         {
             cx.spawn_in(window, async move |_, window| {
                 if let Ok(Ok(Some(paths))) = path.await

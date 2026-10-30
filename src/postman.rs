@@ -360,9 +360,11 @@ fn parse_body(
             }
         }
         "" => BodyType::None,
-        _ => return Err(anyhow!(
-            "{path}.body: unsupported body mode; convert it to raw, formdata or urlencoded before importing"
-        )),
+        _ => {
+            return Err(anyhow!(
+                "{path}.body: unsupported body mode; convert it to raw, formdata or urlencoded before importing"
+            ));
+        }
     })
 }
 

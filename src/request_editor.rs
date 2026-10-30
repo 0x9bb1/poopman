@@ -465,7 +465,9 @@ impl RequestEditor {
         let content_type = match loaded_body {
             crate::types::BodyType::None => None,
             crate::types::BodyType::Raw { subtype, .. } => Some(subtype.content_type().to_string()),
-            crate::types::BodyType::FormData(_) => Some("multipart/form-data; boundary=<auto>".to_string()),
+            crate::types::BodyType::FormData(_) => {
+                Some("multipart/form-data; boundary=<auto>".to_string())
+            }
         };
         if !request
             .headers
