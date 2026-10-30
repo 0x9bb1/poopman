@@ -21,31 +21,55 @@ impl RequestSnapshot {
         let (Some(params), Some(headers)) = (&tab.params_state, &tab.headers_state) else {
             return *self == tab.snapshot();
         };
-        self.request.method == tab.request.method
-            && self.request.url == tab.request.url
-            && self.request.body == tab.request.body
-            && self.request.auth == tab.request.auth
-            && self.body_draft.kind == tab.body_draft.kind
-            && self.body_draft.raw_content == tab.body_draft.raw_content
-            && self.body_draft.raw_subtype == tab.body_draft.raw_subtype
-            && self.body_draft.formdata_rows.iter().eq(tab
+        // Same answer as `*self == tab.snapshot()` without cloning the tab on
+        // every render. Destructured without `..` so a field added to any of
+        // these types fails to compile here instead of silently escaping dirty
+        // tracking (and losing edits on close without a prompt).
+        let Self {
+            request,
+            body_draft,
+            params_state,
+            headers_state,
+            saved_name,
+            collection_id,
+            folder_id,
+        } = self;
+        let RequestData {
+            method,
+            url,
+            // `snapshot()` rebuilds these from `headers_state`, compared below.
+            headers: _,
+            body,
+            auth,
+        } = request;
+        let BodyDraft {
+            kind,
+            raw_content,
+            raw_subtype,
+            formdata_rows,
+        } = body_draft;
+        *method == tab.request.method
+            && *url == tab.request.url
+            && *body == tab.request.body
+            && *auth == tab.request.auth
+            && *kind == tab.body_draft.kind
+            && *raw_content == tab.body_draft.raw_content
+            && *raw_subtype == tab.body_draft.raw_subtype
+            && formdata_rows.iter().eq(tab
                 .body_draft
                 .formdata_rows
                 .iter()
                 .filter(|row| !row.is_blank()))
-            && self.params_state.iter().eq(params
+            && params_state.iter().eq(params
                 .iter()
                 .filter(|param| !param.key.is_empty() || !param.value.is_empty()))
-            && self
-                .headers_state
-                .iter()
-                .eq(headers.iter().filter(|header| {
-                    !header.is_transport_owned()
-                        && (!header.key.is_empty() || !header.value.is_empty())
-                }))
-            && self.saved_name == tab.saved_name
-            && self.collection_id == tab.collection_id
-            && self.folder_id == tab.folder_id
+            && headers_state.iter().eq(headers.iter().filter(|header| {
+                !header.is_transport_owned()
+                    && (!header.key.is_empty() || !header.value.is_empty())
+            }))
+            && *saved_name == tab.saved_name
+            && *collection_id == tab.collection_id
+            && *folder_id == tab.folder_id
     }
 }
 
