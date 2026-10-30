@@ -197,9 +197,11 @@ jobs:
           xcode-select --print-path
           # GPUI requires Metal framework which is included in macOS SDK
 
+      # Pinned: cargo-bundle 0.12.0 rejects the [package.metadata.bundle.windows]
+      # table in Cargo.toml. Bump deliberately, with a dry run.
       - name: Install cargo-bundle (macOS)
         if: runner.os == 'macOS'
-        run: cargo install cargo-bundle
+        run: cargo install cargo-bundle --version 0.11.0 --locked
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
