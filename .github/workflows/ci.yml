@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # release.yml runs these same gates on the revision it is about to release.
+  workflow_call:
 
 # A newer push to the same PR or branch makes the older run moot.
 concurrency:
@@ -72,3 +74,16 @@ jobs:
         run: |
           export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" all_proxy="$ALL_PROXY"
           cargo test --locked --all-targets
+
+  release-scripts:
+    name: release scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck ships with the ubuntu runner image.
+      - name: shellcheck
+        run: shellcheck .github/scripts/*.sh
+
+      - name: release.sh tests
+        run: bash .github/scripts/release.test.sh
