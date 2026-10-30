@@ -437,6 +437,14 @@ impl Database {
         Self::spawn(conn)
     }
 
+    /// Test-only: run raw SQL, e.g. to install a trigger that makes one kind
+    /// of write fail while reads keep working.
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &'static str) {
+        self.call(move |conn| Ok(conn.execute_batch(sql)?))
+            .expect("test SQL");
+    }
+
     #[cfg(test)]
     pub(crate) fn open_test_file(path: &std::path::Path) -> Self {
         let conn = Connection::open(path).expect("open test db");

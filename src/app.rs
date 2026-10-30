@@ -69,6 +69,8 @@ mod save_tests;
 mod dirty_tests;
 #[cfg(test)]
 mod save_ui_tests;
+#[cfg(test)]
+mod send_failure_tests;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarView {
@@ -269,7 +271,9 @@ impl PoopmanApp {
                             history_panel
                                 .update_in(cx, |panel, window, cx| panel.reload(window, cx))?;
                         }
-                        Err(error) => log::error!("Failed to save history: {}", error),
+                        Err(error) => cx.update(|window, cx| {
+                            crate::ui::error_toast(window, cx, "Could not save to History", error)
+                        })?,
                     }
                     Ok::<_, anyhow::Error>(())
                 })
@@ -987,9 +991,9 @@ impl PoopmanApp {
                         this.refresh_saved_tab_ui(cx);
                     })?;
                 }
-                Err(error) => {
-                    log::error!("Failed to refresh saved request metadata: {}", error)
-                }
+                Err(error) => cx.update(|window, cx| {
+                    crate::ui::error_toast(window, cx, "Could not refresh saved requests", error)
+                })?,
             }
             Ok::<_, anyhow::Error>(())
         })
@@ -1239,6 +1243,8 @@ impl Render for PoopmanApp {
             // gpui-component dialogs/modals are stored on Root but must be rendered
             // by the app's root view; embed the dialog overlay here.
             .children(Root::render_dialog_layer(window, cx))
+            // Toasts live on Root too, and likewise need the root view to paint them.
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 

@@ -14,6 +14,9 @@ use std::time::Duration;
 use crate::db::Database;
 use crate::types::HistoryItem;
 
+#[cfg(test)]
+mod tests;
+
 /// Maximum number of history rows loaded/searched at a time.
 pub(crate) const HISTORY_LIMIT: usize = 100;
 
@@ -92,13 +95,15 @@ impl HistoryPanel {
             });
             let result = task.await;
 
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 if this.refresh_generation != generation {
                     return;
                 }
                 match result {
                     Ok(history) => this.history = history,
-                    Err(error) => log::error!("Failed to refresh history: {}", error),
+                    Err(error) => {
+                        crate::ui::error_toast(window, cx, "Could not load history", error)
+                    }
                 }
                 cx.notify();
             })?;
@@ -149,9 +154,12 @@ impl HistoryPanel {
         let task = cx.background_spawn(async move { db.clear_all_history() });
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = task.await {
-                log::error!("Failed to clear history: {}", error);
-                // Restore authoritative state if the optimistic clear failed.
-                this.update_in(cx, |this, window, cx| this.refresh_list(false, window, cx))?;
+                // Restore authoritative state if the optimistic clear failed,
+                // and say so — otherwise the rows just silently reappear.
+                this.update_in(cx, |this, window, cx| {
+                    crate::ui::error_toast(window, cx, "Could not clear history", error);
+                    this.refresh_list(false, window, cx)
+                })?;
             }
             Ok::<_, anyhow::Error>(())
         })

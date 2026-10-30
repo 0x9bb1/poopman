@@ -394,8 +394,8 @@ impl EnvironmentManager {
                     })?;
                 }
                 Err(error) => {
-                    log::error!("Failed to create environment: {}", error);
-                    this.update(cx, |this, cx| {
+                    this.update_in(cx, |this, window, cx| {
+                        crate::ui::error_toast(window, cx, "Could not create environment", error);
                         if this.selection_generation == selection_generation
                             && let Some(id) = this.selected_id
                         {
@@ -441,8 +441,8 @@ impl EnvironmentManager {
                     })?;
                 }
                 Err(error) => {
-                    log::error!("Failed to delete environment: {}", error);
-                    this.update(cx, |this, cx| {
+                    this.update_in(cx, |this, window, cx| {
+                        crate::ui::error_toast(window, cx, "Could not delete environment", error);
                         this.deleting.remove(&id);
                         this.save_tracker.invalidate(id);
                         this.save_tracker.set_status(id, SaveStatus::Failed);
@@ -473,7 +473,9 @@ impl EnvironmentManager {
             .submit(None, move |db| db.set_active_environment_id(id));
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = task.await {
-                log::error!("Failed to set active environment: {}", error);
+                cx.update(|window, cx| {
+                    crate::ui::error_toast(window, cx, "Could not switch environment", error)
+                })?;
                 // Read the actual persisted choice through the same queue. The
                 // previous optimistic choice may itself have failed to save.
                 let recovery = this.update(cx, |this, _| {

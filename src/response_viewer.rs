@@ -416,11 +416,14 @@ impl ResponseViewer {
         let rx = cx.prompt_for_new_path(&dir, Some(&suggested));
         cx.spawn_in(window, async move |_this, cx| {
             if let Ok(Ok(Some(path))) = rx.await {
-                let path_for_log = path.clone();
+                let path_for_error = path.clone();
                 let write =
                     cx.background_spawn(async move { std::fs::write(&path, &response.body) });
                 if let Err(error) = write.await {
-                    log::error!("Failed to save response to {:?}: {}", path_for_log, error);
+                    let detail = format!("{}: {}", path_for_error.display(), error);
+                    let _ = cx.update(|window, cx| {
+                        crate::ui::error_toast(window, cx, "Could not save response", detail)
+                    });
                 }
             }
         })
