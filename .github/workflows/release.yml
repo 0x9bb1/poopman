@@ -109,9 +109,11 @@ jobs:
             Cargo.toml
             Cargo.lock
 
-  # The same gates a pull request must pass, on the pinned revision.
+  # The same gates a pull request must pass, on the pinned revision. Waits for
+  # prepare so a rejected version doesn't spend a full CI run first.
   ci:
     name: CI
+    needs: prepare
     uses: ./.github/workflows/ci.yml
 
   build:
