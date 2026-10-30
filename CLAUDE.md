@@ -4,114 +4,80 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Poopman is a Postman-like API client built with the GPUI framework and gpui-component library. It provides a desktop application for making HTTP requests with a classic Postman-style layout: history panel on the left, request editor on top-right, and response viewer on bottom-right.
+Poopman is a Postman-like desktop API client in Rust, built on GPUI 0.2 (Zed's UI layer) and gpui-component 0.5. Layout: sidebar (Collections / History) on the left, request tabs + request editor top-right, response viewer bottom-right. README.md has the user-facing feature list, data-storage paths, and a per-file module map.
 
-## Build and Run
+## Commands
 
 ```bash
-# Run the application
-cargo run
-
-# Build release version
+cargo run                                         # debug build + run
 cargo build --release
+cargo test                                        # all tests (unit + gpui TestAppContext UI tests)
+cargo test <name_substring>                       # single test / module, e.g. cargo test url_params
+cargo test http_client::connection_pool_tests -- --nocapture   # real keep-alive server, prints connection reuse/timings
+cargo clippy
+cargo run --profile profiling --features profile  # Tracy spans (app + GPUI's own instrumentation)
+uv run tests/verify_curl_fixtures.py              # oracle: replays tests/fixtures/import/curl.json through the real curl binary
 ```
+
+### WSL2 environment
+
+The repo lives on `/mnt/e` and is usually driven from WSL2. In WSL only `cargo check` / `cargo clippy` work — `cargo build`/`cargo test` fail to link (no libxkbcommon), and the GUI cannot run there at all. Build and test on the Windows side instead:
+
+```bash
+pwsh.exe -NoProfile -Command "cd E:\code\poopman; cargo test"
+```
+
+Windows builds need `GPUI_FXC_PATH` pointing at the Windows SDK `fxc.exe`, and any running `poopman.exe` must be killed first (file lock). GUI behavior can't be verified by tests alone — visual/interaction changes need the user to check the running app.
+
+### Releases
+
+`.github/workflows/release.yml` is `workflow_dispatch`-only: the typed version is written into **both** `[package]` and `[package.metadata.bundle]` versions in Cargo.toml, committed, then built for Linux/macOS (x64+arm)/Windows. Don't hand-bump versions or push tags.
 
 ## Architecture
 
-### Component Structure
+### One editor, many tabs
 
-The application uses GPUI's entity-component system with a pub-sub event model:
+There is a **single** `RequestEditor` and a single `ResponseViewer` entity. Tabs (`RequestTab`, src/request_tab.rs) are plain data: on tab switch `PoopmanApp::save_current_tab_state` copies the editor's request/body draft/params/headers/response into the outgoing tab, and `load_tab_into_editor` / `load_tab_response` push the incoming tab back in. Consequences:
 
-- **`PoopmanApp` (src/app.rs)**: Root component that composes all panels and manages event subscriptions between components
-  - Subscribes to `RequestCompleted` events from `RequestEditor` to save to database and update `ResponseViewer`
-  - Subscribes to `HistoryItemClicked` events from `HistoryPanel` to load requests into `RequestEditor`
-  - Uses `v_resizable` for vertical resizing between request editor and response viewer
+- Any new piece of editor state must be captured and restored through this path, or it leaks between tabs.
+- In-flight requests are bound to their originating tab via `active_request_id`; `RequestCompleted`/`RequestCancelled` events must match it before mutating a tab (the user may have switched tabs mid-request).
+- Dirty tracking: each tab holds a `baseline: RequestSnapshot`; `RequestSnapshot::matches` deliberately ignores blank rows and transport-owned headers so they don't make a tab dirty. Saves to collections are explicit (Ctrl/Cmd+S, Save As) and serialized per tab (`saving_tabs`, src/app/request_saving.rs).
 
-- **`RequestEditor` (src/request_editor.rs)**: Top-right panel for configuring HTTP requests
-  - Contains `BodyEditor`, method selector, URL input, headers and query params management
-  - Emits `RequestCompleted` event with both request and response data when send completes
-  - Manages predefined headers (mandatory/toggleable) and custom headers separately via `HeaderType` enum
-  - Bidirectional URL-params synchronization: URL query string changes update Params tab, and Params tab changes update URL
-  - Uses flags (`updating_url`, `parsing_url`, `last_parsed_url`) to prevent infinite update loops during synchronization
+### Event wiring
 
-- **`ResponseViewer` (src/response_viewer.rs)**: Bottom-right panel for displaying responses
-  - Shows status code, duration, response size in status bar
-  - Tab interface for Body and Headers views
-  - JSON syntax highlighting and formatting
+`PoopmanApp` (src/app.rs) owns every panel and wires them with `cx.subscribe_in`. Main events: `RequestStarted` / `RequestCompleted` / `RequestCancelled` / `SaveRequestRequested` / `OpenCodeSnippet` (RequestEditor), `HistoryItemClicked` (HistoryPanel), `SavedRequestClicked` / `NewRequestRequested` / `CollectionsChanged` (CollectionsPanel), tab-bar click/close/new events, and environment changes from `EnvironmentManager`. Keyboard actions (`SendRequest`, `SaveRequest`, `NewTab`, `CloseTab`, `NextTab`, `PrevTab`, `FocusUrl`, `Quit`) are declared with `actions!` in app.rs and handled with `on_action` on the root element.
 
-- **`HistoryPanel` (src/history_panel.rs)**: Left panel showing request history
-  - Displays recent requests from SQLite database
-  - Emits `HistoryItemClicked` event when user clicks a history item
-  - Reload functionality to refresh after new requests
+### Database: single owner thread, never block the UI
 
-- **`BodyEditor` (src/body_editor.rs)**: Request body configuration component
-  - Supports Raw (JSON/XML/Text/JavaScript) and Form-data body types
-  - Embedded in `RequestEditor`
+`Database` (src/db.rs) owns the rusqlite `Connection` on a dedicated thread; callers send closures over a channel and block on a reply channel (`Database::call`). `register_ui_thread()` makes `call` **return an error if invoked on the GPUI thread** — all DB access from UI code must go through `cx.background_spawn(...)`. Startup loading happens in `AppInitialState::load()` before the window opens. Environment edits are persisted asynchronously in order via `EnvironmentPersistence` and flushed on shutdown (main.rs).
 
-### Data Flow
+Schema is created in `init_schema` (shared by real and in-memory test DBs); column additions use idempotent `PRAGMA table_info` checks (see `migrate_add_request_auth`). DB path resolution and the one-time legacy `~/.poopman/history.db` migration live in src/data_directory.rs (behavior documented in README "Data Storage"). Auth secrets are intentionally kept out of history rows.
 
-1. User configures request in `RequestEditor` and clicks Send
-2. `RequestEditor` makes HTTP call using custom `HttpClient` (wraps reqwest with tokio runtime)
-3. `RequestEditor` emits `RequestCompleted` event with request+response
-4. `PoopmanApp` receives event and:
-   - Saves to SQLite via `Database` (src/db.rs)
-   - Updates `ResponseViewer` with response
-   - Triggers `HistoryPanel` reload
-5. User can click history item to reload request into editor
+### HTTP
 
-### Database (src/db.rs)
+src/http_client.rs builds requests natively with reqwest on a shared multi-threaded tokio runtime, bridged into GPUI async. `HttpClientPool` keeps a `reqwest::Client` across tabs/sends and rebuilds it only when connection-affecting settings change; per-request timeouts and response size limits are captured per send. Redirects are followed manually (credential stripping across origins, scheme checks). Sends are cancellable (`InFlightRequest` aborts the tokio task). Settings (src/settings.rs) are shared as `Arc<RwLock<AppSettings>>` so changes apply to the next send before the disk write finishes. Do not add a default request timeout — Postman has none; timeouts must stay opt-in.
 
-- SQLite database stored at `~/.poopman/history.db` (Linux/macOS) or `%USERPROFILE%\.poopman\history.db` (Windows)
-- Stores request method, URL, headers (JSON), body, response status, duration, headers, body
-- Thread-safe via `Arc<Mutex<Connection>>`
+### Pure modules
 
-### Type System (src/types.rs)
+`code_gen`, `variables`, `url_params`, `code_formatter`, `curl_import`, `postman`, `format`, `header_names` are side-effect-free and carry most of the unit tests. Import tests share JSON fixtures in `tests/fixtures/import/` via `include_str!`. Put new parsing/transformation logic in a pure module and keep the gpui components thin.
 
-Key types:
-- `HttpMethod`: Enum for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
-- `BodyType`: Enum for None, Raw (with RawSubtype), FormData
-- `RequestData`: Complete request configuration (method, url, headers, body)
-- `ResponseData`: Complete response (status, duration, headers, body)
-- `HistoryItem`: Database record combining request + response
-- `HeaderType`: Mandatory (always enabled) vs Predefined (toggleable) vs Custom (deletable)
-- `PredefinedHeader`: Common headers like Content-Type, Cache-Control, User-Agent
+### URL ↔ Params sync
 
-### HTTP Client (src/http_client.rs)
+Bidirectional sync uses **focus arbitration**, not reentrancy flags: `parse_url_to_params` only acts when the URL input is focused, `sync_params_to_url` only when a param input is focused, so programmatic `set_value` changes can't loop. Use the un-gated `rebuild_*` helpers when syncing programmatically.
 
-Custom `HttpClient` that bridges GPUI's async HTTP interface with reqwest:
-- Uses `OnceLock<Runtime>` for a shared tokio runtime (2 worker threads)
-- Converts between GPUI's `AsyncBody` and reqwest's body types
-- Necessary because GPUI's built-in HTTP client may have limitations for this use case
+## GPUI gotchas (all compile cleanly and fail at runtime)
 
-## Key Technologies
+- **`PoopmanApp.focus_handle` is load-bearing.** If window focus is ever `None`, every keyboard shortcut silently dies. It is focused in `new()` and `track_focus`ed on the content div *below* the title bar — tracking it on the root kills the Windows minimize/maximize/close buttons.
+- Never call `window.request_animation_frame()` from an action listener (panics outside paint).
+- Scrolling convention: viewport (`flex_1().min_h_0()`) → scroller (`.id().size_full().track_scroll(&h).overflow_scroll()`) → scrollbar as the scroller's **sibling** (`.vertical_scrollbar` on the parent). Don't use `.overflow_y_scrollbar()` on elements whose own gap/padding matter.
+- `flex_shrink` defaults to 1.0 — children that must overflow a strip need `.flex_shrink_0()`.
+- Size a `ResizablePanel`'s child with `flex_1()` + explicit cross-axis size, never `size_full()`.
+- gpui-component completion menus need MoveUp/MoveDown bridged manually on single-line inputs (see header_completion / request_editor).
+- In files with `use gpui::*`, test modules import names explicitly instead of `use super::*`, because gpui's `test` attribute macro shadows `#[test]`.
+- `Input` is editable by default; read-only views need `.disabled(true)`.
 
-- **GPUI 0.2.2**: GPU-accelerated UI framework (Zed editor's UI layer)
-- **gpui-component 0.4**: Component library providing buttons, inputs, selects, tabs, etc.
-- **rusqlite 0.32**: SQLite database with bundled feature
-- **reqwest 0.12**: HTTP client with json, multipart, and stream features
-- **tokio**: Async runtime for HTTP operations
-- **rust-embed**: Embeds assets (SVG icons) into binary
-- **chrono**: Timestamp handling for history
-- **serde/serde_json**: Serialization for database and type conversion
+Design write-ups with the full reasoning behind these (and past features) are in `docs/superpowers/specs/`; implementation plans in `docs/superpowers/plans/`.
 
-## Development Notes
+## Assets
 
-### Asset Management
-
-- SVG icons stored in `./assets/icons/**/*.svg`
-- Embedded at compile time via `rust-embed` (see `Assets` struct in main.rs)
-- Windows: Icon embedded via `build.rs` using `winresource`
-
-### GPUI Patterns
-
-- Use `cx.new(|cx| ...)` to create entities
-- Use `entity.update(cx, |instance, cx| ...)` to mutate entity state
-- Use `cx.subscribe_in(&entity, window, callback)` for event handling
-- GPUI rendering uses declarative `div()` builders with method chaining
-- Colors/spacing from `cx.theme()` for consistency
-- For bidirectional data synchronization, use boolean flags to prevent infinite update loops
-- Use `cx.spawn_in(window, async move |...| {...}).detach()` for deferred async operations
-
-## Platform Notes
-
-- **WSL2**: The application is not currently supported in WSL2 environments due to GPUI's GPU requirements
+SVG icons in `assets/icons/**` are embedded via `rust-embed` (`Assets` in main.rs). The Windows exe icon is embedded by build.rs (`winresource`). Theme colors/dimensions live in src/theme.rs; shared visual primitives in src/ui.rs.

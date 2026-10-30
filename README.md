@@ -23,7 +23,8 @@ viewer is on the bottom-right.
   button: **cURL, Rust (reqwest), Python (Requests), JavaScript (Fetch), NodeJS (Axios),
   Go (net/http)**, with Copy. Raw and multipart form-data bodies both export.
 - **Tabs** — work on multiple requests at once.
-- **History** — every sent request is stored in SQLite; click to reload, or clear all.
+- **History** — every sent request is stored in SQLite; search by URL or method,
+  click to reload, or clear all.
 - **Collections** — explicitly save requests into collections or nested folders;
   create, rename, duplicate, search, and delete tree nodes with cascading deletion.
 - **Postman interoperability** — import and export **Postman Collection v2.1** JSON.
@@ -71,7 +72,8 @@ application profiling spans.
    variables, then select the active one from the Edit menu. Reference them anywhere as
    `{{name}}`.
 4. **Export code** — click the `</>` button next to Send, choose a language, and Copy.
-5. **History** — sent requests are saved automatically; click one to reload it, or Clear.
+5. **History** — sent requests are saved automatically; filter with the search box,
+   click one to reload it, or Clear.
 6. **Postman** — use **Import** in the Collections sidebar, or use a collection's
    context menu to export a v2.1 JSON file.
 
@@ -171,4 +173,4 @@ src/
 - [x] Request collections / folders.
 - [x] Authentication presets (Bearer, Basic, API key).
 - [x] Export / import collections (Postman Collection v2.1).
-- [ ] Search / filter in history.
+- [x] Search / filter in history.
