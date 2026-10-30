@@ -61,13 +61,14 @@ jobs:
       # The proxy variables point at a closed port on purpose: loopback wire
       # tests must reach their local listener directly, so any test that
       # starts honoring ambient proxy settings fails here instead of only on
-      # machines that happen to have a proxy configured.
+      # machines that happen to have a proxy configured. Workflow env keys are
+      # case-insensitive, so the lowercase spellings (the only ones curl reads
+      # for http_proxy) are exported in the script instead.
       - name: cargo test
         env:
           HTTP_PROXY: http://127.0.0.1:9
           HTTPS_PROXY: http://127.0.0.1:9
           ALL_PROXY: http://127.0.0.1:9
-          http_proxy: http://127.0.0.1:9
-          https_proxy: http://127.0.0.1:9
-          all_proxy: http://127.0.0.1:9
-        run: cargo test --locked --all-targets
+        run: |
+          export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" all_proxy="$ALL_PROXY"
+          cargo test --locked --all-targets
