@@ -234,7 +234,7 @@ fn gen_curl(req: &RequestData) -> String {
     if let Some(body) = raw_body(req) {
         // Unlike --data, --data-raw does not treat a leading @ as an instruction
         // to read and upload a local file (or @- as an instruction to read stdin).
-        lines.push(format!("  --data-raw '{}'", shell_single(&body)));
+        lines.push(format!("  --data-raw '{}'", shell_single(body)));
     }
     lines.join(" \\\n")
 }
@@ -286,7 +286,7 @@ fn gen_rust(req: &RequestData) -> String {
     if !form.is_empty() {
         s.push_str("        .multipart(form)\n");
     } else if let Some(body) = raw_body(req) {
-        s.push_str(&format!("        .body({})\n", rust_raw(&body)));
+        s.push_str(&format!("        .body({})\n", rust_raw(body)));
     }
     s.push_str("        .send()?;\n\n");
     s.push_str("    println!(\"{}\", response.text()?);\n");
@@ -390,7 +390,7 @@ fn gen_fetch(req: &RequestData) -> String {
     if !form.is_empty() {
         s.push_str("  body: formdata,\n");
     } else if let Some(b) = raw_body(req) {
-        s.push_str(&format!("  body: {},\n", js_string(&b)));
+        s.push_str(&format!("  body: {},\n", js_string(b)));
     }
     s.push_str("  redirect: \"follow\",\n");
     s.push_str("};\n\n");
@@ -457,7 +457,7 @@ fn gen_axios(req: &RequestData) -> String {
     if !form.is_empty() {
         s.push_str("  data: formdata,\n");
     } else if let Some(b) = raw_body(req) {
-        s.push_str(&format!("  data: {},\n", js_string(&b)));
+        s.push_str(&format!("  data: {},\n", js_string(b)));
     }
     s.push_str("};\n\n");
     s.push_str("axios(config)\n");

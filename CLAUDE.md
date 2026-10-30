@@ -14,7 +14,7 @@ cargo build --release
 cargo test                                        # all tests (unit + gpui TestAppContext UI tests)
 cargo test <name_substring>                       # single test / module, e.g. cargo test url_params
 cargo test http_client::connection_pool_tests -- --nocapture   # real keep-alive server, prints connection reuse/timings
-cargo clippy
+cargo clippy --locked --all-targets --all-features -- -D warnings   # CI gate; CI also runs fmt --check, check, test
 cargo run --profile profiling --features profile  # Tracy spans (app + GPUI's own instrumentation)
 uv run tests/verify_curl_fixtures.py              # oracle: replays tests/fixtures/import/curl.json through the real curl binary
 ```
@@ -28,6 +28,10 @@ pwsh.exe -NoProfile -Command "cd E:\code\poopman; cargo test"
 ```
 
 Windows builds need `GPUI_FXC_PATH` pointing at the Windows SDK `fxc.exe`, and any running `poopman.exe` must be killed first (file lock). GUI behavior can't be verified by tests alone — visual/interaction changes need the user to check the running app.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every PR and push to `main`: `cargo fmt --check`, `check` and `clippy -D warnings` (both `--all-targets --all-features`), and `cargo test` on ubuntu-22.04. The test step sets `HTTP(S)_PROXY`/`ALL_PROXY` to a closed port, so loopback wire tests must bypass proxies (the test-build `HttpClient` uses `.no_proxy()`; spawned tools need `NO_PROXY`). Its apt package list mirrors release.yml and README "Linux" — change all three together.
 
 ### Releases
 
