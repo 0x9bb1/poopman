@@ -43,9 +43,10 @@ The version input reaches shell only via `env:` — never put `${{ inputs.* }}` 
 
 ### One editor, many tabs
 
-There is a **single** `RequestEditor` and a single `ResponseViewer` entity. Tabs (`RequestTab`, src/request_tab.rs) are plain data: on tab switch `PoopmanApp::save_current_tab_state` copies the editor's request/body draft/params/headers/response into the outgoing tab, and `load_tab_into_editor` / `load_tab_response` push the incoming tab back in. Consequences:
+There is a **single** `RequestEditor` and a single `ResponseViewer` entity. Tabs (`RequestTab`, src/request_tab.rs) are plain data. Everything a tab owns in those panels is defined by `EditorTabState` and `ResponseTabState` (src/request_tab.rs); the only transfer path is `capture_state`/`restore_state` on each panel and `PoopmanApp::save_current_tab_state` / `load_tab`. Consequences:
 
-- Any new piece of editor state must be captured and restored through this path, or it leaks between tabs.
+- New per-tab panel state goes into one of those structs. Every capture/restore/apply site builds or destructures them without `..`, so the compiler forces both directions; state kept outside them is shared by all tabs by definition.
+- Settled ownership: request and response sections are per tab (`RequestSection`, `ResponseSection` in types.rs; a new response or cancel reopens Body). Scroll positions are not: `restore_state` scrolls every list to the top.
 - In-flight requests are bound to their originating tab via `active_request_id`; `RequestCompleted`/`RequestCancelled` events must match it before mutating a tab (the user may have switched tabs mid-request).
 - Dirty tracking: each tab holds a `baseline: RequestSnapshot`; `RequestSnapshot::matches` deliberately ignores blank rows and transport-owned headers so they don't make a tab dirty. Saves to collections are explicit (Ctrl/Cmd+S, Save As) and serialized per tab (`saving_tabs`, src/app/request_saving.rs).
 

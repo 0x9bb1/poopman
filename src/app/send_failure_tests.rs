@@ -38,7 +38,8 @@ fn invalid_url_is_reported_in_the_response_and_logged(cx: &mut gpui::TestAppCont
         assert_eq!(
             app.response_viewer
                 .read(cx)
-                .get_response()
+                .capture_state()
+                .response
                 .map(|r| r.status),
             Some(None)
         );

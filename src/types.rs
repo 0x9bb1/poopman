@@ -721,6 +721,26 @@ impl HeaderState {
     }
 }
 
+/// Selected section of the request editor. Remembered per request tab, as in
+/// Postman.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequestSection {
+    #[default]
+    Headers,
+    Auth,
+    Params,
+    Body,
+}
+
+/// Selected section of the response viewer. Remembered per request tab, and
+/// reset to Body whenever that tab receives a new response or is canceled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponseSection {
+    #[default]
+    Body,
+    Headers,
+}
+
 /// A request persisted inside a collection. The request payload and the
 /// complete editor row state are stored separately so disabled headers/params
 /// survive a save/load round trip.
