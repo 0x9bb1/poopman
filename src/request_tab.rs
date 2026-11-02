@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::types::{
     BodyDraft, BodyType, HeaderState, HeaderType, HistoryItem, HttpMethod, ParamState,
-    PredefinedHeader, RequestData, ResponseData,
+    PredefinedHeader, RequestData, RequestSection, ResponseData, ResponseSection,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +72,31 @@ impl RequestSnapshot {
     }
 }
 
+/// Everything a request tab owns in the shared `RequestEditor`. The editor's
+/// `capture_state`/`restore_state` and this tab's `editor_state`/
+/// `apply_editor_state` are the only transfer path, and all four build or
+/// destructure it without `..`: a field added here fails to compile until both
+/// the save and the restore side handle it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditorTabState {
+    pub request: RequestData,
+    pub body_draft: BodyDraft,
+    /// `None` until the tab's rows were captured once; the editor then derives
+    /// the rows from `request` (e.g. a history entry that was never edited).
+    pub params_state: Option<Vec<ParamState>>,
+    pub headers_state: Option<Vec<HeaderState>>,
+    pub section: RequestSection,
+}
+
+/// Everything a request tab owns in the shared `ResponseViewer`, under the
+/// same exhaustive capture/restore contract as [`EditorTabState`].
+#[derive(Debug, Clone)]
+pub struct ResponseTabState {
+    pub response: Option<Arc<ResponseData>>,
+    pub canceled: bool,
+    pub section: ResponseSection,
+}
+
 /// Represents a single request tab
 #[derive(Debug, Clone)]
 pub struct RequestTab {
@@ -89,6 +114,8 @@ pub struct RequestTab {
     pub response_canceled: bool,
     pub params_state: Option<Vec<ParamState>>,
     pub headers_state: Option<Vec<HeaderState>>,
+    pub editor_section: RequestSection,
+    pub response_section: ResponseSection,
     /// Associated history item ID (if opened from history)
     pub history_id: Option<i64>,
     /// Associated collection request ID, if this tab was opened from a saved
@@ -121,6 +148,8 @@ impl RequestTab {
             response_canceled: false,
             params_state: None,
             headers_state: None,
+            editor_section: RequestSection::default(),
+            response_section: ResponseSection::default(),
             history_id: None,
             saved_request_id: None,
             collection_id: None,
@@ -144,6 +173,8 @@ impl RequestTab {
             response_canceled: false,
             params_state: None,
             headers_state: None,
+            editor_section: RequestSection::default(),
+            response_section: ResponseSection::default(),
             history_id: Some(item.id),
             saved_request_id: None,
             collection_id: None,
@@ -168,6 +199,8 @@ impl RequestTab {
             response_canceled: false,
             params_state: Some(saved.params_state.clone()),
             headers_state: Some(saved.headers_state.clone()),
+            editor_section: RequestSection::default(),
+            response_section: ResponseSection::default(),
             history_id: None,
             saved_request_id: Some(saved.id),
             collection_id: Some(saved.collection_id),
@@ -243,6 +276,50 @@ impl RequestTab {
             collection_id: self.collection_id,
             folder_id: self.folder_id,
         }
+    }
+
+    pub fn editor_state(&self) -> EditorTabState {
+        EditorTabState {
+            request: self.request.clone(),
+            body_draft: self.body_draft.clone(),
+            params_state: self.params_state.clone(),
+            headers_state: self.headers_state.clone(),
+            section: self.editor_section,
+        }
+    }
+
+    pub fn apply_editor_state(&mut self, state: EditorTabState) {
+        let EditorTabState {
+            request,
+            body_draft,
+            params_state,
+            headers_state,
+            section,
+        } = state;
+        self.request = request;
+        self.body_draft = body_draft;
+        self.params_state = params_state;
+        self.headers_state = headers_state;
+        self.editor_section = section;
+    }
+
+    pub fn response_state(&self) -> ResponseTabState {
+        ResponseTabState {
+            response: self.response.clone(),
+            canceled: self.response_canceled,
+            section: self.response_section,
+        }
+    }
+
+    pub fn apply_response_state(&mut self, state: ResponseTabState) {
+        let ResponseTabState {
+            response,
+            canceled,
+            section,
+        } = state;
+        self.response = response;
+        self.response_canceled = canceled;
+        self.response_section = section;
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -330,6 +407,7 @@ impl RequestTab {
         self.active_request_id = None;
         self.response = Some(response);
         self.response_canceled = false;
+        self.response_section = ResponseSection::Body;
         true
     }
 
@@ -341,6 +419,7 @@ impl RequestTab {
         self.active_request_id = None;
         self.response = None;
         self.response_canceled = true;
+        self.response_section = ResponseSection::Body;
         true
     }
 
@@ -573,5 +652,52 @@ mod tests {
         assert_eq!(loaded_b.raw_content, "draft-b");
         assert_eq!(loaded_a.raw_content, "draft-a");
         assert_eq!(loaded_a.kind, BodyKind::None);
+    }
+
+    #[test]
+    fn editor_and_response_state_round_trip_through_the_tab() {
+        let mut tab = RequestTab::new_empty(0);
+        let editor = EditorTabState {
+            request: RequestData::new(HttpMethod::PUT, "https://a.test/x?q=1".into()),
+            body_draft: BodyDraft::from_body(&BodyType::default()),
+            params_state: Some(vec![ParamState {
+                enabled: false,
+                key: "q".into(),
+                value: "1".into(),
+            }]),
+            headers_state: Some(vec![]),
+            section: RequestSection::Auth,
+        };
+        tab.apply_editor_state(editor.clone());
+        assert_eq!(tab.editor_state(), editor);
+
+        tab.apply_response_state(ResponseTabState {
+            response: Some(response(201)),
+            canceled: false,
+            section: ResponseSection::Headers,
+        });
+        let state = tab.response_state();
+        assert_eq!(state.response.map(|r| r.status), Some(Some(201)));
+        assert!(!state.canceled);
+        assert_eq!(state.section, ResponseSection::Headers);
+    }
+
+    #[test]
+    fn new_response_or_cancel_reopens_the_body_section() {
+        let mut tab = RequestTab::new_empty(0);
+        tab.response_section = ResponseSection::Headers;
+        tab.begin_request(1, empty_request());
+        assert!(tab.complete_request(1, response(200)));
+        assert_eq!(tab.response_section, ResponseSection::Body);
+
+        tab.response_section = ResponseSection::Headers;
+        tab.begin_request(2, empty_request());
+        assert!(tab.cancel_request(2));
+        assert_eq!(tab.response_section, ResponseSection::Body);
+
+        // A stale completion must not touch the tab, section included.
+        tab.response_section = ResponseSection::Headers;
+        assert!(!tab.complete_request(1, response(500)));
+        assert_eq!(tab.response_section, ResponseSection::Headers);
     }
 }

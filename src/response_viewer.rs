@@ -12,7 +12,8 @@ use gpui_component::{
 };
 use std::{collections::VecDeque, sync::Arc};
 
-use crate::types::ResponseData;
+use crate::request_tab::ResponseTabState;
+use crate::types::{ResponseData, ResponseSection};
 
 const BODY_CACHE_ENTRIES: usize = 6;
 const BODY_CACHE_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -167,7 +168,7 @@ pub struct ResponseViewer {
     /// the byte budget remains as the sole entry so revisiting it does not
     /// repeat decode/parse/pretty work.
     body_cache: VecDeque<CachedBody>,
-    active_tab: usize,
+    section: ResponseSection,
     headers_scroll_handle: ScrollHandle,
 }
 
@@ -192,7 +193,7 @@ impl ResponseViewer {
             body_loading: false,
             body_generation: 0,
             body_cache: VecDeque::new(),
-            active_tab: 0,
+            section: ResponseSection::default(),
             headers_scroll_handle: ScrollHandle::new(),
         }
     }
@@ -221,7 +222,8 @@ impl ResponseViewer {
         self.body_loading = false;
         self.body_ready = false;
         self.response = Some(response.clone());
-        self.active_tab = 0; // Reset to Body tab
+        // A new response always opens on Body; only `restore_state` overrides it.
+        self.section = ResponseSection::Body;
 
         // Binary responses use their dedicated preview. Text response metadata
         // is visible immediately; its expensive display representation arrives
@@ -357,13 +359,42 @@ impl ResponseViewer {
         cx.notify();
     }
 
-    /// Get current response data
-    pub fn get_response(&self) -> Option<Arc<ResponseData>> {
-        self.response.clone()
-    }
-
     pub fn is_canceled(&self) -> bool {
         self.canceled
+    }
+
+    /// Everything the displayed tab owns in this viewer.
+    pub fn capture_state(&self) -> ResponseTabState {
+        ResponseTabState {
+            response: self.response.clone(),
+            canceled: self.canceled,
+            section: self.section,
+        }
+    }
+
+    /// Show a tab's response panel, including the section it was left on.
+    /// As in the request editor, the header list starts at the top.
+    pub fn restore_state(
+        &mut self,
+        state: &ResponseTabState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ResponseTabState {
+            response,
+            canceled,
+            section,
+        } = state;
+        if *canceled {
+            self.show_canceled(window, cx);
+        } else if let Some(response) = response {
+            self.set_response(response.clone(), window, cx);
+        } else {
+            self.clear_response(window, cx);
+        }
+        self.section = *section;
+        self.headers_scroll_handle.set_offset(Point::default());
+        cx.notify();
     }
 
     /// Clear response data
@@ -374,7 +405,7 @@ impl ResponseViewer {
         self.preview_image = None;
         self.body_ready = false;
         self.body_loading = false;
-        self.active_tab = 0;
+        self.section = ResponseSection::Body;
         cx.notify();
     }
 
@@ -564,7 +595,7 @@ impl Render for ResponseViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Built before `theme` borrows cx immutably -- TextView needs &mut App.
         // Only while the tab is showing, so the HTML is not parsed for nothing.
-        let headers_el = (self.active_tab == 1 && self.response.is_some())
+        let headers_el = (self.section == ResponseSection::Headers && self.response.is_some())
             .then(|| self.render_headers(window, cx));
         let theme = cx.theme();
 
@@ -602,35 +633,41 @@ impl Render for ResponseViewer {
                         .child(
                             crate::ui::segmented_bar(theme)
                                 .child(
-                                    crate::ui::segment_pill(theme, self.active_tab == 0)
-                                        .id("resp-tab-body")
-                                        .when(self.active_tab != 0, |s| {
-                                            s.hover(|s| s.text_color(theme.foreground))
-                                        })
-                                        .on_click(cx.listener(
-                                            |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.active_tab = 0;
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .child("Body"),
+                                    crate::ui::segment_pill(
+                                        theme,
+                                        self.section == ResponseSection::Body,
+                                    )
+                                    .id("resp-tab-body")
+                                    .when(self.section != ResponseSection::Body, |s| {
+                                        s.hover(|s| s.text_color(theme.foreground))
+                                    })
+                                    .on_click(cx.listener(
+                                        |this, _event: &gpui::ClickEvent, _window, cx| {
+                                            this.section = ResponseSection::Body;
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child("Body"),
                                 )
                                 .child(
-                                    crate::ui::segment_pill(theme, self.active_tab == 1)
-                                        .id("resp-tab-headers")
-                                        .when(self.active_tab != 1, |s| {
-                                            s.hover(|s| s.text_color(theme.foreground))
-                                        })
-                                        .on_click(cx.listener(
-                                            |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.active_tab = 1;
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .child("Headers"),
+                                    crate::ui::segment_pill(
+                                        theme,
+                                        self.section == ResponseSection::Headers,
+                                    )
+                                    .id("resp-tab-headers")
+                                    .when(self.section != ResponseSection::Headers, |s| {
+                                        s.hover(|s| s.text_color(theme.foreground))
+                                    })
+                                    .on_click(cx.listener(
+                                        |this, _event: &gpui::ClickEvent, _window, cx| {
+                                            this.section = ResponseSection::Headers;
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child("Headers"),
                                 ),
                         )
-                        .when(self.active_tab == 0, |this| {
+                        .when(self.section == ResponseSection::Body, |this| {
                             if let Some(path) = self
                                 .response
                                 .as_ref()
@@ -788,7 +825,7 @@ impl Render for ResponseViewer {
                                 )
                             }
                         })
-                        .when(self.active_tab == 1, |this| {
+                        .when(self.section == ResponseSection::Headers, |this| {
                             this.child(
                                 div()
                                     .flex()

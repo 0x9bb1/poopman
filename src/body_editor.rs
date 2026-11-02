@@ -308,6 +308,11 @@ impl BodyEditor {
         self.get_draft(cx).selected_body()
     }
 
+    /// Scroll the form-data rows back to the top for a newly shown tab.
+    pub fn reset_scroll(&self) {
+        self.formdata_scroll_handle.set_offset(Point::default());
+    }
+
     /// Snapshot both the active body and the inactive panel drafts for the
     /// request tab that currently owns this shared editor.
     pub fn get_draft(&self, cx: &App) -> BodyDraft {

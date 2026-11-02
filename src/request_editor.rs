@@ -20,8 +20,11 @@ use std::{
 use crate::auth_editor::AuthEditor;
 use crate::body_editor::{BodyEditor, BodyTypeChanged};
 use crate::header_completion::HeaderCompletionProvider;
+use crate::request_tab::EditorTabState;
 use crate::theme::METHOD_SELECT_WIDTH;
-use crate::types::{BodyType, HeaderType, HttpMethod, PredefinedHeader, RequestData, ResponseData};
+use crate::types::{
+    BodyType, HeaderType, HttpMethod, PredefinedHeader, RequestData, RequestSection, ResponseData,
+};
 use crate::url_params::{self, QueryParam};
 
 #[cfg(test)]
@@ -128,7 +131,9 @@ struct ParamRow {
     value_input: Entity<InputState>,
 }
 
-/// Request editor panel
+/// Request editor panel. One instance is shared by every request tab: state
+/// that belongs to a tab must be part of [`EditorTabState`] and flow through
+/// `capture_state`/`restore_state`, or it leaks into the next tab shown.
 pub struct RequestEditor {
     url_input: Entity<InputState>,
     method_select: Entity<SelectState<Vec<&'static str>>>,
@@ -138,7 +143,7 @@ pub struct RequestEditor {
     headers_scroll_handle: ScrollHandle,
     params: Vec<ParamRow>,
     params_scroll_handle: ScrollHandle,
-    active_tab: usize,
+    section: RequestSection,
     /// Stable id of the request tab currently displayed by this shared editor.
     active_request_tab_id: usize,
     /// Runtime request ownership is keyed by tab, allowing different tabs to
@@ -228,7 +233,7 @@ impl RequestEditor {
             headers_scroll_handle: ScrollHandle::new(),
             params: vec![],
             params_scroll_handle: ScrollHandle::new(),
-            active_tab: 0,
+            section: RequestSection::default(),
             active_request_tab_id: 0,
             in_flight: std::collections::HashMap::new(),
             next_request_id: 1,
@@ -541,6 +546,52 @@ impl RequestEditor {
 
     pub fn get_body_draft(&self, cx: &App) -> crate::types::BodyDraft {
         self.body_editor.read(cx).get_draft(cx)
+    }
+
+    /// Everything the displayed tab owns in this editor.
+    pub fn capture_state(&self, cx: &App) -> EditorTabState {
+        EditorTabState {
+            request: self.get_current_request_data(cx),
+            body_draft: self.get_body_draft(cx),
+            params_state: Some(self.get_params_state(cx)),
+            headers_state: Some(self.get_headers_state(cx)),
+            section: self.section,
+        }
+    }
+
+    /// Show a tab's state. Scroll positions are deliberately not per tab:
+    /// every list starts at the top, so no offset carries over from the
+    /// previously shown tab.
+    pub fn restore_state(
+        &mut self,
+        state: &EditorTabState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let EditorTabState {
+            request,
+            body_draft,
+            params_state,
+            headers_state,
+            section,
+        } = state;
+        self.load_request_with_body_draft(request, Some(body_draft), window, cx);
+        if let Some(params_state) = params_state
+            && !params_state.is_empty()
+        {
+            self.load_params_state(params_state, window, cx);
+        }
+        if let Some(headers_state) = headers_state
+            && !headers_state.is_empty()
+        {
+            self.load_headers_state(headers_state, window, cx);
+        }
+        self.section = *section;
+        self.params_scroll_handle.set_offset(Point::default());
+        self.headers_scroll_handle.set_offset(Point::default());
+        self.body_editor
+            .update(cx, |editor, _| editor.reset_scroll());
+        cx.notify();
     }
 
     /// Current request with `{{vars}}` resolved against the active environment,
@@ -1753,63 +1804,63 @@ impl Render for RequestEditor {
                         .child(
                             crate::ui::segmented_bar(theme)
                                 .child(
-                                    crate::ui::segment_pill(theme, self.active_tab == 0)
+                                    crate::ui::segment_pill(theme, self.section == RequestSection::Headers)
                                         .id("tab-headers")
-                                        .when(self.active_tab != 0, |s| {
+                                        .when(self.section != RequestSection::Headers, |s| {
                                             s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.active_tab = 0;
+                                                this.section = RequestSection::Headers;
                                                 cx.notify();
                                             },
                                         ))
                                         .child("Headers"),
                                 )
                                 .child(
-                                    crate::ui::segment_pill(theme, self.active_tab == 1)
+                                    crate::ui::segment_pill(theme, self.section == RequestSection::Auth)
                                         .id("tab-auth")
-                                        .when(self.active_tab != 1, |s| {
+                                        .when(self.section != RequestSection::Auth, |s| {
                                             s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.active_tab = 1;
+                                                this.section = RequestSection::Auth;
                                                 cx.notify();
                                             },
                                         ))
                                         .child("Auth"),
                                 )
                                 .child(
-                                    crate::ui::segment_pill(theme, self.active_tab == 2)
+                                    crate::ui::segment_pill(theme, self.section == RequestSection::Params)
                                         .id("tab-params")
-                                        .when(self.active_tab != 2, |s| {
+                                        .when(self.section != RequestSection::Params, |s| {
                                             s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.active_tab = 2;
+                                                this.section = RequestSection::Params;
                                                 cx.notify();
                                             },
                                         ))
                                         .child("Params"),
                                 )
                                 .child(
-                                    crate::ui::segment_pill(theme, self.active_tab == 3)
+                                    crate::ui::segment_pill(theme, self.section == RequestSection::Body)
                                         .id("tab-body")
-                                        .when(self.active_tab != 3, |s| {
+                                        .when(self.section != RequestSection::Body, |s| {
                                             s.hover(|s| s.text_color(theme.foreground))
                                         })
                                         .on_click(cx.listener(
                                             |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.active_tab = 3;
+                                                this.section = RequestSection::Body;
                                                 cx.notify();
                                             },
                                         ))
                                         .child("Body"),
                                 ),
                         )
-                        .when(self.active_tab == 0, |this| {
+                        .when(self.section == RequestSection::Headers, |this| {
                             this.child(
                                 // Viewport: owns the size constraint so the list can
                                 // shrink and actually scroll; also hosts the scrollbar,
@@ -1918,7 +1969,7 @@ impl Render for RequestEditor {
                                     .vertical_scrollbar(&self.headers_scroll_handle),
                             )
                         })
-                        .when(self.active_tab == 1, |this| {
+                        .when(self.section == RequestSection::Auth, |this| {
                             this.child(
                                 div()
                                     .p_2()
@@ -1930,7 +1981,7 @@ impl Render for RequestEditor {
                                     .child(self.auth_editor.clone()),
                             )
                         })
-                        .when(self.active_tab == 2, |this| {
+                        .when(self.section == RequestSection::Params, |this| {
                             this.child(
                                 // Viewport: owns the size constraint so the list can
                                 // shrink and actually scroll; also hosts the scrollbar,
@@ -2003,7 +2054,7 @@ impl Render for RequestEditor {
                                     .vertical_scrollbar(&self.params_scroll_handle),
                             )
                         })
-                        .when(self.active_tab == 3, |this| {
+                        .when(self.section == RequestSection::Body, |this| {
                             // Body tab - render BodyEditor component
                             this.child(
                                 div()

@@ -2,7 +2,7 @@ use super::RequestEditor;
 use crate::test_support::SubscriptionTracker;
 use crate::types::{
     AppSettings, BodyType, HeaderState, HeaderType, HttpMethod, ParamState, PredefinedHeader,
-    RawSubtype, RequestData,
+    RawSubtype, RequestData, RequestSection,
 };
 use gpui::{AppContext as _, ClickEvent, Focusable as _, TestAppContext};
 use gpui_component::input::InputEvent;
@@ -18,7 +18,7 @@ impl RequestEditor {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        self.active_tab = 3;
+        self.section = RequestSection::Body;
         self.body_editor
             .update(cx, |body, cx| body.focus_raw_for_save_test(window, cx));
         cx.notify();
@@ -319,4 +319,30 @@ fn empty_url_marks_and_focuses_the_field_without_sending(cx: &mut TestAppContext
     });
     cx.run_until_parked();
     cx.update(|_, cx| assert!(!editor.read(cx).url_error));
+}
+
+#[gpui::test]
+fn restoring_a_tab_shows_its_section_and_scrolls_lists_to_the_top(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let editor = cx.update(|window, cx| {
+        cx.new(|cx| RequestEditor::new(Arc::new(RwLock::new(AppSettings::default())), window, cx))
+    });
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            let scrolled = gpui::point(gpui::px(0.), gpui::px(-120.));
+            editor.params_scroll_handle.set_offset(scrolled);
+            editor.headers_scroll_handle.set_offset(scrolled);
+            let mut state = editor.capture_state(cx);
+            state.section = RequestSection::Params;
+            editor.restore_state(&state, window, cx);
+            assert_eq!(editor.section, RequestSection::Params);
+            assert_eq!(editor.capture_state(cx).section, RequestSection::Params);
+            assert_eq!(editor.params_scroll_handle.offset(), gpui::Point::default());
+            assert_eq!(
+                editor.headers_scroll_handle.offset(),
+                gpui::Point::default()
+            );
+        })
+    });
 }

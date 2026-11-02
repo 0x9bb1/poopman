@@ -71,6 +71,8 @@ mod save_tests;
 mod save_ui_tests;
 #[cfg(test)]
 mod send_failure_tests;
+#[cfg(test)]
+mod tab_state_tests;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarView {
@@ -619,22 +621,13 @@ impl PoopmanApp {
         });
     }
 
-    /// Save current editor state to active tab
+    /// Save the shared editor's and viewer's state to the active tab. The
+    /// counterpart is `load_tab`; both go through `EditorTabState` and
+    /// `ResponseTabState` only.
     fn save_current_tab_state(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.request_tabs.get_mut(self.active_tab_index) {
-            let request_data = self.request_editor.read(cx).get_current_request_data(cx);
-            let body_draft = self.request_editor.read(cx).get_body_draft(cx);
-            let params_state = self.request_editor.read(cx).get_params_state(cx);
-            let headers_state = self.request_editor.read(cx).get_headers_state(cx);
-            let response = self.response_viewer.read(cx).get_response();
-            let response_canceled = self.response_viewer.read(cx).is_canceled();
-
-            tab.request = request_data;
-            tab.body_draft = body_draft;
-            tab.response = response;
-            tab.response_canceled = response_canceled;
-            tab.params_state = Some(params_state);
-            tab.headers_state = Some(headers_state);
+            tab.apply_editor_state(self.request_editor.read(cx).capture_state(cx));
+            tab.apply_response_state(self.response_viewer.read(cx).capture_state());
             tab.update_title_from_saved_name();
         }
     }
@@ -654,9 +647,7 @@ impl PoopmanApp {
 
         // Load new tab data into editor
         if let Some(tab) = self.request_tabs.get(index).cloned() {
-            self.load_tab_into_editor(&tab, window, cx);
-
-            self.load_tab_response(&tab, window, cx);
+            self.load_tab(&tab, window, cx);
         }
 
         self.update_tab_bar(cx);
@@ -674,13 +665,7 @@ impl PoopmanApp {
         self.request_tabs.push(new_tab.clone());
         self.active_tab_index = self.request_tabs.len() - 1;
 
-        // Load new tab into editor
-        self.load_tab_into_editor(&new_tab, window, cx);
-
-        // Clear response for new tab
-        self.response_viewer.update(cx, |viewer, cx| {
-            viewer.clear_response(window, cx);
-        });
+        self.load_tab(&new_tab, window, cx);
 
         self.update_tab_bar(cx);
         cx.notify();
@@ -733,12 +718,7 @@ impl PoopmanApp {
             self.active_tab_index = 0;
 
             let reset_tab = self.request_tabs[0].clone();
-            self.load_tab_into_editor(&reset_tab, window, cx);
-
-            // Clear response for reset tab
-            self.response_viewer.update(cx, |viewer, cx| {
-                viewer.clear_response(window, cx);
-            });
+            self.load_tab(&reset_tab, window, cx);
 
             self.update_tab_bar(cx);
             cx.notify();
@@ -759,9 +739,7 @@ impl PoopmanApp {
 
             // Load the new active tab
             if let Some(tab) = self.request_tabs.get(self.active_tab_index).cloned() {
-                self.load_tab_into_editor(&tab, window, cx);
-
-                self.load_tab_response(&tab, window, cx);
+                self.load_tab(&tab, window, cx);
             }
         }
 
@@ -809,17 +787,8 @@ impl PoopmanApp {
             tab
         };
 
-        // Load into editor
-        self.load_tab_into_editor(&new_tab, window, cx);
-
-        // Load response from history
-        self.response_viewer.update(cx, |viewer, cx| {
-            if let Some(response) = &new_tab.response {
-                viewer.set_response(response.clone(), window, cx);
-            } else {
-                viewer.clear_response(window, cx);
-            }
-        });
+        // The history entry's response comes along with the tab.
+        self.load_tab(&new_tab, window, cx);
 
         self.update_tab_bar(cx);
         cx.notify();
@@ -861,52 +830,30 @@ impl PoopmanApp {
             tab
         };
 
-        self.load_tab_into_editor(&new_tab, window, cx);
-        self.response_viewer.update(cx, |viewer, cx| {
-            viewer.clear_response(window, cx);
-        });
+        self.load_tab(&new_tab, window, cx);
         self.update_tab_bar(cx);
         cx.notify();
     }
 
+    /// Show `tab` (already the active tab) in the shared editor and viewer.
     #[cfg_attr(feature = "profile", profiling::function)]
-    fn load_tab_into_editor(
-        &mut self,
-        tab: &RequestTab,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn load_tab(&mut self, tab: &RequestTab, window: &mut Window, cx: &mut Context<Self>) {
+        let editor_state = tab.editor_state();
         self.request_editor.update(cx, |editor, cx| {
             editor.set_active_request_tab(tab.id, cx);
-            editor.load_request_with_body_draft(&tab.request, Some(&tab.body_draft), window, cx);
+            editor.restore_state(&editor_state, window, cx);
             editor.set_is_saved_request(tab.saved_request_id.is_some(), cx);
-            if let Some(params_state) = &tab.params_state
-                && !params_state.is_empty()
-            {
-                editor.load_params_state(params_state, window, cx);
-            }
-            if let Some(headers_state) = &tab.headers_state
-                && !headers_state.is_empty()
-            {
-                editor.load_headers_state(headers_state, window, cx);
-            }
         });
+        let response_state = tab.response_state();
+        self.response_viewer.update(cx, |viewer, cx| {
+            viewer.restore_state(&response_state, window, cx);
+        });
+        // Both panels show this tab now, so the capture below reads its own
+        // state rather than the previously shown tab's response.
         if tab.needs_baseline() {
             self.save_current_tab_state(cx);
             self.request_tabs[self.active_tab_index].establish_baseline();
         }
-    }
-
-    fn load_tab_response(&mut self, tab: &RequestTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.response_viewer.update(cx, |viewer, cx| {
-            if tab.response_canceled {
-                viewer.show_canceled(window, cx);
-            } else if let Some(response) = &tab.response {
-                viewer.set_response(response.clone(), window, cx);
-            } else {
-                viewer.clear_response(window, cx);
-            }
-        });
     }
 
     /// Keep tab metadata synchronized with collection-side rename/delete
