@@ -3,11 +3,13 @@ use super::save_tests::{edited_request, setup};
 use crate::db::Database;
 use crate::request_editor::{RequestCompleted, RequestStarted};
 use crate::request_tab::ResponseTabState;
-use crate::types::{ParamState, RequestData, RequestSection, ResponseData, ResponseSection};
+use crate::types::{
+    HttpMethod, ParamState, RequestData, RequestSection, ResponseData, ResponseSection,
+};
 use gpui::{Entity, VisualTestContext};
 use std::sync::Arc;
 
-fn response(status: u16) -> Arc<ResponseData> {
+pub(super) fn response(status: u16) -> Arc<ResponseData> {
     Arc::new(ResponseData {
         status: Some(status),
         duration_ms: 1,
@@ -44,7 +46,7 @@ fn shown(
 }
 
 /// Stand in for the user clicking a section pill in each panel.
-fn select_sections(
+pub(super) fn select_sections(
     app: &Entity<PoopmanApp>,
     cx: &mut VisualTestContext,
     request: RequestSection,
@@ -194,4 +196,47 @@ fn a_response_arriving_in_the_background_reopens_its_body(cx: &mut gpui::TestApp
     assert_eq!(restored.2, RequestSection::Params, "request section kept");
     assert_eq!(restored.3.section, ResponseSection::Body);
     assert_eq!(restored.3.response.map(|r| r.status), Some(Some(404)));
+}
+
+/// URL↔Params sync is arbitrated by which input has focus, on the assumption
+/// that a programmatic load never happens while the URL input holds it. A
+/// tab-switching shortcut pressed while typing in the URL breaks that
+/// assumption; the restored tab must still keep its disabled params.
+#[gpui::test]
+fn switching_tabs_by_shortcut_from_the_url_field_keeps_disabled_params(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (app, cx) = setup(cx, Arc::new(Database::new_in_memory()));
+    let disabled = ParamState {
+        enabled: false,
+        key: "draft".into(),
+        value: "kept".into(),
+    };
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.request_editor.update(cx, |editor, cx| {
+                let request =
+                    RequestData::new(HttpMethod::GET, "https://example.test/a?x=1".into());
+                editor.load_request(&request, window, cx);
+                let mut params = editor.get_params_state(cx);
+                params.push(disabled.clone());
+                editor.load_params_state(&params, window, cx);
+            })
+        })
+    });
+    cx.run_until_parked();
+    let params = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| app.read(cx).request_editor.read(cx).get_params_state(cx))
+    };
+    let tab_a_params = params(cx);
+    assert!(tab_a_params.contains(&disabled));
+
+    // New tab, focus its URL field, then go back to the first tab.
+    cx.simulate_keystrokes("secondary-t secondary-l");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-shift-tab");
+    cx.run_until_parked();
+
+    assert_eq!(cx.update(|_, cx| app.read(cx).active_tab_index), 0);
+    assert_eq!(params(cx), tab_a_params);
 }
