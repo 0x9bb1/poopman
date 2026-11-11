@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for release.sh. Needs only bash and git: run `bash .github/scripts/release.test.sh`.
+# Tests for release.sh. Needs only bash, git and sha256sum: run `bash .github/scripts/release.test.sh`.
 set -euo pipefail
 
 script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release.sh"
@@ -157,6 +157,57 @@ elif [ "$(remote_ref main)" = "$moved" ]; then
     pass "publish-commit refuses a tag that points elsewhere"
 else
     fail "publish-commit moved main despite a foreign tag"
+fi
+
+# --- checksums --------------------------------------------------------------
+
+dist="$work/dist"
+mkdir "$dist"
+printf 'package' > "$dist/Poopman-b.tar.gz"
+printf 'sbom' > "$dist/Poopman-a.cdx.json"
+
+if bash "$script" checksums "$dist" Poopman-b.tar.gz Poopman-a.cdx.json 2>/dev/null &&
+    (cd "$dist" && sha256sum --quiet --strict -c SHA256SUMS) &&
+    [ "$(awk '{ print $2 }' "$dist/SHA256SUMS" | tr '\n' ' ')" = "Poopman-a.cdx.json Poopman-b.tar.gz " ]; then
+    pass "checksums lists exactly the named assets, sorted, and they verify"
+else
+    fail "checksums on a complete asset set"
+fi
+
+# A rerun finds the SHA256SUMS it wrote: neither a stray asset nor an entry.
+first_sums="$(cat "$dist/SHA256SUMS" 2>/dev/null || true)"
+if bash "$script" checksums "$dist" Poopman-b.tar.gz Poopman-a.cdx.json 2>/dev/null &&
+    [ -n "$first_sums" ] && [ "$(cat "$dist/SHA256SUMS")" = "$first_sums" ]; then
+    pass "checksums rerun rewrites the identical file"
+else
+    fail "checksums rerun"
+fi
+
+# An asset that changes after SHA256SUMS was written must be noticed.
+printf 'tampered' > "$dist/Poopman-b.tar.gz"
+if (cd "$dist" && sha256sum --quiet --strict -c SHA256SUMS) >/dev/null 2>&1; then
+    fail "SHA256SUMS should not verify a modified asset"
+else
+    pass "SHA256SUMS rejects a modified asset"
+fi
+
+rm "$dist/Poopman-a.cdx.json"
+if bash "$script" checksums "$dist" Poopman-b.tar.gz Poopman-a.cdx.json 2>/dev/null; then
+    fail "checksums should refuse a missing asset"
+elif [ ! -e "$dist/SHA256SUMS" ]; then
+    pass "checksums refuses a missing asset and leaves no SHA256SUMS"
+else
+    fail "checksums left a stale SHA256SUMS after a missing asset"
+fi
+
+printf 'sbom' > "$dist/Poopman-a.cdx.json"
+printf 'stray' > "$dist/notes.txt"
+if bash "$script" checksums "$dist" Poopman-b.tar.gz Poopman-a.cdx.json 2>/dev/null; then
+    fail "checksums should refuse an asset that was not named"
+elif [ ! -e "$dist/SHA256SUMS" ]; then
+    pass "checksums refuses an unnamed asset and leaves no SHA256SUMS"
+else
+    fail "checksums left a SHA256SUMS after an unnamed asset"
 fi
 
 echo
