@@ -169,21 +169,8 @@ fn main() {
         // no-op on Windows/Linux, which quit via the window's close button.
         cx.on_action(|_: &crate::app::Quit, cx| request_quit(cx));
 
-        // Late binding on purpose: gpui gives later-added bindings precedence,
-        // so the "Input"-context ctrl-enter shadows gpui-component's own
-        // secondary-enter input binding (its PressEnter{secondary:true} event
-        // is unused in this app).
-        cx.bind_keys([
-            KeyBinding::new("ctrl-enter", crate::app::SendRequest, None),
-            KeyBinding::new("ctrl-enter", crate::app::SendRequest, Some("Input")),
-            KeyBinding::new("ctrl-t", crate::app::NewTab, None),
-            KeyBinding::new("ctrl-w", crate::app::CloseTab, None),
-            KeyBinding::new("ctrl-tab", crate::app::NextTab, None),
-            KeyBinding::new("ctrl-shift-tab", crate::app::PrevTab, None),
-            KeyBinding::new("ctrl-l", crate::app::FocusUrl, None),
-            KeyBinding::new("cmd-q", crate::app::Quit, None),
-        ]);
-        crate::app::bind_save_request_shortcut(cx);
+        // After gpui_component::init above: later bindings take precedence.
+        crate::app::bind_shortcuts(cx);
 
         cx.set_menus(vec![Menu {
             name: "Poopman".into(),

@@ -1,4 +1,4 @@
-use super::{AppInitialState, PoopmanApp, SAVE_REQUEST_KEY, bind_save_request_shortcut};
+use super::{AppInitialState, PoopmanApp, SAVE_REQUEST_KEY, bind_shortcuts};
 use crate::db::Database;
 use crate::environment_persistence::EnvironmentPersistence;
 use crate::types::{
@@ -29,7 +29,7 @@ pub(super) fn setup(
         .join()
         .unwrap();
     cx.update(gpui_component::init);
-    cx.update(bind_save_request_shortcut);
+    cx.update(bind_shortcuts);
     let mut app = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| PoopmanApp::new(initial, window, cx));

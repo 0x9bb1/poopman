@@ -52,10 +52,37 @@ pub(crate) const SAVE_REQUEST_KEY: &str = if cfg!(target_os = "macos") {
     "ctrl-s"
 };
 
-pub(crate) fn bind_save_request_shortcut(cx: &mut App) {
+/// Binds every app-level shortcut. Call after `gpui_component::init`.
+///
+/// `secondary-` is gpui's portable modifier: Cmd on macOS, Ctrl on Windows and
+/// Linux, which is how Postman's shortcuts differ between platforms.
+///
+/// Late binding on purpose: gpui gives later-added bindings precedence, so the
+/// "Input"-context `secondary-enter` shadows gpui-component's own input binding
+/// for that keystroke (its PressEnter{secondary:true} event is unused in this
+/// app).
+pub(crate) fn bind_shortcuts(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("secondary-enter", SendRequest, None),
+        KeyBinding::new("secondary-enter", SendRequest, Some("Input")),
         KeyBinding::new(SAVE_REQUEST_KEY, SaveRequest, None),
         KeyBinding::new(SAVE_REQUEST_KEY, SaveRequest, Some("Input")),
+        KeyBinding::new("secondary-t", NewTab, None),
+        KeyBinding::new("secondary-w", CloseTab, None),
+        KeyBinding::new("secondary-l", FocusUrl, None),
+        // Postman switches tabs with Cmd/Ctrl+Shift+] and [. Each is bound in
+        // both spellings because platforms disagree on how a shifted bracket is
+        // reported: macOS delivers the shifted character with shift cleared
+        // (`}`), others may deliver the base key with shift held.
+        KeyBinding::new("secondary-shift-]", NextTab, None),
+        KeyBinding::new("secondary-}", NextTab, None),
+        KeyBinding::new("secondary-shift-[", PrevTab, None),
+        KeyBinding::new("secondary-{", PrevTab, None),
+        // Not Postman's, but what browsers use and what this app shipped with.
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+        // Only reachable on macOS, through the application menu (see main.rs).
+        KeyBinding::new("cmd-q", Quit, None),
     ]);
 }
 
@@ -71,6 +98,8 @@ mod save_tests;
 mod save_ui_tests;
 #[cfg(test)]
 mod send_failure_tests;
+#[cfg(test)]
+mod shortcut_tests;
 #[cfg(test)]
 mod tab_state_tests;
 

@@ -143,6 +143,21 @@ application profiling spans.
 6. **Postman** — use **Import** in the Collections sidebar, or use a collection's
    context menu to export a v2.1 JSON file.
 
+### Keyboard shortcuts
+
+The same keys as Postman: Command on macOS, Ctrl on Windows and Linux.
+
+| Action | macOS | Windows / Linux |
+| --- | --- | --- |
+| Send request | ⌘↵ | Ctrl+Enter |
+| Save request | ⌘S | Ctrl+S |
+| New tab | ⌘T | Ctrl+T |
+| Close tab | ⌘W | Ctrl+W |
+| Next tab | ⇧⌘] or Ctrl+Tab | Ctrl+Shift+] or Ctrl+Tab |
+| Previous tab | ⇧⌘[ or Ctrl+Shift+Tab | Ctrl+Shift+[ or Ctrl+Shift+Tab |
+| Jump to URL | ⌘L | Ctrl+L |
+| Quit | ⌘Q | — |
+
 ## Data Storage
 
 History, environments, collections, and settings live in a SQLite database under
