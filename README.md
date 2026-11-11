@@ -32,6 +32,45 @@ viewer is on the bottom-right.
   and Bearer/Basic/API-key auth are mapped where supported; unsupported fields are
   reported as non-blocking import warnings.
 
+## Verifying a release download
+
+Each [release](https://github.com/0x9bb1/poopman/releases) after v0.6.0 ships,
+next to the packages:
+
+- `SHA256SUMS` — SHA-256 of every other file in the release.
+- `Poopman-<platform>.cdx.json` — a CycloneDX SBOM listing the crates that
+  platform's binary was built from.
+- A GitHub build provenance attestation for every file, signed through Sigstore,
+  stating which workflow run and source commit produced it.
+
+Check integrity against `SHA256SUMS` (download it into the same directory):
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing            # Linux
+shasum -a 256 -c SHA256SUMS --ignore-missing        # macOS
+```
+
+```powershell
+# Windows: compare with the matching line in SHA256SUMS
+(Get-FileHash Poopman-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+```
+
+Check provenance with the [GitHub CLI](https://cli.github.com/). This proves the
+file was built by this repository's release workflow, which a checksum fetched
+from the same page cannot:
+
+```bash
+gh attestation verify Poopman-linux-x86_64.tar.gz --repo 0x9bb1/poopman
+```
+
+The source commit named in the attestation is the parent of the release tag's
+commit; the tagged commit only adds the version bump in `Cargo.toml` and
+`Cargo.lock` that the build already had applied.
+
+The binaries are **not** code-signed: the macOS app is not notarized and the
+Windows executable has no Authenticode signature, so Gatekeeper and SmartScreen
+will still warn on first launch.
+
 ## Requirements
 
 - Rust (2024 edition).

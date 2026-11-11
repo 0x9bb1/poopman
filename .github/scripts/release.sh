@@ -8,6 +8,7 @@
 #   release.sh validate VERSION
 #   release.sh bump VERSION [MANIFEST]
 #   release.sh publish-commit VERSION BASE_SHA COMMIT_EPOCH
+#   release.sh checksums DIR NAME...
 set -euo pipefail
 
 die() {
@@ -101,6 +102,41 @@ publish_commit() {
     echo "$release_commit"
 }
 
+# Writes DIR/SHA256SUMS over exactly the files named. DIR must hold those
+# files and nothing else, so a missing or stray asset stops the release here
+# rather than shipping an incomplete or unlisted one. A SHA256SUMS from an
+# earlier run is replaced and never lists itself; on any failure none is left
+# behind to be mistaken for a good one.
+checksums() {
+    local dir="$1"
+    shift
+    [ -d "$dir" ] || die "not a directory: $dir"
+    rm -f "$dir/SHA256SUMS"
+
+    # Sorted in the C locale so the file is identical wherever it is built.
+    local expected found
+    expected="$(printf '%s\n' "$@" | LC_ALL=C sort)"
+    found="$(
+        cd "$dir" || exit 1
+        shopt -s nullglob dotglob
+        for entry in *; do printf '%s\n' "$entry"; done | LC_ALL=C sort
+    )"
+    if [ "$found" != "$expected" ]; then
+        diff <(printf '%s\n' "$expected") <(printf '%s\n' "$found") >&2 || true
+        die "release assets in $dir are not exactly the expected set (< expected, > found)"
+    fi
+
+    local names tmp
+    mapfile -t names <<< "$expected"
+    tmp="$(mktemp)"
+    if ! (cd "$dir" && sha256sum -- "${names[@]}") > "$tmp"; then
+        rm -f "$tmp"
+        die "could not checksum the release assets in $dir"
+    fi
+    chmod 644 "$tmp"
+    mv "$tmp" "$dir/SHA256SUMS"
+}
+
 cmd="${1:-}"
 [ "$#" -gt 0 ] && shift
 case "$cmd" in
@@ -116,7 +152,11 @@ case "$cmd" in
         [ "$#" -eq 3 ] || die "usage: release.sh publish-commit VERSION BASE_SHA COMMIT_EPOCH"
         publish_commit "$@"
         ;;
+    checksums)
+        [ "$#" -ge 2 ] || die "usage: release.sh checksums DIR NAME..."
+        checksums "$@"
+        ;;
     *)
-        die "usage: release.sh {validate|bump|publish-commit} ..."
+        die "usage: release.sh {validate|bump|publish-commit|checksums} ..."
         ;;
 esac

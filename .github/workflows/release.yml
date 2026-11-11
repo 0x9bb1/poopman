@@ -12,6 +12,12 @@ name: Build and Release
 # main, tags and releases untouched; a failure after it is finished by
 # "Re-run failed jobs" (see release.sh publish-commit).
 #
+# Every release ships SHA256SUMS, a CycloneDX SBOM per platform and a build
+# provenance attestation. `publish` never runs in a dry run, so its attestation
+# steps are first exercised by a real release; they sit before the push, where
+# a failure still leaves the repository untouched and a fixed workflow can
+# simply be dispatched again.
+#
 # The version input only ever reaches shell code through an environment
 # variable — never `${{ inputs.* }}` inside `run:` — and is validated by
 # .github/scripts/release.sh before any other use.
@@ -203,8 +209,21 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo install cargo-bundle --version 0.11.0 --locked
 
+      # Pinned like cargo-bundle. Bump deliberately, with a dry run.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Resolved from the Cargo.lock the binary was just built from, limited
+      # to the dependencies this target actually pulls in. Written next to
+      # Cargo.toml as <asset_name>.cdx.json.
+      - name: Generate SBOM
+        run: >-
+          cargo cyclonedx --format json --spec-version 1.5
+          --target ${{ matrix.target }}
+          --override-filename ${{ matrix.asset_name }}.cdx
 
       - name: Create app bundle (macOS)
         if: runner.os == 'macOS'
@@ -247,30 +266,77 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.dmg
+          path: |
+            ${{ matrix.asset_name }}.dmg
+            ${{ matrix.asset_name }}.cdx.json
 
       - name: Upload artifact (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.tar.gz
+          path: |
+            ${{ matrix.asset_name }}.tar.gz
+            ${{ matrix.asset_name }}.cdx.json
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.zip
+          path: |
+            ${{ matrix.asset_name }}.zip
+            ${{ matrix.asset_name }}.cdx.json
+
+  # Read-only, and part of a dry run: gathers every platform's package and
+  # SBOM, insists the set is complete, and writes SHA256SUMS over it. `publish`
+  # releases exactly this directory.
+  assets:
+    name: Collect release assets
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the pinned revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Download packages and SBOMs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Poopman-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        run: |
+          bash .github/scripts/release.sh checksums dist \
+            Poopman-linux-x86_64.tar.gz Poopman-linux-x86_64.cdx.json \
+            Poopman-macos-x86_64.dmg Poopman-macos-x86_64.cdx.json \
+            Poopman-macos-aarch64.dmg Poopman-macos-aarch64.cdx.json \
+            Poopman-windows-x86_64.zip Poopman-windows-x86_64.cdx.json
+          cat dist/SHA256SUMS
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
 
   publish:
     name: Publish
-    needs: [prepare, build]
+    needs: [prepare, assets]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
-    # The only job allowed to write to the repository.
+    # The only job allowed to write to the repository. id-token and
+    # attestations are for the provenance attestation: an OIDC token to obtain
+    # the short-lived Sigstore signing certificate, and the right to store the
+    # result.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
@@ -291,14 +357,34 @@ jobs:
           name: release-manifest
           path: release-manifest
 
-      - name: Download binaries
+      - name: Download release assets
         uses: actions/download-artifact@v4
         with:
-          pattern: Poopman-*
-          path: artifacts
+          name: release-assets
+          path: dist
 
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
+      - name: Verify checksums
+        run: |
+          ls -l dist
+          cd dist && sha256sum --strict -c SHA256SUMS
+
+      # Attested and verified before anything is pushed: see the note at the
+      # top of this file. Covers every asset, SHA256SUMS and the SBOMs included.
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+
+      # The command README gives users, tightened to this workflow and this
+      # source revision, so a release whose provenance does not verify is
+      # never published.
+      - name: Verify the attestations
+        run: |
+          for asset in dist/*; do
+            gh attestation verify "$asset" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release.yml" \
+              --source-digest "$BASE_SHA"
+          done
 
       # main and the tag move together in one atomic push, only if main is
       # still at the pinned revision. On a rerun after this succeeded, the
@@ -313,18 +399,12 @@ jobs:
       - name: Create the GitHub release
         run: |
           tag="v$VERSION"
-          files=(
-            artifacts/Poopman-linux-x86_64/Poopman-linux-x86_64.tar.gz
-            artifacts/Poopman-macos-x86_64/Poopman-macos-x86_64.dmg
-            artifacts/Poopman-macos-aarch64/Poopman-macos-aarch64.dmg
-            artifacts/Poopman-windows-x86_64/Poopman-windows-x86_64.zip
-          )
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${files[@]}" --clobber
+            gh release upload "$tag" dist/* --clobber
           else
             prerelease_flag=()
             if [ "$PRERELEASE" = true ]; then prerelease_flag=(--prerelease); fi
-            gh release create "$tag" "${files[@]}" \
+            gh release create "$tag" dist/* \
               --verify-tag --draft --generate-notes --title "$tag" "${prerelease_flag[@]}"
           fi
           gh release edit "$tag" --draft=false
