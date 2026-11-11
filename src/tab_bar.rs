@@ -1,7 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::px;
 use gpui::*;
-use gpui_component::{ActiveTheme as _, h_flex, scroll::ScrollableElement as _};
+use gpui_component::{ActiveTheme as _, h_flex, scroll::ScrollableElement as _, tooltip::Tooltip};
+use std::collections::HashMap;
 
 use crate::request_tab::RequestTab;
 use crate::theme::method_color;
@@ -30,20 +31,59 @@ struct TabSummary {
     dirty: bool,
 }
 
+/// Keyboard focus for one tab: the tab itself and its close button.
+struct TabFocus {
+    tab: FocusHandle,
+    close: FocusHandle,
+}
+
 /// Tab bar component for managing multiple request tabs
 pub struct TabBar {
     tabs: Vec<TabSummary>,
     active_tab_index: usize,
     scroll_handle: ScrollHandle,
+    /// By tab id, so a tab keeps its handles while others open and close
+    /// around it. Kept in step with `tabs` by `update_tabs`.
+    focus: HashMap<usize, TabFocus>,
+    new_tab_focus: FocusHandle,
 }
 
 impl TabBar {
-    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+    pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             tabs: vec![],
             active_tab_index: 0,
             scroll_handle: ScrollHandle::new(),
+            focus: HashMap::new(),
+            new_tab_focus: cx.focus_handle(),
         }
+    }
+
+    /// Focus handles of the tabs, in strip order.
+    fn tab_focus_handles(&self) -> Vec<FocusHandle> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| self.focus.get(&tab.id))
+            .map(|focus| focus.tab.clone())
+            .collect()
+    }
+
+    /// The focus handle of the tab at `index`, for driving it from the keyboard.
+    #[cfg(test)]
+    pub(crate) fn tab_focus(&self, index: usize) -> FocusHandle {
+        self.focus[&self.tabs[index].id].tab.clone()
+    }
+
+    /// The focus handle of the close button of the tab at `index`.
+    #[cfg(test)]
+    pub(crate) fn close_focus(&self, index: usize) -> FocusHandle {
+        self.focus[&self.tabs[index].id].close.clone()
+    }
+
+    /// The focus handle of the "+" button.
+    #[cfg(test)]
+    pub(crate) fn new_tab_focus(&self) -> FocusHandle {
+        self.new_tab_focus.clone()
     }
 
     /// Update tabs and active index
@@ -63,6 +103,14 @@ impl TabBar {
                 dirty: tab.is_dirty(),
             })
             .collect();
+        self.focus
+            .retain(|id, _| summaries.iter().any(|tab| tab.id == *id));
+        for tab in &summaries {
+            self.focus.entry(tab.id).or_insert_with(|| TabFocus {
+                tab: cx.focus_handle(),
+                close: cx.focus_handle(),
+            });
+        }
         if active_changed || self.tabs != summaries {
             self.tabs = summaries;
             cx.notify();
@@ -145,28 +193,48 @@ impl Render for TabBar {
                             .size_full()
                             .track_scroll(&self.scroll_handle)
                             .overflow_x_scroll()
-                            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
+                            // The strip is one Tab stop (the active tab); Left and
+                            // Right move focus along it, Enter or Space selects.
+                            .on_key_down(cx.listener(|this, event, window, cx| {
+                                let handles = this.tab_focus_handles();
+                                if let Some(index) = crate::ui::rove_focus(&handles, event, window)
+                                {
+                                    this.scroll_handle.scroll_to_item(index);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .children(self.tabs.iter().enumerate().filter_map(|(index, tab)| {
+                                let focus = self.focus.get(&tab.id)?;
                                 let is_active = index == active_index;
                                 let tab_index = index;
                                 let method = tab.method.as_str();
 
                                 let verb_color = method_color(tab.method, theme);
 
-                                h_flex()
-                                    .id(("tab", tab.id))
-                                    .gap_1p5()
-                                    .items_center()
-                                    .flex_shrink_0()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded(theme.radius)
-                                    .bg(if is_active {
-                                        theme.muted
-                                    } else {
-                                        gpui::transparent_black()
-                                    })
-                                    .when(!is_active, |s| s.hover(|s| s.bg(theme.list_hover)))
-                                    .cursor_pointer()
+                                Some(
+                                    crate::ui::keyboard_control(
+                                        h_flex()
+                                            .id(("tab", tab.id))
+                                            .debug_selector(move || format!("request-tab-{index}"))
+                                            .gap_1p5()
+                                            .items_center()
+                                            .flex_shrink_0()
+                                            .px_3()
+                                            .py_1()
+                                            .rounded(theme.radius)
+                                            .bg(if is_active {
+                                                theme.muted
+                                            } else {
+                                                gpui::transparent_black()
+                                            })
+                                            .when(!is_active, |s| {
+                                                s.hover(|s| s.bg(theme.list_hover))
+                                            })
+                                            .cursor_pointer(),
+                                        &focus.tab,
+                                        is_active,
+                                        theme,
+                                    )
                                     .on_click(cx.listener(move |this, event, window, cx| {
                                         this.on_tab_click(tab_index, event, window, cx);
                                     }))
@@ -203,47 +271,65 @@ impl Render for TabBar {
                                         )
                                     })
                                     .child(
-                                        // Close button
-                                        div()
-                                            .id(("close-tab", tab.id))
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .cursor_pointer()
-                                            .hover(|style| style.text_color(theme.foreground))
-                                            .on_click(cx.listener(
-                                                move |this, event, window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.on_close_tab_click(
-                                                        tab_index, event, window, cx,
-                                                    );
-                                                },
-                                            ))
-                                            .child("×"),
-                                    )
+                                        // Close button. A Tab stop only on the
+                                        // active tab, so the strip stays short to
+                                        // tab through.
+                                        crate::ui::keyboard_control(
+                                            div()
+                                                .id(("close-tab", tab.id))
+                                                .rounded(theme.radius)
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .cursor_pointer()
+                                                .hover(|style| style.text_color(theme.foreground)),
+                                            &focus.close,
+                                            is_active,
+                                            theme,
+                                        )
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new("Close tab").build(window, cx)
+                                        })
+                                        .on_click(cx.listener(move |this, event, window, cx| {
+                                            cx.stop_propagation();
+                                            this.on_close_tab_click(tab_index, event, window, cx);
+                                        }))
+                                        .child("×"),
+                                    ),
+                                )
                             })),
                     )
                     .horizontal_scrollbar(&self.scroll_handle),
             )
             .child(
                 // New tab button
-                div()
-                    .id("new-tab-button")
-                    .flex_shrink_0()
-                    .px_2()
-                    .py_1()
-                    .rounded(theme.radius)
-                    .text_color(theme.muted_foreground)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.list_hover).text_color(theme.foreground))
-                    .on_click(cx.listener(|this, event, window, cx| {
-                        this.on_new_tab_click(event, window, cx);
-                    }))
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("+"),
-                    ),
+                crate::ui::keyboard_control(
+                    div()
+                        .id("new-tab-button")
+                        .flex_shrink_0()
+                        .px_2()
+                        .py_1()
+                        .rounded(theme.radius)
+                        .text_color(theme.muted_foreground)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.list_hover).text_color(theme.foreground)),
+                    &self.new_tab_focus,
+                    true,
+                    theme,
+                )
+                .tooltip(|window, cx| {
+                    Tooltip::new("New tab")
+                        .action(&crate::app::NewTab, None)
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(|this, event, window, cx| {
+                    this.on_new_tab_click(event, window, cx);
+                }))
+                .child(
+                    div()
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child("+"),
+                ),
             )
     }
 }

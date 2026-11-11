@@ -93,6 +93,8 @@ mod dirty_tests;
 #[cfg(test)]
 mod import_tests;
 #[cfg(test)]
+mod keyboard_tests;
+#[cfg(test)]
 mod save_tests;
 #[cfg(test)]
 mod save_ui_tests;
@@ -1014,11 +1016,11 @@ impl Render for PoopmanApp {
                 this.close_tab(index, window, cx);
             }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| {
-                let next = cycle_index(this.active_tab_index, this.request_tabs.len(), true);
+                let next = crate::ui::cycle_index(this.active_tab_index, this.request_tabs.len(), true);
                 this.switch_to_tab(next, window, cx);
             }))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| {
-                let prev = cycle_index(this.active_tab_index, this.request_tabs.len(), false);
+                let prev = crate::ui::cycle_index(this.active_tab_index, this.request_tabs.len(), false);
                 this.switch_to_tab(prev, window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusUrl, window, cx| {
@@ -1259,60 +1261,10 @@ fn app_notice(
     });
 }
 
-/// Next (`forward`) or previous tab index, wrapping at both ends.
-///
-/// Returns `current` unchanged when `len` is 0 or 1 — callers then hit
-/// `switch_to_tab`'s `index == self.active_tab_index` early-return and no-op.
-fn cycle_index(current: usize, len: usize, forward: bool) -> usize {
-    if len <= 1 {
-        return current;
-    }
-    if forward {
-        (current + 1) % len
-    } else {
-        (current + len - 1) % len
-    }
-}
-
 #[cfg(test)]
 mod tests {
     // NOT `use super::*`: that would pull in `gpui::*`, whose `test` attribute
     // macro shadows the standard `#[test]`.
-    use super::cycle_index;
-
-    #[test]
-    fn steps_forward_through_the_middle_of_the_list() {
-        assert_eq!(cycle_index(0, 3, true), 1);
-        assert_eq!(cycle_index(1, 3, true), 2);
-    }
-
-    #[test]
-    fn wraps_forward_past_the_last_tab() {
-        assert_eq!(cycle_index(2, 3, true), 0);
-    }
-
-    #[test]
-    fn steps_backward_through_the_middle_of_the_list() {
-        assert_eq!(cycle_index(2, 3, false), 1);
-        assert_eq!(cycle_index(1, 3, false), 0);
-    }
-
-    #[test]
-    fn wraps_backward_past_the_first_tab() {
-        assert_eq!(cycle_index(0, 3, false), 2);
-    }
-
-    #[test]
-    fn single_tab_stays_put_in_both_directions() {
-        assert_eq!(cycle_index(0, 1, true), 0);
-        assert_eq!(cycle_index(0, 1, false), 0);
-    }
-
-    #[test]
-    fn empty_list_returns_current_without_panicking() {
-        assert_eq!(cycle_index(0, 0, true), 0);
-        assert_eq!(cycle_index(0, 0, false), 0);
-    }
 
     // Postman behavior: EVERY send is logged to History, including a re-send of a
     // request opened from history. A previous `!is_from_history` gate silently

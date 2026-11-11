@@ -131,6 +131,14 @@ struct ParamRow {
     value_input: Entity<InputState>,
 }
 
+/// The request sections in pill order: (section, element id, label).
+const REQUEST_SECTIONS: [(RequestSection, &str, &str); 4] = [
+    (RequestSection::Headers, "tab-headers", "Headers"),
+    (RequestSection::Auth, "tab-auth", "Auth"),
+    (RequestSection::Params, "tab-params", "Params"),
+    (RequestSection::Body, "tab-body", "Body"),
+];
+
 /// Request editor panel. One instance is shared by every request tab: state
 /// that belongs to a tab must be part of [`EditorTabState`] and flow through
 /// `capture_state`/`restore_state`, or it leaks into the next tab shown.
@@ -144,6 +152,9 @@ pub struct RequestEditor {
     params: Vec<ParamRow>,
     params_scroll_handle: ScrollHandle,
     section: RequestSection,
+    /// One handle per entry of `REQUEST_SECTIONS`, so the pills are keyboard
+    /// controls. Not per-tab state: focus belongs to the window, not a tab.
+    section_focus: [FocusHandle; REQUEST_SECTIONS.len()],
     /// Stable id of the request tab currently displayed by this shared editor.
     active_request_tab_id: usize,
     /// Runtime request ownership is keyed by tab, allowing different tabs to
@@ -234,6 +245,7 @@ impl RequestEditor {
             params: vec![],
             params_scroll_handle: ScrollHandle::new(),
             section: RequestSection::default(),
+            section_focus: std::array::from_fn(|_| cx.focus_handle()),
             active_request_tab_id: 0,
             in_flight: std::collections::HashMap::new(),
             next_request_id: 1,
@@ -1021,9 +1033,17 @@ impl RequestEditor {
 
         // Skip rebuild if the parsed params match current params (avoids disrupting
         // the user mid-edit and avoids needless entity churn).
+        //
+        // Only enabled rows count: the URL never carries a disabled one, so
+        // comparing against all rows would call any tab with a disabled param
+        // "out of sync" and rebuild it from the URL — deleting that row. That is
+        // reachable with no URL edit at all: restoring a tab sets the URL, and if
+        // the URL input holds focus then (a tab switch by shortcut from inside
+        // it), the resulting Change event passes the focus gate and lands here.
         let current_params: Vec<(String, String)> = self
             .params
             .iter()
+            .filter(|p| p.enabled)
             .map(|p| {
                 (
                     p.key_input.read(cx).value().to_string(),
@@ -1033,17 +1053,9 @@ impl RequestEditor {
             .filter(|(k, v)| !k.is_empty() || !v.is_empty())
             .collect();
         if url_params::params_equal(&new_params, &current_params) && !self.params.is_empty() {
-        //
-        // Only enabled rows count: the URL never carries a disabled one, so
-        // comparing against all rows would call any tab with a disabled param
-        // "out of sync" and rebuild it from the URL — deleting that row. That is
-        // reachable with no URL edit at all: restoring a tab sets the URL, and if
-        // the URL input holds focus then (a tab switch by shortcut from inside
-        // it), the resulting Change event passes the focus gate and lands here.
             return;
         }
 
-            .filter(|p| p.enabled)
         // Rebuild params list from the URL query string.
         self.params.clear();
         for (key_str, value_str) in new_params {
@@ -1323,6 +1335,26 @@ impl RequestEditor {
             Ok::<_, anyhow::Error>(())
         })
         .detach();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn body_editor(&self) -> &Entity<BodyEditor> {
+        &self.body_editor
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auth_editor(&self) -> &Entity<AuthEditor> {
+        &self.auth_editor
+    }
+
+    /// The focus handle of a section pill, for driving it from the keyboard.
+    #[cfg(test)]
+    pub(crate) fn section_focus(&self, section: RequestSection) -> FocusHandle {
+        let index = REQUEST_SECTIONS
+            .iter()
+            .position(|(candidate, _, _)| *candidate == section)
+            .expect("every section has a pill");
+        self.section_focus[index].clone()
     }
 
     /// Focus the URL input and select all of its text. Public so the FocusUrl
@@ -1760,6 +1792,7 @@ impl Render for RequestEditor {
                                 Button::new("code-snippet-btn")
                                     .ghost()
                                     .icon(Icon::empty().path("icons/code.svg"))
+                                    .tooltip("Code snippet")
                                     .on_click(cx.listener(|_this, _ev, _window, cx| {
                                         cx.emit(OpenCodeSnippet);
                                     })),
@@ -1811,62 +1844,32 @@ impl Render for RequestEditor {
                         .min_h_0()  // Critical for scrolling to work
                         .child(
                             crate::ui::segmented_bar(theme)
-                                .child(
-                                    crate::ui::segment_pill(theme, self.section == RequestSection::Headers)
-                                        .id("tab-headers")
-                                        .when(self.section != RequestSection::Headers, |s| {
-                                            s.hover(|s| s.text_color(theme.foreground))
-                                        })
+                                .on_key_down(cx.listener(|this, event, window, cx| {
+                                    if crate::ui::rove_focus(&this.section_focus, event, window).is_some() {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .children(REQUEST_SECTIONS.into_iter().zip(&self.section_focus).map(
+                                    |((section, id, label), focus)| {
+                                        let active = self.section == section;
+                                        crate::ui::keyboard_control(
+                                            crate::ui::segment_pill(theme, active)
+                                                .id(id)
+                                                .debug_selector(move || id.to_string())
+                                                .when(!active, |s| s.hover(|s| s.text_color(theme.foreground))),
+                                            focus,
+                                            active,
+                                            theme,
+                                        )
                                         .on_click(cx.listener(
-                                            |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.section = RequestSection::Headers;
+                                            move |this, _event: &gpui::ClickEvent, _window, cx| {
+                                                this.section = section;
                                                 cx.notify();
                                             },
                                         ))
-                                        .child("Headers"),
-                                )
-                                .child(
-                                    crate::ui::segment_pill(theme, self.section == RequestSection::Auth)
-                                        .id("tab-auth")
-                                        .when(self.section != RequestSection::Auth, |s| {
-                                            s.hover(|s| s.text_color(theme.foreground))
-                                        })
-                                        .on_click(cx.listener(
-                                            |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.section = RequestSection::Auth;
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .child("Auth"),
-                                )
-                                .child(
-                                    crate::ui::segment_pill(theme, self.section == RequestSection::Params)
-                                        .id("tab-params")
-                                        .when(self.section != RequestSection::Params, |s| {
-                                            s.hover(|s| s.text_color(theme.foreground))
-                                        })
-                                        .on_click(cx.listener(
-                                            |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.section = RequestSection::Params;
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .child("Params"),
-                                )
-                                .child(
-                                    crate::ui::segment_pill(theme, self.section == RequestSection::Body)
-                                        .id("tab-body")
-                                        .when(self.section != RequestSection::Body, |s| {
-                                            s.hover(|s| s.text_color(theme.foreground))
-                                        })
-                                        .on_click(cx.listener(
-                                            |this, _event: &gpui::ClickEvent, _window, cx| {
-                                                this.section = RequestSection::Body;
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .child("Body"),
-                                ),
+                                        .child(label)
+                                    },
+                                )),
                         )
                         .when(self.section == RequestSection::Headers, |this| {
                             this.child(
