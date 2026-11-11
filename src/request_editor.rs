@@ -1317,7 +1317,7 @@ impl RequestEditor {
         .detach();
     }
 
-    /// Focus the URL input and select all of its text. Public so the ctrl-l
+    /// Focus the URL input and select all of its text. Public so the FocusUrl
     /// action can trigger it from PoopmanApp.
     ///
     /// Select-all goes through action dispatch because `InputState::select_all`
@@ -1373,7 +1373,7 @@ impl RequestEditor {
         cx.notify();
     }
 
-    /// Send the current request. Public so the ctrl-enter action can trigger
+    /// Send the current request. Public so the SendRequest action can trigger
     /// it from PoopmanApp; no-op while a request is already in flight (the
     /// button is swapped to Cancel then, but the keyboard path isn't).
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
