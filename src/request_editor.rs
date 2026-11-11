@@ -1033,9 +1033,17 @@ impl RequestEditor {
             .filter(|(k, v)| !k.is_empty() || !v.is_empty())
             .collect();
         if url_params::params_equal(&new_params, &current_params) && !self.params.is_empty() {
+        //
+        // Only enabled rows count: the URL never carries a disabled one, so
+        // comparing against all rows would call any tab with a disabled param
+        // "out of sync" and rebuild it from the URL — deleting that row. That is
+        // reachable with no URL edit at all: restoring a tab sets the URL, and if
+        // the URL input holds focus then (a tab switch by shortcut from inside
+        // it), the resulting Change event passes the focus gate and lands here.
             return;
         }
 
+            .filter(|p| p.enabled)
         // Rebuild params list from the URL query string.
         self.params.clear();
         for (key_str, value_str) in new_params {
