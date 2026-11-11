@@ -125,3 +125,18 @@ fn send_shortcut_wins_over_the_inputs_own_binding(cx: &mut gpui::TestAppContext)
     cx.run_until_parked();
     assert!(has_response(&app, cx), "send from inside an input");
 }
+
+/// Whatever holds focus can vanish with the element that owned it. The
+/// window's focus path is then empty, and no action reaches the app root.
+#[gpui::test]
+fn shortcuts_survive_the_window_losing_focus(cx: &mut gpui::TestAppContext) {
+    let (app, cx) = setup(cx, Arc::new(Database::new_in_memory()));
+    cx.simulate_keystrokes("secondary-t");
+    assert_eq!(tab_count(&app, cx), 2);
+
+    cx.update(|window, _| window.blur());
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("secondary-t");
+    assert_eq!(tab_count(&app, cx), 3);
+}
