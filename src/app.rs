@@ -477,6 +477,14 @@ impl PoopmanApp {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
 
+        // ...and take it back whenever it is lost. Focus goes with the element
+        // that held it: close a tab from its focused close button, or press a
+        // focused button that removes itself, and the window is left with an
+        // empty focus path — the same dead-shortcut state as never focusing.
+        let focus_lost_sub = cx.on_focus_lost(window, |this, window, _| {
+            window.focus(&this.focus_handle);
+        });
+
         Self {
             focus_handle,
             db,
@@ -497,6 +505,7 @@ impl PoopmanApp {
             collections_reconcile_generation: 0,
             saving_tabs: HashSet::new(),
             _subscriptions: vec![
+                focus_lost_sub,
                 request_started_sub,
                 request_sub,
                 history_sub,
