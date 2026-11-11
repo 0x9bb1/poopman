@@ -12,12 +12,17 @@ use crate::types::{ApiKeyLocation, AuthConfig, AuthType};
 #[cfg(test)]
 mod tests;
 
+/// Auth-type radio labels, indexed by `AuthEditor::auth_type_index`.
+const AUTH_TYPES: [&str; 4] = ["None", "Bearer", "Basic", "API Key"];
+
 /// Auth sub-tab editor. A flat set of input fields (one per auth field) plus a
 /// type selector; only the active type's fields render. Values persist across
 /// type switches because each field is its own always-alive `InputState`.
 pub struct AuthEditor {
     /// 0 = None, 1 = Bearer, 2 = Basic, 3 = ApiKey.
     auth_type_index: usize,
+    /// One handle per auth-type radio, so the group is a keyboard control.
+    auth_type_focus: [FocusHandle; AUTH_TYPES.len()],
     bearer_token: Entity<InputState>,
     basic_username: Entity<InputState>,
     basic_password: Entity<InputState>,
@@ -28,9 +33,16 @@ pub struct AuthEditor {
 }
 
 impl AuthEditor {
+    /// The focus handle of an auth-type radio, for driving it from the keyboard.
+    #[cfg(test)]
+    pub(crate) fn auth_type_focus(&self, index: usize) -> FocusHandle {
+        self.auth_type_focus[index].clone()
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut editor = Self {
             auth_type_index: 0,
+            auth_type_focus: std::array::from_fn(|_| cx.focus_handle()),
             api_key_location: ApiKeyLocation::Header,
             bearer_token: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -149,14 +161,31 @@ impl Render for AuthEditor {
             .min_h_0()
             // Type selector — muted radios, matching BodyEditor's body-type row.
             .child(
-                h_flex().gap_4().items_center().children(
-                    ["None", "Bearer", "Basic", "API Key"].into_iter().enumerate().map(|(i, label)| {
+                h_flex()
+                    .gap_4()
+                    .items_center()
+                    // Radio-group convention: an arrow key moves the selection.
+                    .on_key_down(cx.listener(|this, event, window, cx| {
+                        if let Some(i) = crate::ui::rove_focus(&this.auth_type_focus, event, window) {
+                            this.auth_type_index = i;
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .children(
+                    AUTH_TYPES.into_iter().zip(&self.auth_type_focus).enumerate().map(|(i, (label, focus))| {
                         let selected = self.auth_type_index == i;
-                        h_flex()
-                            .id(("auth-type", i))
-                            .gap_1p5()
-                            .items_center()
-                            .cursor_pointer()
+                        crate::ui::keyboard_control(
+                            h_flex()
+                                .id(("auth-type", i))
+                                .gap_1p5()
+                                .items_center()
+                                .rounded(theme.radius)
+                                .cursor_pointer(),
+                            focus,
+                            selected,
+                            theme,
+                        )
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.auth_type_index = i;
                                 cx.notify();

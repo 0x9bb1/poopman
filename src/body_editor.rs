@@ -53,8 +53,13 @@ struct FormDataRowInputs {
     type_select: Entity<SelectState<Vec<&'static str>>>,
 }
 
+/// Body-type radio labels, indexed by `BodyEditor::body_type_index`.
+const BODY_TYPES: [&str; 3] = ["none", "raw", "form-data"];
+
 pub struct BodyEditor {
     body_type_index: usize,
+    /// One handle per body-type radio, so the group is a keyboard control.
+    body_type_focus: [FocusHandle; BODY_TYPES.len()],
     raw_subtype_select: Entity<SelectState<Vec<&'static str>>>,
     raw_body_editor: Entity<InputState>, // Single editor for all raw types
     current_raw_subtype: RawSubtype,     // Track current subtype
@@ -105,6 +110,23 @@ impl BodyEditor {
 }
 
 impl BodyEditor {
+    fn select_body_type(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.body_type_index = index;
+        let content_type = match index {
+            1 => Some(self.current_raw_subtype.content_type().to_string()),
+            2 => Some("multipart/form-data; boundary=<auto>".to_string()),
+            _ => None,
+        };
+        cx.emit(BodyTypeChanged { content_type });
+        cx.notify();
+    }
+
+    /// The focus handle of a body-type radio, for driving it from the keyboard.
+    #[cfg(test)]
+    pub(crate) fn body_type_focus(&self, index: usize) -> FocusHandle {
+        self.body_type_focus[index].clone()
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Create Select for Raw subtypes
         let raw_subtype_select = cx.new(|cx| {
@@ -137,6 +159,7 @@ impl BodyEditor {
 
         let mut editor = Self {
             body_type_index: 1, // Default to Raw
+            body_type_focus: std::array::from_fn(|_| cx.focus_handle()),
             raw_subtype_select: raw_subtype_select.clone(),
             raw_body_editor: raw_body_editor.clone(),
             current_raw_subtype,
@@ -644,24 +667,32 @@ impl Render for BodyEditor {
                     .items_center()
                     .w_full()
                     .child(
-                        h_flex().gap_4().items_center().children(
-                            ["none", "raw", "form-data"].into_iter().enumerate().map(|(i, label)| {
+                        h_flex()
+                            .gap_4()
+                            .items_center()
+                            // Radio-group convention: an arrow key moves the selection.
+                            .on_key_down(cx.listener(|this, event, window, cx| {
+                                if let Some(i) = crate::ui::rove_focus(&this.body_type_focus, event, window) {
+                                    this.select_body_type(i, cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .children(
+                            BODY_TYPES.into_iter().zip(&self.body_type_focus).enumerate().map(|(i, (label, focus))| {
                                 let selected = self.body_type_index == i;
-                                h_flex()
-                                    .id(("body-type", i))
-                                    .gap_1p5()
-                                    .items_center()
-                                    .cursor_pointer()
+                                crate::ui::keyboard_control(
+                                    h_flex()
+                                        .id(("body-type", i))
+                                        .gap_1p5()
+                                        .items_center()
+                                        .rounded(theme.radius)
+                                        .cursor_pointer(),
+                                    focus,
+                                    selected,
+                                    theme,
+                                )
                                     .on_click(cx.listener(move |this, _, _window, cx| {
-                                        this.body_type_index = i;
-                                        let content_type = match i {
-                                            0 => None,
-                                            1 => Some(this.current_raw_subtype.content_type().to_string()),
-                                            2 => Some("multipart/form-data; boundary=<auto>".to_string()),
-                                            _ => None,
-                                        };
-                                        cx.emit(BodyTypeChanged { content_type });
-                                        cx.notify();
+                                        this.select_body_type(i, cx);
                                     }))
                                     .child(
                                         div()

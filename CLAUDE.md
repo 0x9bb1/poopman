@@ -77,6 +77,9 @@ Bidirectional sync uses **focus arbitration**, not reentrancy flags: `parse_url_
 ## GPUI gotchas (all compile cleanly and fail at runtime)
 
 - **`PoopmanApp.focus_handle` is load-bearing.** If window focus is ever `None`, every keyboard shortcut silently dies. It is focused in `new()` and `track_focus`ed on the content div *below* the title bar — tracking it on the root kills the Windows minimize/maximize/close buttons.
+- Focus also dies with the element that holds it (a focused close button closing its own tab). `PoopmanApp` takes it back in `cx.on_focus_lost`; keep that subscription.
+- A clickable `div` is not a keyboard control. Wrap it in `ui::keyboard_control` (focus handle owned by the entity, Tab stop, focus ring, no focus-on-click) and give groups `ui::rove_focus` on their container for arrow keys; Enter/Space activation then comes from gpui. gpui-component's `Tab` is not focusable, so it is no shortcut. Manual pass: `docs/keyboard-checklist.md`.
+- `simulate_keystrokes` sends key-down only, and gpui's keyboard click fires on key-up: tests must also `simulate_event(KeyUpEvent { .. })` (see `press` in src/app/keyboard_tests.rs).
 - Never call `window.request_animation_frame()` from an action listener (panics outside paint).
 - Scrolling convention: viewport (`flex_1().min_h_0()`) → scroller (`.id().size_full().track_scroll(&h).overflow_scroll()`) → scrollbar as the scroller's **sibling** (`.vertical_scrollbar` on the parent). Don't use `.overflow_y_scrollbar()` on elements whose own gap/padding matter.
 - `flex_shrink` defaults to 1.0 — children that must overflow a strip need `.flex_shrink_0()`.

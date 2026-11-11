@@ -147,6 +147,12 @@ fn extension_for_content_type(ct: &str) -> Option<String> {
         .map(|e| e.to_string())
 }
 
+/// The response sections in pill order: (section, element id, label).
+const RESPONSE_SECTIONS: [(ResponseSection, &str, &str); 2] = [
+    (ResponseSection::Body, "resp-tab-body", "Body"),
+    (ResponseSection::Headers, "resp-tab-headers", "Headers"),
+];
+
 /// Response viewer panel
 pub struct ResponseViewer {
     /// Shared with the owning tab, so setting/reading never copies the body.
@@ -169,10 +175,23 @@ pub struct ResponseViewer {
     /// repeat decode/parse/pretty work.
     body_cache: VecDeque<CachedBody>,
     section: ResponseSection,
+    /// One handle per entry of `RESPONSE_SECTIONS`, so the pills are keyboard
+    /// controls.
+    section_focus: [FocusHandle; RESPONSE_SECTIONS.len()],
     headers_scroll_handle: ScrollHandle,
 }
 
 impl ResponseViewer {
+    /// The focus handle of a section pill, for driving it from the keyboard.
+    #[cfg(test)]
+    pub(crate) fn section_focus(&self, section: ResponseSection) -> FocusHandle {
+        let index = RESPONSE_SECTIONS
+            .iter()
+            .position(|(candidate, _, _)| *candidate == section)
+            .expect("every section has a pill");
+        self.section_focus[index].clone()
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let body_display = cx.new(|cx| {
             InputState::new(window, cx)
@@ -194,6 +213,7 @@ impl ResponseViewer {
             body_generation: 0,
             body_cache: VecDeque::new(),
             section: ResponseSection::default(),
+            section_focus: std::array::from_fn(|_| cx.focus_handle()),
             headers_scroll_handle: ScrollHandle::new(),
         }
     }
@@ -632,39 +652,36 @@ impl Render for ResponseViewer {
                         .w_full()
                         .child(
                             crate::ui::segmented_bar(theme)
-                                .child(
-                                    crate::ui::segment_pill(
-                                        theme,
-                                        self.section == ResponseSection::Body,
-                                    )
-                                    .id("resp-tab-body")
-                                    .when(self.section != ResponseSection::Body, |s| {
-                                        s.hover(|s| s.text_color(theme.foreground))
-                                    })
-                                    .on_click(cx.listener(
-                                        |this, _event: &gpui::ClickEvent, _window, cx| {
-                                            this.section = ResponseSection::Body;
-                                            cx.notify();
+                                .on_key_down(cx.listener(|this, event, window, cx| {
+                                    if crate::ui::rove_focus(&this.section_focus, event, window)
+                                        .is_some()
+                                    {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .children(
+                                    RESPONSE_SECTIONS.into_iter().zip(&self.section_focus).map(
+                                        |((section, id, label), focus)| {
+                                            let active = self.section == section;
+                                            crate::ui::keyboard_control(
+                                                crate::ui::segment_pill(theme, active)
+                                                    .id(id)
+                                                    .when(!active, |s| {
+                                                        s.hover(|s| s.text_color(theme.foreground))
+                                                    }),
+                                                focus,
+                                                active,
+                                                theme,
+                                            )
+                                            .on_click(cx.listener(
+                                                move |this, _event: &gpui::ClickEvent, _window, cx| {
+                                                    this.section = section;
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child(label)
                                         },
-                                    ))
-                                    .child("Body"),
-                                )
-                                .child(
-                                    crate::ui::segment_pill(
-                                        theme,
-                                        self.section == ResponseSection::Headers,
-                                    )
-                                    .id("resp-tab-headers")
-                                    .when(self.section != ResponseSection::Headers, |s| {
-                                        s.hover(|s| s.text_color(theme.foreground))
-                                    })
-                                    .on_click(cx.listener(
-                                        |this, _event: &gpui::ClickEvent, _window, cx| {
-                                            this.section = ResponseSection::Headers;
-                                            cx.notify();
-                                        },
-                                    ))
-                                    .child("Headers"),
+                                    ),
                                 ),
                         )
                         .when(self.section == ResponseSection::Body, |this| {

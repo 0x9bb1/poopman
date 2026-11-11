@@ -110,3 +110,110 @@ pub fn segment_pill(theme: &Theme, active: bool) -> Div {
         })
         .when(!active, |d| d.text_color(theme.muted_foreground))
 }
+
+/// Turns a click-only element into a keyboard control.
+///
+/// - `track_focus` puts it in the Tab order when `tab_stop` is set. Members of
+///   a group pass `tab_stop` only for the selected one, so the group is a
+///   single stop and arrow keys move inside it (see [`rove_focus`]).
+/// - Enter and Space then activate it for free: gpui sends a keyboard
+///   `ClickEvent` to a focused element's `on_click` (`gpui/elements/div.rs`).
+/// - The focus ring is a spread shadow, so it takes no layout space.
+///
+/// `track_focus` also makes gpui focus the element on mouse-down. That is
+/// suppressed, as gpui-component's `Button` does: clicking leaves focus where
+/// it was, and the ring only ever follows the keyboard.
+pub fn keyboard_control(
+    element: Stateful<Div>,
+    focus: &FocusHandle,
+    tab_stop: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let ring = BoxShadow {
+        color: theme.ring,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(2.),
+    };
+    element
+        .track_focus(&focus.clone().tab_stop(tab_stop))
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .focus(move |style| style.shadow(vec![ring]))
+}
+
+/// Arrow-key navigation inside a group of [`keyboard_control`]s. If one of
+/// `handles` has focus and `event` is an unmodified arrow key, focuses its
+/// neighbour (wrapping) and returns the neighbour's index.
+pub fn rove_focus(
+    handles: &[FocusHandle],
+    event: &KeyDownEvent,
+    window: &mut Window,
+) -> Option<usize> {
+    if event.keystroke.modifiers.modified() {
+        return None;
+    }
+    let forward = match event.keystroke.key.as_str() {
+        "right" | "down" => true,
+        "left" | "up" => false,
+        _ => return None,
+    };
+    let current = handles
+        .iter()
+        .position(|handle| handle.is_focused(window))?;
+    let next = cycle_index(current, handles.len(), forward);
+    handles[next].focus(window);
+    Some(next)
+}
+
+/// The index one step from `current` in a list of `len`, wrapping at both ends.
+pub fn cycle_index(current: usize, len: usize, forward: bool) -> usize {
+    if len <= 1 {
+        return current;
+    }
+    if forward {
+        (current + 1) % len
+    } else {
+        (current + len - 1) % len
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // NOT `use super::*`: that would pull in `gpui::*`, whose `test` attribute
+    // macro shadows the standard `#[test]`.
+    use super::cycle_index;
+
+    #[test]
+    fn steps_forward_through_the_middle_of_the_list() {
+        assert_eq!(cycle_index(0, 3, true), 1);
+        assert_eq!(cycle_index(1, 3, true), 2);
+    }
+
+    #[test]
+    fn wraps_forward_past_the_last_item() {
+        assert_eq!(cycle_index(2, 3, true), 0);
+    }
+
+    #[test]
+    fn steps_backward_through_the_middle_of_the_list() {
+        assert_eq!(cycle_index(2, 3, false), 1);
+        assert_eq!(cycle_index(1, 3, false), 0);
+    }
+
+    #[test]
+    fn wraps_backward_past_the_first_item() {
+        assert_eq!(cycle_index(0, 3, false), 2);
+    }
+
+    #[test]
+    fn single_item_stays_put_in_both_directions() {
+        assert_eq!(cycle_index(0, 1, true), 0);
+        assert_eq!(cycle_index(0, 1, false), 0);
+    }
+
+    #[test]
+    fn empty_list_returns_current_without_panicking() {
+        assert_eq!(cycle_index(0, 0, true), 0);
+        assert_eq!(cycle_index(0, 0, false), 0);
+    }
+}
