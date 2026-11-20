@@ -10,7 +10,10 @@ fn imported() -> crate::postman::ImportResult {
 #[test]
 fn imported_variables_get_isolated_unique_environments() {
     let db = Database::new_in_memory();
-    let existing_id = db.create_environment("Scoped API (Imported)").unwrap();
+    let existing_id = db
+        .create_environment("Scoped API (Imported)")
+        .wait()
+        .unwrap();
     db.replace_variables(
         existing_id,
         &[EnvVar {
@@ -19,12 +22,16 @@ fn imported_variables_get_isolated_unique_environments() {
             value: "keep-me".into(),
         }],
     )
+    .wait()
     .unwrap();
-    db.set_active_environment_id(Some(existing_id)).unwrap();
+    db.set_active_environment_id(Some(existing_id))
+        .wait()
+        .unwrap();
     let imported = imported();
     for suffix in [2, 3] {
         let (collection_id, environment) = db
             .insert_collection_import(&imported.collection, "Scoped API", &imported.variables)
+            .wait()
             .unwrap();
         let environment = environment.expect("variables need a persisted environment");
         assert_eq!(environment.name, format!("Scoped API (Imported {suffix})"));
@@ -32,7 +39,7 @@ fn imported_variables_get_isolated_unique_environments() {
         assert!(!environment.variables[2].enabled);
         assert_eq!(environment.variables[3].value, "10");
         assert_eq!(environment.variables[4].value, "true");
-        let collections = db.load_collections().unwrap();
+        let collections = db.load_collections().wait().unwrap();
         let request = &collections
             .iter()
             .find(|c| c.id == collection_id)
@@ -51,10 +58,13 @@ fn imported_variables_get_isolated_unique_environments() {
             "https://example.test/items?count=10&api_key=imported-token"
         );
     }
-    let environments = db.load_environments().unwrap();
+    let environments = db.load_environments().wait().unwrap();
     assert_eq!(environments.len(), 3);
     assert_eq!(environments[0].variables[0].value, "keep-me");
-    assert_eq!(db.get_active_environment_id().unwrap(), Some(existing_id));
+    assert_eq!(
+        db.get_active_environment_id().wait().unwrap(),
+        Some(existing_id)
+    );
 }
 
 #[test]
@@ -63,9 +73,10 @@ fn import_without_variables_does_not_create_an_environment() {
     let imported = imported();
     let (_, environment) = db
         .insert_collection_import(&imported.collection, "No variables", &[])
+        .wait()
         .unwrap();
     assert!(environment.is_none());
-    assert!(db.load_environments().unwrap().is_empty());
+    assert!(db.load_environments().wait().unwrap().is_empty());
 }
 
 #[test]
@@ -74,12 +85,13 @@ fn import_transaction_rolls_back_collection_if_environment_write_fails() {
     db.call(|conn| {
         conn.execute_batch("CREATE TRIGGER reject_import BEFORE INSERT ON env_variables BEGIN SELECT RAISE(ABORT, 'test failure'); END;")?;
         Ok(())
-    }).unwrap();
+    }).wait().unwrap();
     let imported = imported();
     assert!(
         db.insert_collection_import(&imported.collection, "Failed", &imported.variables)
+            .wait()
             .is_err()
     );
-    assert!(db.load_collections().unwrap().is_empty());
-    assert!(db.load_environments().unwrap().is_empty());
+    assert!(db.load_collections().wait().unwrap().is_empty());
+    assert!(db.load_environments().wait().unwrap().is_empty());
 }

@@ -29,26 +29,27 @@ fn importing_variables_publishes_persisted_environment(cx: &mut TestAppContext) 
         })
     });
     cx.update(|window, cx| panel.update(cx, |panel, cx| panel.import_data(imported, window, cx)));
-    cx.run_until_parked();
-    assert_eq!(db.load_collections().unwrap().len(), 1);
+    crate::test_support::settle(cx, &db);
+    assert_eq!(db.load_collections().wait().unwrap().len(), 1);
     assert_eq!(events.borrow().len(), 1);
-    let environments = db.load_environments().unwrap();
+    let environments = db.load_environments().wait().unwrap();
     assert_eq!(environments[0].id, events.borrow()[0].id);
     assert_eq!(environments[0].variables.len(), 5);
-    assert_eq!(db.get_active_environment_id().unwrap(), None);
+    assert_eq!(db.get_active_environment_id().wait().unwrap(), None);
 }
 
 #[gpui::test]
 fn opening_by_id_uses_current_nested_request_and_ignores_deleted_requests(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     let db = Arc::new(Database::new_in_memory());
-    let collection = db.create_collection("Collection").unwrap();
-    let folder = db.create_folder(collection, None, "Folder").unwrap();
+    let collection = db.create_collection("Collection").wait().unwrap();
+    let folder = db.create_folder(collection, None, "Folder").wait().unwrap();
     let request = RequestData::new(HttpMethod::GET, "https://example.test/original".into());
     let id = db
         .insert_saved_request(collection, Some(folder), "Request", &request, &[], &[])
+        .wait()
         .unwrap();
-    let collections = db.load_collections().unwrap();
+    let collections = db.load_collections().wait().unwrap();
     let cx = cx.add_empty_window();
     let panel = cx.update(|window, cx| {
         cx.new(|cx| CollectionsPanel::new(db.clone(), collections, window, cx))
@@ -63,8 +64,9 @@ fn opening_by_id_uses_current_nested_request_and_ignores_deleted_requests(cx: &m
 
     let updated = RequestData::new(HttpMethod::POST, "https://example.test/updated".into());
     db.update_saved_request(id, collection, Some(folder), "Renamed", &updated, &[], &[])
+        .wait()
         .unwrap();
-    let reloaded = db.load_collections().unwrap();
+    let reloaded = db.load_collections().wait().unwrap();
     cx.update(|_, cx| {
         panel.update(cx, |panel, cx| {
             panel.apply_loaded_collections(reloaded, cx);

@@ -15,6 +15,7 @@ fn insert(db: &Database, url: &str) -> i64 {
         &BodyType::None,
         &AuthConfig::default(),
     )
+    .wait()
     .unwrap()
 }
 
@@ -23,7 +24,7 @@ fn panel_window(
     db: Arc<Database>,
     cx: &mut TestAppContext,
 ) -> (Entity<HistoryPanel>, &mut VisualTestContext) {
-    let history = db.load_recent_history(super::HISTORY_LIMIT).unwrap();
+    let history = db.load_recent_history(super::HISTORY_LIMIT).wait().unwrap();
     cx.update(gpui_component::init);
     let mut panel = None;
     let (_, cx) = cx.add_window_view(|window, cx| {
@@ -65,7 +66,7 @@ fn click(panel: &Entity<HistoryPanel>, id: i64, cx: &mut VisualTestContext) {
 fn clicking_a_row_opens_its_full_request(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
     let id = insert(&db, "https://api.example.test/items");
-    let (panel, cx) = panel_window(db, cx);
+    let (panel, cx) = panel_window(db.clone(), cx);
     let opened = record_opens(&panel, cx);
 
     click(&panel, id, cx);
@@ -73,7 +74,7 @@ fn clicking_a_row_opens_its_full_request(cx: &mut TestAppContext) {
         opened.borrow().is_empty(),
         "the full entry is read off the UI thread"
     );
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
 
     let opened = opened.borrow();
     assert_eq!(opened.len(), 1);
@@ -90,13 +91,13 @@ fn only_the_latest_click_opens(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
     let first = insert(&db, "https://api.example.test/first");
     let second = insert(&db, "https://api.example.test/second");
-    let (panel, cx) = panel_window(db, cx);
+    let (panel, cx) = panel_window(db.clone(), cx);
     let opened = record_opens(&panel, cx);
 
     // The second click lands before the first entry has been read.
     click(&panel, first, cx);
     click(&panel, second, cx);
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
 
     let ids: Vec<i64> = opened.borrow().iter().map(|item| item.id).collect();
     assert_eq!(ids, vec![second]);
@@ -110,10 +111,10 @@ fn clicking_a_deleted_row_reports_it_and_drops_the_row(cx: &mut TestAppContext) 
     let (panel, cx) = panel_window(db.clone(), cx);
     let opened = record_opens(&panel, cx);
     // Deleted behind the panel's back, after the list was loaded.
-    db.clear_all_history().unwrap();
+    db.clear_all_history().wait().unwrap();
 
     click(&panel, id, cx);
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
 
     assert!(opened.borrow().is_empty());
     assert_eq!(toast_count(cx), 1);
@@ -128,7 +129,7 @@ fn clicking_a_deleted_row_reports_it_and_drops_the_row(cx: &mut TestAppContext) 
 fn clearing_history_cancels_a_pending_open(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
     let id = insert(&db, "https://api.example.test/items");
-    let (panel, cx) = panel_window(db, cx);
+    let (panel, cx) = panel_window(db.clone(), cx);
     let opened = record_opens(&panel, cx);
 
     cx.update(|window, cx| {
@@ -137,7 +138,7 @@ fn clearing_history_cancels_a_pending_open(cx: &mut TestAppContext) {
             panel.clear_history(&ClickEvent::default(), window, cx);
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
 
     assert!(opened.borrow().is_empty());
     assert_eq!(toast_count(cx), 0);
@@ -152,7 +153,7 @@ fn failed_clear_restores_rows_and_shows_a_toast(cx: &mut TestAppContext) {
         "CREATE TRIGGER reject_history_delete BEFORE DELETE ON history
          BEGIN SELECT RAISE(ABORT, 'history is read-only'); END;",
     );
-    let (panel, cx) = panel_window(db, cx);
+    let (panel, cx) = panel_window(db.clone(), cx);
 
     cx.update(|window, cx| {
         panel.update(cx, |panel, cx| {
@@ -160,7 +161,7 @@ fn failed_clear_restores_rows_and_shows_a_toast(cx: &mut TestAppContext) {
             assert!(panel.history.is_empty(), "the clear is optimistic");
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
 
     cx.update(|_, cx| assert_eq!(panel.read(cx).history.len(), 1));
     assert_eq!(toast_count(cx), 1);
