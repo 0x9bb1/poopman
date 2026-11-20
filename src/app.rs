@@ -119,7 +119,7 @@ pub(crate) struct AppInitialState {
     pub(crate) environment_persistence: crate::environment_persistence::EnvironmentPersistence,
     environments: Vec<crate::types::Environment>,
     active_environment_id: Option<i64>,
-    history: Vec<crate::types::HistoryItem>,
+    history: Vec<crate::types::HistorySummary>,
     collections: Vec<crate::types::Collection>,
     settings: crate::types::AppSettings,
 }
@@ -1290,7 +1290,12 @@ mod tests {
         };
         PoopmanApp::persist_send(&db, &edited).unwrap();
 
-        let items = db.load_recent_history(10).unwrap();
+        let items: Vec<_> = db
+            .load_recent_history(10)
+            .unwrap()
+            .into_iter()
+            .map(|summary| db.load_history_item(summary.id).unwrap().unwrap())
+            .collect();
         assert_eq!(items.len(), 2, "each send must append its own history row");
         // Newest first: the edited re-send carries the Bearer auth...
         assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);

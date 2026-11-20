@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn tab_opened_from_history_is_not_blank() {
         // Even a history item with an empty URL is not a scratch tab.
-        let item = HistoryItem::new(7, "t".to_string(), empty_request(), None);
+        let item = HistoryItem::new(7, empty_request(), None);
         assert!(!RequestTab::from_history(1, &item).is_blank());
     }
 
@@ -518,7 +518,7 @@ mod tests {
         let mut request = empty_request();
         request.method = HttpMethod::POST;
         request.url = "https://example.com/items?draft=true".to_string();
-        let item = HistoryItem::new(8, "t".to_string(), request, None);
+        let item = HistoryItem::new(8, request, None);
 
         assert_eq!(RequestTab::from_history(1, &item).title, "items");
     }
