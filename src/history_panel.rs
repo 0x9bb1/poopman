@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::db::Database;
-use crate::types::HistoryItem;
+use crate::types::{HistoryItem, HistorySummary};
 
 #[cfg(test)]
 mod tests;
@@ -20,7 +20,7 @@ mod tests;
 /// Maximum number of history rows loaded/searched at a time.
 pub(crate) const HISTORY_LIMIT: usize = 100;
 
-/// Event emitted when a history item is clicked
+/// Emitted once a clicked row's full request has been loaded from the database.
 #[derive(Clone)]
 pub struct HistoryItemClicked {
     pub item: HistoryItem,
@@ -29,20 +29,23 @@ pub struct HistoryItemClicked {
 /// History panel component
 pub struct HistoryPanel {
     db: Arc<Database>,
-    history: Vec<HistoryItem>,
+    history: Vec<HistorySummary>,
     selected_id: Option<i64>,
     search: Entity<InputState>,
     query: String,
     /// Invalidates stale search/reload completions. Database work is serialized,
     /// but foreground tasks may resume after a newer query has been entered.
     refresh_generation: u64,
+    /// Invalidates the full-entry load of an earlier click: only the latest
+    /// click opens a tab, and clearing history cancels a pending open.
+    open_generation: u64,
     list_scroll_handle: ScrollHandle,
 }
 
 impl HistoryPanel {
     pub fn new(
         db: Arc<Database>,
-        history: Vec<HistoryItem>,
+        history: Vec<HistorySummary>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -57,6 +60,7 @@ impl HistoryPanel {
             search,
             query: String::new(),
             refresh_generation: 0,
+            open_generation: 0,
             list_scroll_handle: ScrollHandle::new(),
         }
     }
@@ -130,10 +134,45 @@ impl HistoryPanel {
         self.refresh_list(false, window, cx);
     }
 
-    fn on_item_click(&mut self, item: &HistoryItem, _window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_id = Some(item.id);
-        cx.emit(HistoryItemClicked { item: item.clone() });
+    /// Select a row and open it once its full request has been read. The list
+    /// holds only summaries, so the headers, body and auth are loaded here.
+    fn on_item_click(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_id = Some(id);
+        self.open_generation = self.open_generation.wrapping_add(1);
+        let generation = self.open_generation;
         cx.notify();
+
+        let db = self.db.clone();
+        let task = cx.background_spawn(async move { db.load_history_item(id) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| {
+                if this.open_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(Some(item)) => cx.emit(HistoryItemClicked { item }),
+                    Ok(None) => {
+                        // Deleted since the list was loaded: drop the stale row.
+                        if this.selected_id == Some(id) {
+                            this.selected_id = None;
+                        }
+                        crate::ui::error_toast(
+                            window,
+                            cx,
+                            "Could not open history entry",
+                            "It no longer exists.",
+                        );
+                        this.refresh_list(false, window, cx);
+                    }
+                    Err(error) => {
+                        crate::ui::error_toast(window, cx, "Could not open history entry", error)
+                    }
+                }
+            })?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     fn clear_history(
@@ -143,6 +182,7 @@ impl HistoryPanel {
         cx: &mut Context<Self>,
     ) {
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        self.open_generation = self.open_generation.wrapping_add(1);
         self.history.clear();
         self.selected_id = None;
         self.query = String::new();
@@ -168,15 +208,14 @@ impl HistoryPanel {
 
     /// Render one history row. Split out of `render` so the list body stays
     /// shallow enough for rustfmt to format it.
-    fn render_item(&self, item: &HistoryItem, cx: &Context<Self>) -> impl IntoElement {
+    fn render_item(&self, item: &HistorySummary, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let item_id = item.id;
         let is_selected = self.selected_id == Some(item_id);
-        let verb = item.request.method.as_str();
-        let verb_color = crate::theme::method_color(item.request.method, theme);
-        let url = item.request.url.clone();
+        let verb = item.method.as_str();
+        let verb_color = crate::theme::method_color(item.method, theme);
+        let url = item.url.clone();
         let time = crate::format::format_relative_time(&item.timestamp, chrono::Utc::now());
-        let item_clone = item.clone();
 
         h_flex()
             .id(("history-item", item_id as u64))
@@ -207,7 +246,7 @@ impl HistoryPanel {
             })
             .on_click(
                 cx.listener(move |this, _event: &gpui::ClickEvent, window, cx| {
-                    this.on_item_click(&item_clone, window, cx);
+                    this.on_item_click(item_id, window, cx);
                 }),
             )
             .child(

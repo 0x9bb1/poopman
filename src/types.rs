@@ -675,21 +675,29 @@ impl ResponseData {
 #[derive(Debug, Clone)]
 pub struct HistoryItem {
     pub id: i64,
-    pub timestamp: String,
     pub request: RequestData,
     pub response: Option<std::sync::Arc<ResponseData>>,
+}
+
+/// What a history list row shows. Listing and searching read only these
+/// columns; the full request (headers, body, auth) is read by id when a row is
+/// opened, so large stored bodies cost nothing until then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySummary {
+    pub id: i64,
+    pub timestamp: String,
+    pub method: HttpMethod,
+    pub url: String,
 }
 
 impl HistoryItem {
     pub fn new(
         id: i64,
-        timestamp: String,
         request: RequestData,
         response: Option<std::sync::Arc<ResponseData>>,
     ) -> Self {
         Self {
             id,
-            timestamp,
             request,
             response,
         }

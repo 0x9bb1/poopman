@@ -19,24 +19,38 @@ use std::thread;
 
 use crate::types::{
     AppSettings, AuthConfig, BodyDraft, BodyType, Collection, CollectionFolder, EnvVar,
-    Environment, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
+    Environment, HeaderState, HistoryItem, HistorySummary, HttpMethod, ParamState, RequestData,
+    SavedRequest,
 };
 
 /// A unit of work executed on the database's owning thread.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
-/// Map a `history` row (id, timestamp, method, url, request_headers,
-/// request_body, request_auth) into a `HistoryItem`. Shared by
+/// Columns read by the history list queries, in `row_to_history_summary` order.
+const HISTORY_SUMMARY_COLUMNS: &str = "id, timestamp, method, url";
+
+/// Map a `HISTORY_SUMMARY_COLUMNS` row into a `HistorySummary`. Shared by
 /// `load_recent_history` and `search_history` so the two queries can never
 /// drift in how they decode a row.
+fn row_to_history_summary(row: &rusqlite::Row) -> rusqlite::Result<HistorySummary> {
+    let method: String = row.get(2)?;
+    Ok(HistorySummary {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        method: HttpMethod::from_str(&method).unwrap_or(HttpMethod::GET),
+        url: row.get(3)?,
+    })
+}
+
+/// Map a full `history` row (id, method, url, request_headers, request_body,
+/// request_auth) into a `HistoryItem`.
 fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let id: i64 = row.get(0)?;
-    let timestamp: String = row.get(1)?;
-    let method: String = row.get(2)?;
-    let url: String = row.get(3)?;
-    let request_headers: String = row.get(4)?;
-    let request_body: String = row.get(5)?;
-    let request_auth: Option<String> = row.get(6)?;
+    let method: String = row.get(1)?;
+    let url: String = row.get(2)?;
+    let request_headers: String = row.get(3)?;
+    let request_body: String = row.get(4)?;
+    let request_auth: Option<String> = row.get(5)?;
 
     let mut headers: Vec<(String, String)> =
         serde_json::from_str(&request_headers).unwrap_or_default();
@@ -54,7 +68,7 @@ fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
         body,
         auth,
     };
-    Ok(HistoryItem::new(id, timestamp, request, None))
+    Ok(HistoryItem::new(id, request, None))
 }
 
 /// Escape a user query so SQLite `LIKE` treats `%`, `_`, and `\` literally.
@@ -601,47 +615,55 @@ impl Database {
         })
     }
 
-    /// Load recent history items (request only, no response - aligned with Postman)
+    /// Load the newest history rows for the list, newest first.
     #[cfg_attr(feature = "profile", profiling::function)]
-    pub fn load_recent_history(&self, limit: usize) -> Result<Vec<HistoryItem>> {
+    pub fn load_recent_history(&self, limit: usize) -> Result<Vec<HistorySummary>> {
         self.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, method, url, request_headers, request_body, request_auth
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {HISTORY_SUMMARY_COLUMNS}
                  FROM history
                  ORDER BY timestamp DESC, id DESC
-                 LIMIT ?1",
-            )?;
+                 LIMIT ?1"
+            ))?;
 
             // rusqlite 0.40 dropped the `ToSql` impl for `usize`; bind as i64.
-            let items = stmt.query_map([limit as i64], row_to_history_item)?;
+            let items = stmt.query_map([limit as i64], row_to_history_summary)?;
+            Ok(items.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
 
-            let mut result = Vec::new();
-            for item in items {
-                result.push(item?);
-            }
-            Ok(result)
+    /// Load one history entry with its full request (request only, no
+    /// response - aligned with Postman). `None` if the row no longer exists.
+    #[cfg_attr(feature = "profile", profiling::function)]
+    pub fn load_history_item(&self, id: i64) -> Result<Option<HistoryItem>> {
+        self.call(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id, method, url, request_headers, request_body, request_auth
+                     FROM history
+                     WHERE id = ?1",
+                    params![id],
+                    row_to_history_item,
+                )
+                .optional()?)
         })
     }
 
     /// Search history by URL or method (case-insensitive substring), newest
     /// first, up to `limit` rows. An empty query matches everything.
     #[cfg_attr(feature = "profile", profiling::function)]
-    pub fn search_history(&self, query: &str, limit: usize) -> Result<Vec<HistoryItem>> {
+    pub fn search_history(&self, query: &str, limit: usize) -> Result<Vec<HistorySummary>> {
         let pattern = format!("%{}%", escape_like(query));
         self.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, method, url, request_headers, request_body, request_auth
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {HISTORY_SUMMARY_COLUMNS}
                  FROM history
                  WHERE url LIKE ?1 ESCAPE '\\' OR method LIKE ?1 ESCAPE '\\'
                  ORDER BY timestamp DESC, id DESC
-                 LIMIT ?2",
-            )?;
-            let items = stmt.query_map(params![pattern, limit as i64], row_to_history_item)?;
-            let mut result = Vec::new();
-            for item in items {
-                result.push(item?);
-            }
-            Ok(result)
+                 LIMIT ?2"
+            ))?;
+            let items = stmt.query_map(params![pattern, limit as i64], row_to_history_summary)?;
+            Ok(items.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
@@ -1307,6 +1329,16 @@ mod tests {
 
     use crate::types::{AppSettings, AuthConfig, AuthType};
 
+    /// The newest `limit` history entries with their full requests: the list
+    /// query returns summaries, so each one is opened by id like a click does.
+    fn full_history(db: &Database, limit: usize) -> Vec<HistoryItem> {
+        db.load_recent_history(limit)
+            .unwrap()
+            .into_iter()
+            .map(|summary| db.load_history_item(summary.id).unwrap().unwrap())
+            .collect()
+    }
+
     fn mem_db() -> Database {
         Database::new_in_memory()
     }
@@ -1362,7 +1394,7 @@ mod tests {
             crate::data_directory::DatabasePaths::from_roots(&root.path().join("native"), &home);
         let destination = paths.prepare().unwrap();
         let migrated = Database::open_test_file(&destination);
-        let history = migrated.load_recent_history(10).unwrap();
+        let history = full_history(&migrated, 10);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, history_id);
         assert_eq!(history[0].request, request);
@@ -1518,7 +1550,7 @@ mod tests {
         Database::migrate_add_request_auth(&conn).unwrap(); // second run is a no-op
 
         let db = Database::spawn(conn);
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].request.auth.auth_type, AuthType::None);
     }
@@ -1533,7 +1565,7 @@ mod tests {
         };
         db.insert_history("GET", "https://x", "[]", &BodyType::None, &auth)
             .unwrap();
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);
         assert_eq!(items[0].request.auth.bearer_token, "abc");
     }
@@ -1553,7 +1585,7 @@ mod tests {
         )
         .unwrap();
 
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(
             items[0].request.headers,
             vec![("X-Trace".into(), "kept".into())]
@@ -1582,7 +1614,7 @@ mod tests {
         )
         .unwrap();
 
-        let item = db.load_recent_history(1).unwrap().remove(0);
+        let item = full_history(&db, 1).remove(0);
         assert_eq!(item.request.url, "{{base_url}}/private");
         assert_eq!(
             item.request.headers,
@@ -1643,11 +1675,66 @@ mod tests {
             &crate::types::AuthConfig::default(),
         )
         .unwrap();
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].request.url, "https://api.test/x");
         db.clear_all_history().unwrap();
         assert!(db.load_recent_history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_list_reads_summaries_newest_first() {
+        let db = mem_db();
+        let auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "secret".into(),
+            ..Default::default()
+        };
+        db.insert_history("GET", "https://api.test/a", "[]", &BodyType::None, &auth)
+            .unwrap();
+        let newest = db
+            .insert_history(
+                "PATCH",
+                "https://api.test/b",
+                r#"[["X-Trace","1"]]"#,
+                &BodyType::Raw {
+                    content: "{}".into(),
+                    subtype: crate::types::RawSubtype::Json,
+                },
+                &AuthConfig::default(),
+            )
+            .unwrap();
+
+        let list = db.load_recent_history(10).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, newest);
+        assert_eq!(list[0].method, HttpMethod::PATCH);
+        assert_eq!(list[0].url, "https://api.test/b");
+        assert!(!list[0].timestamp.is_empty());
+        assert_eq!(list[1].url, "https://api.test/a");
+
+        // The full request is read by id, not carried by the list.
+        let item = db.load_history_item(newest).unwrap().unwrap();
+        assert_eq!(item.id, newest);
+        assert_eq!(item.request.method, HttpMethod::PATCH);
+        assert_eq!(item.request.headers, vec![("X-Trace".into(), "1".into())]);
+        assert!(matches!(item.request.body, BodyType::Raw { .. }));
+    }
+
+    #[test]
+    fn load_history_item_is_none_for_a_deleted_row() {
+        let db = mem_db();
+        let id = db
+            .insert_history(
+                "GET",
+                "https://x",
+                "[]",
+                &BodyType::None,
+                &AuthConfig::default(),
+            )
+            .unwrap();
+        db.clear_all_history().unwrap();
+        assert!(db.load_history_item(id).unwrap().is_none());
     }
 
     #[test]
@@ -1681,17 +1768,17 @@ mod tests {
         // URL substring
         let r = db.search_history("login", 10).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.url, "https://api.test/login");
+        assert_eq!(r[0].url, "https://api.test/login");
 
         // method match, case-insensitive
         let r = db.search_history("post", 10).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.method, HttpMethod::POST);
+        assert_eq!(r[0].method, HttpMethod::POST);
 
         // shared substring across all three, newest (last inserted) first
         let r = db.search_history("api.test", 10).unwrap();
         assert_eq!(r.len(), 3);
-        assert_eq!(r[0].request.url, "https://api.test/orders/1");
+        assert_eq!(r[0].url, "https://api.test/orders/1");
     }
 
     #[test]
@@ -1725,13 +1812,13 @@ mod tests {
         // '%' must be treated literally: matches only the URL with a literal '%'
         let r = db.search_history("a%b", 10).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.url, "https://api.test/a%b");
+        assert_eq!(r[0].url, "https://api.test/a%b");
 
         // '_' must be treated literally: matches only the URL with a literal '_',
         // not the single-char wildcard that would also match "/axb" and "/a%b".
         let r = db.search_history("a_b", 10).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.url, "https://api.test/a_b");
+        assert_eq!(r[0].url, "https://api.test/a_b");
     }
 
     #[test]

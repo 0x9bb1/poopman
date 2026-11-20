@@ -62,7 +62,7 @@ fn partial_scratch_edits_survive_opening_history_and_collections(cx: &mut TestAp
                     let expected = app.request_tabs[0].snapshot();
                     if from_history {
                         app.open_history_in_new_tab(
-                            &HistoryItem::new(1, String::new(), saved.request.clone(), None),
+                            &HistoryItem::new(1, saved.request.clone(), None),
                             window,
                             cx,
                         );

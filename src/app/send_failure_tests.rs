@@ -46,5 +46,5 @@ fn invalid_url_is_reported_in_the_response_and_logged(cx: &mut gpui::TestAppCont
     });
     let history = db.load_recent_history(10).unwrap();
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].request.url, "http://");
+    assert_eq!(history[0].url, "http://");
 }
