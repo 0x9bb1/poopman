@@ -89,15 +89,12 @@ impl HistoryPanel {
                 }
             }
 
-            let query_for_db = query.clone();
-            let task = cx.background_spawn(async move {
-                if query_for_db.is_empty() {
-                    db.load_recent_history(HISTORY_LIMIT)
-                } else {
-                    db.search_history(&query_for_db, HISTORY_LIMIT)
-                }
-            });
-            let result = task.await;
+            let result = if query.is_empty() {
+                db.load_recent_history(HISTORY_LIMIT)
+            } else {
+                db.search_history(&query, HISTORY_LIMIT)
+            }
+            .await;
 
             this.update_in(cx, |this, window, cx| {
                 if this.refresh_generation != generation {
@@ -142,8 +139,7 @@ impl HistoryPanel {
         let generation = self.open_generation;
         cx.notify();
 
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move { db.load_history_item(id) });
+        let task = self.db.load_history_item(id);
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
@@ -190,8 +186,7 @@ impl HistoryPanel {
             .update(cx, |state, cx| state.set_value("", window, cx));
         cx.notify();
 
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move { db.clear_all_history() });
+        let task = self.db.clear_all_history();
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = task.await {
                 // Restore authoritative state if the optimistic clear failed,

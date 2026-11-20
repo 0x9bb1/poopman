@@ -116,8 +116,7 @@ impl CollectionsPanel {
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reload_generation = self.reload_generation.wrapping_add(1);
         let generation = self.reload_generation;
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move { db.load_collections() });
+        let task = self.db.load_collections();
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
@@ -397,8 +396,7 @@ impl CollectionsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let db = self.db.clone();
-        let name = name.to_string();
+        let db = &self.db;
         let action_for_ui = action.clone();
         let failure_title = match action {
             NameAction::CreateCollection => "Could not create collection",
@@ -407,22 +405,20 @@ impl CollectionsPanel {
             NameAction::RenameFolder(_) => "Could not rename folder",
             NameAction::RenameRequest(_) => "Could not rename request",
         };
-        let task = cx.background_spawn(async move {
-            match action {
-                NameAction::CreateCollection => db
-                    .create_collection(&name)
-                    .map(|id| Some(NodeRef::Collection(id))),
-                NameAction::CreateFolder {
-                    collection_id,
-                    parent_id,
-                } => db
-                    .create_folder(collection_id, parent_id, &name)
-                    .map(|id| Some(NodeRef::Folder(id))),
-                NameAction::RenameCollection(id) => db.rename_collection(id, &name).map(|()| None),
-                NameAction::RenameFolder(id) => db.rename_folder(id, &name).map(|()| None),
-                NameAction::RenameRequest(id) => db.rename_saved_request(id, &name).map(|()| None),
-            }
-        });
+        let task = match action {
+            NameAction::CreateCollection => db
+                .create_collection(name)
+                .map(|id| Some(NodeRef::Collection(id))),
+            NameAction::CreateFolder {
+                collection_id,
+                parent_id,
+            } => db
+                .create_folder(collection_id, parent_id, name)
+                .map(|id| Some(NodeRef::Folder(id))),
+            NameAction::RenameCollection(id) => db.rename_collection(id, name).map(|()| None),
+            NameAction::RenameFolder(id) => db.rename_folder(id, name).map(|()| None),
+            NameAction::RenameRequest(id) => db.rename_saved_request(id, name).map(|()| None),
+        };
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
                 Ok(selected) => {
@@ -555,14 +551,11 @@ impl CollectionsPanel {
                 .unwrap_or_default(),
             NodeRef::Request(id) => vec![id],
         };
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move {
-            match node {
-                NodeRef::Collection(id) => db.delete_collection(id),
-                NodeRef::Folder(id) => db.delete_folder(id),
-                NodeRef::Request(id) => db.delete_saved_request(id),
-            }
-        });
+        let task = match node {
+            NodeRef::Collection(id) => self.db.delete_collection(id),
+            NodeRef::Folder(id) => self.db.delete_folder(id),
+            NodeRef::Request(id) => self.db.delete_saved_request(id),
+        };
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
                 Ok(()) => {
@@ -587,14 +580,11 @@ impl CollectionsPanel {
     }
 
     fn duplicate_node(&mut self, node: NodeRef, window: &mut Window, cx: &mut Context<Self>) {
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move {
-            match node {
-                NodeRef::Collection(id) => db.duplicate_collection(id),
-                NodeRef::Folder(id) => db.duplicate_folder(id),
-                NodeRef::Request(id) => db.duplicate_saved_request(id),
-            }
-        });
+        let task = match node {
+            NodeRef::Collection(id) => self.db.duplicate_collection(id),
+            NodeRef::Folder(id) => self.db.duplicate_folder(id),
+            NodeRef::Request(id) => self.db.duplicate_saved_request(id),
+        };
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
                 Ok(id) => {
@@ -642,8 +632,11 @@ impl CollectionsPanel {
         let warnings = imported.warnings.clone();
         let db = self.db.clone();
         let name_for_db = name.clone();
+        // The imported tree can be large: copy it for the database thread on
+        // the background executor, not here.
         let task = cx.background_spawn(async move {
             db.insert_collection_import(&imported.collection, &name_for_db, &imported.variables)
+                .await
         });
         cx.spawn_in(window, async move |this, cx| {
             match task.await {

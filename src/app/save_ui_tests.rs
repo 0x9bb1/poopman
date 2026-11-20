@@ -18,14 +18,14 @@ fn save_button_updates_and_its_menu_saves_as_without_deleting(cx: &mut TestAppCo
             });
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| window.draw(cx).clear());
     let bounds = cx.debug_bounds("request-save-actions").unwrap();
     let save_position = point(bounds.origin.x + px(20.), bounds.center().y);
     cx.simulate_mouse_move(save_position, None, Modifiers::none());
     cx.simulate_click(save_position, Modifiers::none());
-    cx.run_until_parked();
-    let updated = db.load_saved_request(saved.id).unwrap().unwrap();
+    crate::test_support::settle(cx, &db);
+    let updated = db.load_saved_request(saved.id).wait().unwrap().unwrap();
     assert_eq!(updated.request.method, HttpMethod::POST);
     cx.update(|window, cx| {
         assert!(!window.has_active_dialog(cx));
@@ -38,7 +38,7 @@ fn save_button_updates_and_its_menu_saves_as_without_deleting(cx: &mut TestAppCo
             })
         });
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| window.draw(cx).clear());
     let bounds = cx.debug_bounds("request-save-actions").unwrap();
     let menu_position = point(bounds.right() - px(12.), bounds.center().y);
@@ -51,12 +51,20 @@ fn save_button_updates_and_its_menu_saves_as_without_deleting(cx: &mut TestAppCo
     cx.simulate_click(item_position, Modifiers::none());
     cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
     cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     let id = cx.update(|_, cx| app.read(cx).request_tabs[0].saved_request_id.unwrap());
     assert_ne!(id, saved.id);
-    assert_eq!(db.load_saved_request(saved.id).unwrap().unwrap(), updated);
     assert_eq!(
-        db.load_saved_request(id).unwrap().unwrap().request.method,
+        db.load_saved_request(saved.id).wait().unwrap().unwrap(),
+        updated
+    );
+    assert_eq!(
+        db.load_saved_request(id)
+            .wait()
+            .unwrap()
+            .unwrap()
+            .request
+            .method,
         HttpMethod::PATCH
     );
 }
@@ -64,10 +72,10 @@ fn save_button_updates_and_its_menu_saves_as_without_deleting(cx: &mut TestAppCo
 #[gpui::test]
 fn save_controls_and_close_confirmation_fit_the_minimum_window(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
-    let (app, cx) = setup(cx, db);
+    let (app, cx) = setup(cx, db.clone());
     for width in [720., 1000., 1440.] {
         cx.simulate_resize(size(px(width), px(480.)));
-        cx.run_until_parked();
+        crate::test_support::settle(cx, &db);
         cx.update(|window, cx| window.draw(cx).clear());
         let viewport = cx.update(|window, _| window.viewport_size());
         let url = cx.debug_bounds("request-url-input").unwrap();
@@ -96,7 +104,7 @@ fn save_controls_and_close_confirmation_fit_the_minimum_window(cx: &mut TestAppC
             app.close_tab(0, window, cx);
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| window.draw(cx).clear());
     let discard = cx.debug_bounds("discard-request-changes").unwrap();
     let viewport = cx.update(|window, _| window.viewport_size());
