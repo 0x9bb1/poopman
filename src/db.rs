@@ -119,30 +119,41 @@ fn decode_saved_request(row: SavedRequestRow) -> Result<SavedRequest> {
     })
 }
 
+/// Folder rows grouped by `(collection_id, parent_id)`, each group in display
+/// order `(position, id)`. Built in one pass, so finding a folder's children
+/// is a lookup rather than a scan over every folder.
+type FolderChildren = HashMap<(i64, Option<i64>), Vec<FolderRow>>;
+
+fn index_folders(folder_rows: Vec<FolderRow>) -> FolderChildren {
+    let mut children = FolderChildren::new();
+    for folder in folder_rows {
+        children
+            .entry((folder.collection_id, folder.parent_id))
+            .or_default()
+            .push(folder);
+    }
+    for group in children.values_mut() {
+        group.sort_by_key(|folder| (folder.position, folder.id));
+    }
+    children
+}
+
+/// Build `row` and its subtree. Each child group is taken out of the index
+/// when used, so no folder is built twice.
 fn build_folder(
-    id: i64,
-    folders: &HashMap<i64, FolderRow>,
+    row: FolderRow,
+    children: &mut FolderChildren,
     requests: &mut HashMap<(i64, Option<i64>), Vec<SavedRequest>>,
 ) -> Result<CollectionFolder> {
-    let row = folders
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| anyhow!("missing collection folder {}", id))?;
-
-    let mut child_ids: Vec<(i64, i64)> = folders
-        .values()
-        .filter(|child| child.collection_id == row.collection_id && child.parent_id == Some(id))
-        .map(|child| (child.position, child.id))
-        .collect();
-    child_ids.sort_by_key(|(position, child_id)| (*position, *child_id));
-
-    let child_folders = child_ids
+    let child_folders = children
+        .remove(&(row.collection_id, Some(row.id)))
+        .unwrap_or_default()
         .into_iter()
-        .map(|(_, child_id)| build_folder(child_id, folders, requests))
+        .map(|child| build_folder(child, children, requests))
         .collect::<Result<Vec<_>>>()?;
 
     let mut child_requests = requests
-        .remove(&(row.collection_id, Some(id)))
+        .remove(&(row.collection_id, Some(row.id)))
         .unwrap_or_default();
     child_requests.sort_by_key(|request| (request.position, request.id));
 
@@ -162,10 +173,7 @@ fn build_collection_tree(
     folder_rows: Vec<FolderRow>,
     request_rows: Vec<SavedRequestRow>,
 ) -> Result<Vec<Collection>> {
-    let folders: HashMap<i64, FolderRow> = folder_rows
-        .into_iter()
-        .map(|folder| (folder.id, folder))
-        .collect();
+    let mut children = index_folders(folder_rows);
     let mut requests: HashMap<(i64, Option<i64>), Vec<SavedRequest>> = HashMap::new();
     for row in request_rows {
         let request = decode_saved_request(row)?;
@@ -177,15 +185,11 @@ fn build_collection_tree(
 
     let mut collections = Vec::with_capacity(collection_rows.len());
     for (id, name, position) in collection_rows {
-        let mut root_folder_ids: Vec<(i64, i64)> = folders
-            .values()
-            .filter(|folder| folder.collection_id == id && folder.parent_id.is_none())
-            .map(|folder| (folder.position, folder.id))
-            .collect();
-        root_folder_ids.sort_by_key(|(folder_position, folder_id)| (*folder_position, *folder_id));
-        let collection_folders = root_folder_ids
+        let collection_folders = children
+            .remove(&(id, None))
+            .unwrap_or_default()
             .into_iter()
-            .map(|(_, folder_id)| build_folder(folder_id, &folders, &mut requests))
+            .map(|folder| build_folder(folder, &mut children, &mut requests))
             .collect::<Result<Vec<_>>>()?;
 
         let mut collection_requests = requests.remove(&(id, None)).unwrap_or_default();
@@ -1840,6 +1844,68 @@ mod tests {
         assert_eq!(saved.request, request);
         assert_eq!(saved.params_state, params);
         assert_eq!(saved.headers_state, headers);
+    }
+
+    /// Names of a folder level, recursively, as `name[child, child[...]]`.
+    fn folder_shape(folders: &[CollectionFolder]) -> Vec<String> {
+        folders
+            .iter()
+            .map(|folder| {
+                let children = folder_shape(&folder.folders);
+                let requests = folder.requests.iter().map(|r| format!("~{}", r.name));
+                let inner: Vec<String> = children.into_iter().chain(requests).collect();
+                if inner.is_empty() {
+                    folder.name.clone()
+                } else {
+                    format!("{}[{}]", folder.name, inner.join(", "))
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collection_tree_keeps_nesting_and_order_across_collections() {
+        let db = mem_db();
+        let (request, params, headers) = saved_request_fixture("R", "https://api.test/r");
+        let first = db.create_collection("First").unwrap();
+        let second = db.create_collection("Second").unwrap();
+        let a = db.create_folder(first, None, "A").unwrap();
+        let b = db.create_folder(first, None, "B").unwrap();
+        let a1 = db.create_folder(first, Some(a), "A1").unwrap();
+        let a2 = db.create_folder(first, Some(a), "A2").unwrap();
+        db.create_folder(first, Some(a1), "A1x").unwrap();
+        db.create_folder(first, Some(b), "B1").unwrap();
+        let s = db.create_folder(second, None, "S").unwrap();
+        db.create_folder(second, Some(s), "S1").unwrap();
+        for (folder, name) in [(Some(a1), "in A1"), (Some(a2), "in A2"), (Some(s), "in S")] {
+            let collection = if folder == Some(s) { second } else { first };
+            db.insert_saved_request(collection, folder, name, &request, &params, &headers)
+                .unwrap();
+        }
+        // Equal positions everywhere: siblings fall back to id order.
+        db.execute_batch_for_test("UPDATE collection_folders SET position = 0");
+        // Reversed positions at one level: position wins over id.
+        db.execute_batch_for_test(
+            "UPDATE collection_folders SET position = 1 WHERE name = 'A1';
+             UPDATE collection_folders SET position = 0 WHERE name = 'A2';",
+        );
+
+        let collections = db.load_collections().unwrap();
+        assert_eq!(collections.len(), 2);
+        assert_eq!(
+            folder_shape(&collections[0].folders),
+            vec!["A[A2[~in A2], A1[A1x, ~in A1]]", "B[B1]"]
+        );
+        assert_eq!(folder_shape(&collections[1].folders), vec!["S[S1, ~in S]"]);
+        for collection in &collections {
+            for folder in &collection.folders {
+                assert_eq!(folder.collection_id, collection.id);
+                assert_eq!(folder.parent_id, None);
+                for child in &folder.folders {
+                    assert_eq!(child.parent_id, Some(folder.id));
+                }
+            }
+        }
     }
 
     #[test]
