@@ -17,6 +17,10 @@ use crate::types::{ResponseData, ResponseSection};
 
 const BODY_CACHE_ENTRIES: usize = 6;
 const BODY_CACHE_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
+/// Background body prepares allowed at once. Each holds the decoded text, the
+/// JSON tree and the pretty-printed copy at its peak, so switching quickly
+/// through tabs of large responses must not start one per tab.
+const MAX_BODY_PREPARES: usize = 2;
 
 #[derive(Clone)]
 struct PreparedBody {
@@ -174,6 +178,15 @@ pub struct ResponseViewer {
     /// the byte budget remains as the sole entry so revisiting it does not
     /// repeat decode/parse/pretty work.
     body_cache: VecDeque<CachedBody>,
+    /// Responses whose body is being prepared, by identity. A started prepare
+    /// cannot be stopped (JSON parsing has no cancellation point), so showing
+    /// the same response again waits for it instead of starting a duplicate,
+    /// and a result nobody is looking at still fills the cache.
+    body_prepares: Vec<Arc<ResponseData>>,
+    /// The visible response, if it found every prepare slot busy. Only the
+    /// visible response waits: a response that is no longer shown is dropped
+    /// before its prepare starts.
+    body_prepare_waiting: Option<Arc<ResponseData>>,
     section: ResponseSection,
     /// One handle per entry of `RESPONSE_SECTIONS`, so the pills are keyboard
     /// controls.
@@ -212,6 +225,8 @@ impl ResponseViewer {
             body_loading: false,
             body_generation: 0,
             body_cache: VecDeque::new(),
+            body_prepares: Vec::new(),
+            body_prepare_waiting: None,
             section: ResponseSection::default(),
             section_focus: std::array::from_fn(|_| cx.focus_handle()),
             headers_scroll_handle: ScrollHandle::new(),
@@ -241,6 +256,7 @@ impl ResponseViewer {
         self.body_generation = self.body_generation.wrapping_add(1);
         self.body_loading = false;
         self.body_ready = false;
+        self.body_prepare_waiting = None;
         self.response = Some(response.clone());
         // A new response always opens on Body; only `restore_state` overrides it.
         self.section = ResponseSection::Body;
@@ -261,7 +277,7 @@ impl ResponseViewer {
                 #[cfg(feature = "profile")]
                 profiling::scope!("response body cache miss");
                 self.body_loading = true;
-                self.start_body_prepare(response, window, cx);
+                self.request_body_prepare(response, window, cx);
             }
         }
         cx.notify();
@@ -322,24 +338,55 @@ impl ResponseViewer {
         .detach();
     }
 
-    fn start_body_prepare(
+    /// Prepare the visible response's body: join a prepare already running
+    /// for it, start one if a slot is free, or wait for the next free slot.
+    fn request_body_prepare(
         &mut self,
         response: Arc<ResponseData>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let generation = self.body_generation;
+        if self
+            .body_prepares
+            .iter()
+            .any(|running| Arc::ptr_eq(running, &response))
+        {
+            return;
+        }
+        if self.body_prepares.len() >= MAX_BODY_PREPARES {
+            self.body_prepare_waiting = Some(response);
+            return;
+        }
+        self.body_prepares.push(response.clone());
         let response_for_task = response.clone();
         let task =
             cx.background_spawn(async move { prepare_response_body(&response_for_task.body) });
         cx.spawn_in(window, async move |this, cx| {
             let prepared = task.await;
             this.update_in(cx, |this, window, cx| {
-                this.apply_prepared_body(response, generation, prepared, window, cx)
+                this.finish_body_prepare(response, prepared, window, cx)
             })?;
             Ok::<_, anyhow::Error>(())
         })
         .detach();
+    }
+
+    fn finish_body_prepare(
+        &mut self,
+        response: Arc<ResponseData>,
+        prepared: PreparedBody,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.body_prepares
+            .retain(|running| !Arc::ptr_eq(running, &response));
+        // Whatever was shown since the prepare started, the result applies if
+        // its response is the one on screen now.
+        let generation = self.body_generation;
+        self.apply_prepared_body(response, generation, prepared, window, cx);
+        if let Some(waiting) = self.body_prepare_waiting.take() {
+            self.request_body_prepare(waiting, window, cx);
+        }
     }
 
     fn apply_prepared_body(
@@ -358,6 +405,7 @@ impl ResponseViewer {
         });
 
         let is_current = self.body_generation == generation
+            && !self.body_ready
             && self
                 .response
                 .as_ref()
@@ -421,6 +469,7 @@ impl ResponseViewer {
     pub fn clear_response(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.canceled = false;
         self.body_generation = self.body_generation.wrapping_add(1);
+        self.body_prepare_waiting = None;
         self.response = None;
         self.preview_image = None;
         self.body_ready = false;
@@ -874,6 +923,9 @@ impl Render for ResponseViewer {
             })
     }
 }
+
+#[cfg(test)]
+mod prepare_tests;
 
 #[cfg(test)]
 mod tests {

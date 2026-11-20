@@ -25,7 +25,7 @@ fn invalid_url_is_reported_in_the_response_and_logged(cx: &mut gpui::TestAppCont
             })
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
 
     cx.update(|_, cx| {
         let app = app.read(cx);
@@ -44,7 +44,7 @@ fn invalid_url_is_reported_in_the_response_and_logged(cx: &mut gpui::TestAppCont
             Some(None)
         );
     });
-    let history = db.load_recent_history(10).unwrap();
+    let history = db.load_recent_history(10).wait().unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].url, "http://");
 }

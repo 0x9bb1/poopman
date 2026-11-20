@@ -374,7 +374,7 @@ impl EnvironmentManager {
         let selection_generation = self.selection_generation;
         let task = self
             .persistence
-            .submit(None, |db| db.create_environment("New Environment"));
+            .submit(None, |db| db.create_environment("New Environment").wait());
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
                 Ok(id) => {
@@ -417,7 +417,7 @@ impl EnvironmentManager {
         let selection_generation = self.selection_generation;
         let task = self
             .persistence
-            .submit(None, move |db| db.delete_environment(id));
+            .submit(None, move |db| db.delete_environment(id).wait());
         cx.spawn_in(window, async move |this, cx| {
             match task.await {
                 Ok(()) => {
@@ -470,7 +470,7 @@ impl EnvironmentManager {
 
         let task = self
             .persistence
-            .submit(None, move |db| db.set_active_environment_id(id));
+            .submit(None, move |db| db.set_active_environment_id(id).wait());
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = task.await {
                 cx.update(|window, cx| {
@@ -481,7 +481,7 @@ impl EnvironmentManager {
                 let recovery = this.update(cx, |this, _| {
                     (this.active.generation == generation).then(|| {
                         this.persistence
-                            .submit(None, |db| db.get_active_environment_id())
+                            .submit(None, |db| db.get_active_environment_id().wait())
                     })
                 })?;
                 let Some(recovery) = recovery else {
@@ -558,6 +558,7 @@ impl EnvironmentManager {
 
         let task = self.persistence.submit(Some(id), move |db| {
             db.save_environment_if_current(id, &persisted_name, &vars, save_epoch, generation)
+                .wait()
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;

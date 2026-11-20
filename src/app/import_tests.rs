@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[gpui::test]
 fn imported_environment_is_selectable_without_reloading_pending_edits(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
-    let existing_id = db.create_environment("Existing").unwrap();
+    let existing_id = db.create_environment("Existing").wait().unwrap();
     db.replace_variables(
         existing_id,
         &[EnvVar {
@@ -19,9 +19,12 @@ fn imported_environment_is_selectable_without_reloading_pending_edits(cx: &mut T
             value: "disk-value".into(),
         }],
     )
+    .wait()
     .unwrap();
-    db.set_active_environment_id(Some(existing_id)).unwrap();
-    let mut environments = db.load_environments().unwrap();
+    db.set_active_environment_id(Some(existing_id))
+        .wait()
+        .unwrap();
+    let mut environments = db.load_environments().wait().unwrap();
     environments[0].variables[0].value = "pending-edit".into();
     let imported = crate::postman::import_collection(include_str!(
         "../../tests/fixtures/import/postman-variables.json"
@@ -29,6 +32,7 @@ fn imported_environment_is_selectable_without_reloading_pending_edits(cx: &mut T
     .unwrap();
     let (_, environment) = db
         .insert_collection_import(&imported.collection, "Scoped API", &imported.variables)
+        .wait()
         .unwrap();
     let environment = environment.unwrap();
     let initial = AppInitialState {
@@ -40,7 +44,8 @@ fn imported_environment_is_selectable_without_reloading_pending_edits(cx: &mut T
         history: Vec::new(),
         settings: AppSettings::default(),
     };
-    std::thread::spawn(move || db.register_ui_thread())
+    let other_thread_db = db.clone();
+    std::thread::spawn(move || other_thread_db.register_ui_thread())
         .join()
         .unwrap();
     cx.update(gpui_component::init);
@@ -61,7 +66,7 @@ fn imported_environment_is_selectable_without_reloading_pending_edits(cx: &mut T
                 })
             });
         });
-        cx.run_until_parked();
+        crate::test_support::settle(cx, &db);
     }
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
@@ -74,7 +79,7 @@ fn imported_environment_is_selectable_without_reloading_pending_edits(cx: &mut T
             app.set_active_environment(Some(environment.id), window, cx);
         });
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|_, cx| {
         let app = app.read(cx);
         assert_eq!(app.active_environment_id, Some(environment.id));

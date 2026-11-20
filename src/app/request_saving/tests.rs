@@ -28,9 +28,10 @@ fn save_and_close_keeps_edits_made_while_the_snapshot_is_saving(cx: &mut TestApp
             });
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     assert_eq!(
         db.load_saved_request(saved.id)
+            .wait()
             .unwrap()
             .unwrap()
             .request
@@ -64,11 +65,12 @@ fn saving_and_closing_an_inactive_tab_preserves_the_active_editor(cx: &mut TestA
             app.close_tab(0, window, cx);
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     assert_eq!(
         db.load_saved_request(saved.id)
+            .wait()
             .unwrap()
             .unwrap()
             .request
@@ -117,8 +119,11 @@ fn failed_save_as_keeps_the_original_identity_and_baseline(cx: &mut TestAppConte
             expected
         })
     });
-    cx.run_until_parked();
-    assert_eq!(db.load_saved_request(saved.id).unwrap().unwrap(), saved);
+    crate::test_support::settle(cx, &db);
+    assert_eq!(
+        db.load_saved_request(saved.id).wait().unwrap().unwrap(),
+        saved
+    );
     cx.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
         let app = app.read(cx);

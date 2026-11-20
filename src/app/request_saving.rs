@@ -81,8 +81,7 @@ impl PoopmanApp {
             return;
         }
         self.saving_tabs.insert(tab_id);
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move { db.create_collection("My Collection") });
+        let task = self.db.create_collection("My Collection");
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
@@ -232,20 +231,17 @@ impl PoopmanApp {
         if !self.saving_tabs.insert(save.tab_id) {
             return;
         }
-        let db = self.db.clone();
-        let saved_id = save.saved_id;
-        let task = cx.background_spawn(async move {
-            db.save_request_draft(
-                saved_id,
-                collection_id,
-                snapshot.folder_id,
-                &name,
-                &snapshot.request,
-                &snapshot.params_state,
-                &snapshot.headers_state,
-                Some(&snapshot.body_draft),
-            )
-        });
+        // Queued now, so the save lands before any collection edit made after it.
+        let task = self.db.save_request_draft(
+            save.saved_id,
+            collection_id,
+            snapshot.folder_id,
+            &name,
+            &snapshot.request,
+            &snapshot.params_state,
+            &snapshot.headers_state,
+            Some(&snapshot.body_draft),
+        );
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
