@@ -25,6 +25,21 @@ use crate::types::{
 /// A unit of work executed on the database's owning thread.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 
+/// History older than this is deleted whenever a new entry is recorded.
+pub(crate) const HISTORY_RETENTION_DAYS: i64 = 90;
+
+/// Delete history recorded before `now` minus the retention window; returns
+/// how many rows went.
+///
+/// Every history timestamp is written by `Utc::now().to_rfc3339()`, so the
+/// strings sort in time order, with or without fractional seconds (`+` sorts
+/// before `.` and digits). The list's `ORDER BY timestamp` relies on the same
+/// property, and a string comparison keeps `idx_timestamp` usable.
+fn prune_history(conn: &Connection, now: chrono::DateTime<chrono::Utc>) -> Result<usize> {
+    let cutoff = (now - chrono::Duration::days(HISTORY_RETENTION_DAYS)).to_rfc3339();
+    Ok(conn.execute("DELETE FROM history WHERE timestamp < ?1", params![cutoff])?)
+}
+
 /// Map a `history` row (id, timestamp, method, url, request_headers,
 /// request_body, request_auth) into a `HistoryItem`. Shared by
 /// `load_recent_history` and `search_history` so the two queries can never
@@ -591,13 +606,20 @@ impl Database {
         let auth_json = serde_json::to_string(&auth.active_only()).unwrap_or_default();
 
         self.call(move |conn| {
-            let timestamp = chrono::Utc::now().to_rfc3339();
+            let now = chrono::Utc::now();
             conn.execute(
                 "INSERT INTO history (timestamp, method, url, request_headers, request_body, request_auth)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![timestamp, method, url, request_headers, body_json, auth_json],
+                params![now.to_rfc3339(), method, url, request_headers, body_json, auth_json],
             )?;
-            Ok(conn.last_insert_rowid())
+            let id = conn.last_insert_rowid();
+            // Pruning with every insert keeps a session left open for days
+            // within the window too. The entry is recorded either way; a
+            // failed prune is retried by the next insert.
+            if let Err(error) = prune_history(conn, now) {
+                log::warn!("Could not delete expired history: {error}");
+            }
+            Ok(id)
         })
     }
 
@@ -1648,6 +1670,83 @@ mod tests {
         assert_eq!(items[0].request.url, "https://api.test/x");
         db.clear_all_history().unwrap();
         assert!(db.load_recent_history(10).unwrap().is_empty());
+    }
+
+    fn insert_history_at(db: &Database, timestamp: &str, url: &str) {
+        let (timestamp, url) = (timestamp.to_string(), url.to_string());
+        db.call(move |conn| {
+            conn.execute(
+                "INSERT INTO history (timestamp, method, url, request_headers, request_body)
+                 VALUES (?1, 'GET', ?2, '[]', 'null')",
+                params![timestamp, url],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn history_urls(db: &Database) -> Vec<String> {
+        db.load_recent_history(100)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.request.url)
+            .collect()
+    }
+
+    #[test]
+    fn recording_history_deletes_entries_past_the_retention_window() {
+        let db = mem_db();
+        let now = chrono::Utc::now();
+        let days_ago = |days| (now - chrono::Duration::days(days)).to_rfc3339();
+        insert_history_at(
+            &db,
+            &days_ago(HISTORY_RETENTION_DAYS + 1),
+            "https://expired",
+        );
+        insert_history_at(&db, &days_ago(HISTORY_RETENTION_DAYS - 1), "https://recent");
+        assert_eq!(
+            history_urls(&db).len(),
+            2,
+            "nothing is pruned until an insert"
+        );
+
+        db.insert_history(
+            "GET",
+            "https://new",
+            "[]",
+            &BodyType::None,
+            &AuthConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(history_urls(&db), vec!["https://new", "https://recent"]);
+    }
+
+    #[test]
+    fn retention_cutoff_keeps_the_boundary_and_compares_any_fraction() {
+        let db = mem_db();
+        let now: chrono::DateTime<chrono::Utc> = "2026-11-20T12:00:00.500Z".parse().unwrap();
+        // 90 days earlier: 2026-08-22T12:00:00.500+00:00.
+        for (timestamp, url) in [
+            ("2026-08-22T12:00:00.500+00:00", "exactly at the cutoff"),
+            ("2026-08-22T12:00:00.7+00:00", "later in the same second"),
+            (
+                "2026-08-22T12:00:00+00:00",
+                "no fraction, half a second older",
+            ),
+            ("2026-08-22T12:00:00.499999999+00:00", "a nanosecond older"),
+            ("2026-08-21T23:59:59+00:00", "the day before"),
+        ] {
+            insert_history_at(&db, timestamp, url);
+        }
+
+        let deleted = db.call(move |conn| prune_history(conn, now)).unwrap();
+
+        assert_eq!(deleted, 3);
+        assert_eq!(
+            history_urls(&db),
+            vec!["later in the same second", "exactly at the cutoff"]
+        );
     }
 
     #[test]
