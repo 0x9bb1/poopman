@@ -41,35 +41,50 @@ use rust_embed::RustEmbed;
 use std::borrow::Cow;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::Arc;
 
 use crate::app::PoopmanApp;
 
-struct EnvironmentShutdown {
+struct Shutdown {
     persistence: environment_persistence::EnvironmentPersistence,
+    db: Arc<db::Database>,
     requested: bool,
 }
 
-impl Global for EnvironmentShutdown {}
+impl Global for Shutdown {}
+
+/// Flush debounced environment snapshots, then wait for every job already
+/// queued on the database thread (those snapshots included).
+fn drain_writes(
+    persistence: &environment_persistence::EnvironmentPersistence,
+    db: Arc<db::Database>,
+) -> impl Future<Output = Result<()>> + use<> {
+    let environments = persistence.shutdown();
+    async move {
+        let environments = environments.await;
+        db.flush().await.and(environments)
+    }
+}
 
 /// Quit actions and native close buttons share this barrier. GPUI's final quit
 /// hook only allows 100 ms, so drain writes here while the event loop is alive.
 fn request_quit(cx: &mut App) {
-    if !cx.has_global::<EnvironmentShutdown>() {
+    if !cx.has_global::<Shutdown>() {
         cx.quit();
         return;
     }
-    let state = cx.global_mut::<EnvironmentShutdown>();
+    let state = cx.global_mut::<Shutdown>();
     if state.requested {
         return;
     }
     state.requested = true;
-    let flush = state.persistence.shutdown();
+    let drain = drain_writes(&state.persistence, state.db.clone());
     let timeout = cx
         .background_executor()
         .timer(std::time::Duration::from_secs(2));
     cx.spawn(async move |cx| {
-        if let Err(error) = environment_persistence::finish_shutdown(flush, timeout).await {
-            log::error!("Could not save environments before quitting (2 second limit): {error}");
+        if let Err(error) = environment_persistence::finish_shutdown(drain, timeout).await {
+            log::error!("Could not finish saving before quitting (2 second limit): {error}");
         }
         let _ = cx.update(|cx| cx.quit());
     })
@@ -177,7 +192,7 @@ fn main() {
             items: vec![MenuItem::action("Quit Poopman", crate::app::Quit)],
         }]);
 
-        let initial = cx.background_spawn(async { crate::app::AppInitialState::load() });
+        let initial = cx.background_spawn(crate::app::AppInitialState::load());
         cx.spawn(async move |cx| {
             let initial = match initial.await {
                 Ok(initial) => initial,
@@ -187,18 +202,20 @@ fn main() {
                 }
             };
             let persistence = initial.environment_persistence.clone();
+            let db = initial.db.clone();
             cx.update(|cx| {
-                cx.set_global(EnvironmentShutdown {
+                cx.set_global(Shutdown {
                     persistence: persistence.clone(),
+                    db: db.clone(),
                     requested: false,
                 });
                 // Also protect platform-driven termination that bypasses the
                 // action/close handlers. This future needs no live UI entities.
                 cx.on_app_quit(move |_| {
-                    let flush = persistence.shutdown();
+                    let drain = drain_writes(&persistence, db.clone());
                     async move {
-                        if let Err(error) = flush.await {
-                            log::error!("Environment shutdown flush failed: {error}");
+                        if let Err(error) = drain.await {
+                            log::error!("Shutdown flush failed: {error}");
                         }
                     }
                 })

@@ -14,7 +14,7 @@ pub(super) fn setup(
     db: Arc<Database>,
 ) -> (Entity<PoopmanApp>, &mut VisualTestContext) {
     let initial = AppInitialState {
-        collections: db.load_collections().unwrap(),
+        collections: db.load_collections().wait().unwrap(),
         environment_persistence: EnvironmentPersistence::new(db.clone()),
         db: db.clone(),
         environments: Vec::new(),
@@ -40,8 +40,11 @@ pub(super) fn setup(
 }
 
 pub(super) fn saved_fixture(db: &Database) -> SavedRequest {
-    let collection_id = db.create_collection("API").unwrap();
-    let folder_id = db.create_folder(collection_id, None, "Folder").unwrap();
+    let collection_id = db.create_collection("API").wait().unwrap();
+    let folder_id = db
+        .create_folder(collection_id, None, "Folder")
+        .wait()
+        .unwrap();
     let request = RequestData::new(HttpMethod::GET, "https://example.test/original".into());
     let id = db
         .insert_saved_request(
@@ -52,8 +55,9 @@ pub(super) fn saved_fixture(db: &Database) -> SavedRequest {
             &[],
             &[],
         )
+        .wait()
         .unwrap();
-    db.load_saved_request(id).unwrap().unwrap()
+    db.load_saved_request(id).wait().unwrap().unwrap()
 }
 
 pub(super) fn edited_request() -> RequestData {
@@ -97,7 +101,7 @@ fn shortcut_updates_original_record_from_url_and_body_inputs(cx: &mut TestAppCon
         });
         // Finish URL loading before editing disabled rows or changing focus,
         // as a user does when opening a request and then editing its fields.
-        cx.run_until_parked();
+        crate::test_support::settle(cx, &db);
         let expected = cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 app.request_editor.update(cx, |editor, cx| {
@@ -141,10 +145,10 @@ fn shortcut_updates_original_record_from_url_and_body_inputs(cx: &mut TestAppCon
                 })
             })
         });
-        cx.run_until_parked();
+        crate::test_support::settle(cx, &db);
         cx.simulate_keystrokes(SAVE_REQUEST_KEY);
-        cx.run_until_parked();
-        let updated = db.load_saved_request(saved.id).unwrap().unwrap();
+        crate::test_support::settle(cx, &db);
+        let updated = db.load_saved_request(saved.id).wait().unwrap().unwrap();
         assert_eq!(updated.name, saved.name);
         assert_eq!(updated.collection_id, saved.collection_id);
         assert_eq!(updated.folder_id, saved.folder_id);
@@ -153,7 +157,9 @@ fn shortcut_updates_original_record_from_url_and_body_inputs(cx: &mut TestAppCon
         assert_eq!(updated.params_state, expected.1);
         assert_eq!(updated.headers_state, expected.2);
         assert_eq!(
-            db.load_collections().unwrap()[0].folders[0].requests.len(),
+            db.load_collections().wait().unwrap()[0].folders[0]
+                .requests
+                .len(),
             1
         );
         cx.update(|window, cx| {
@@ -176,11 +182,11 @@ fn unsaved_shortcut_uses_existing_dialog_once_and_inserts(cx: &mut TestAppContex
             });
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes(SAVE_REQUEST_KEY);
-    cx.run_until_parked();
-    assert_eq!(db.load_collections().unwrap().len(), 1);
-    assert!(db.load_collections().unwrap()[0].requests.is_empty());
+    crate::test_support::settle(cx, &db);
+    assert_eq!(db.load_collections().wait().unwrap().len(), 1);
+    assert!(db.load_collections().wait().unwrap()[0].requests.is_empty());
     cx.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
         app.update(cx, |app, cx| {
@@ -194,10 +200,10 @@ fn unsaved_shortcut_uses_existing_dialog_once_and_inserts(cx: &mut TestAppContex
         );
     });
     cx.update(|window, cx| app.update(cx, |app, cx| app.save_request(window, cx)));
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    let collections = db.load_collections().unwrap();
+    crate::test_support::settle(cx, &db);
+    let collections = db.load_collections().wait().unwrap();
     assert_eq!(collections.len(), 1);
     assert_eq!(collections[0].requests.len(), 1);
     let inserted = &collections[0].requests[0];
@@ -227,9 +233,9 @@ fn failed_update_preserves_edits_and_reports_error(cx: &mut TestAppContext) {
             })
         })
     });
-    db.delete_saved_request(saved.id).unwrap();
+    db.delete_saved_request(saved.id).wait().unwrap();
     cx.update(|window, cx| app.update(cx, |app, cx| app.save_request(window, cx)));
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
         let app = app.read(cx);
@@ -241,7 +247,7 @@ fn failed_update_preserves_edits_and_reports_error(cx: &mut TestAppContext) {
             expected
         );
     });
-    assert!(db.load_saved_request(saved.id).unwrap().is_none());
+    assert!(db.load_saved_request(saved.id).wait().unwrap().is_none());
 }
 
 #[gpui::test]
@@ -271,9 +277,13 @@ fn pending_save_keeps_its_snapshot_and_originating_tab(cx: &mut TestAppContext) 
             snapshot
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     assert_eq!(
-        db.load_saved_request(saved.id).unwrap().unwrap().request,
+        db.load_saved_request(saved.id)
+            .wait()
+            .unwrap()
+            .unwrap()
+            .request,
         expected
     );
     cx.update(|window, cx| {

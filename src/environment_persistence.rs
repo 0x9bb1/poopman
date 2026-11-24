@@ -177,6 +177,7 @@ mod tests {
                 Arc::new(AtomicU64::new(1)),
                 1,
             )
+            .wait()
         })
     }
 
@@ -188,8 +189,8 @@ mod tests {
     #[test]
     fn shutdown_flushes_latest_snapshots_for_multiple_environments_before_debounce() {
         let db = Arc::new(Database::new_in_memory());
-        let a = db.create_environment("A").unwrap();
-        let b = db.create_environment("B").unwrap();
+        let a = db.create_environment("A").wait().unwrap();
+        let b = db.create_environment("B").wait().unwrap();
         let persistence = queue(db.clone());
         let stale = edit(&persistence, a, "old");
         let b_save = edit(&persistence, b, "B value");
@@ -198,7 +199,7 @@ mod tests {
         assert!(wait(stale).is_err());
         wait(a_save).unwrap();
         wait(b_save).unwrap();
-        let environments = db.load_environments().unwrap();
+        let environments = db.load_environments().wait().unwrap();
         assert_eq!(environments[0].variables[0].value, "latest");
         assert_eq!(environments[1].variables[0].value, "B value");
     }
@@ -206,8 +207,8 @@ mod tests {
     #[test]
     fn rapid_switches_are_enqueued_before_completion_futures_are_polled() {
         let db = Arc::new(Database::new_in_memory());
-        let a = db.create_environment("A").unwrap();
-        let b = db.create_environment("B").unwrap();
+        let a = db.create_environment("A").wait().unwrap();
+        let b = db.create_environment("B").wait().unwrap();
         let persistence = queue(db.clone());
         let (release, gate) = mpsc::channel();
         let blocked = persistence.submit(None, move |_| {
@@ -217,43 +218,46 @@ mod tests {
         // The worker is stalled while all UI operations are accepted. Dropping
         // their completion futures must neither cancel nor reorder the writes.
         for id in [Some(a), Some(b), None, Some(a), Some(b)] {
-            drop(persistence.submit(None, move |db| db.set_active_environment_id(id)));
+            drop(persistence.submit(None, move |db| db.set_active_environment_id(id).wait()));
         }
         let shutdown = persistence.shutdown();
         release.send(()).unwrap();
         wait(shutdown).unwrap();
         wait(blocked).unwrap();
-        assert_eq!(db.get_active_environment_id().unwrap(), Some(b));
+        assert_eq!(db.get_active_environment_id().wait().unwrap(), Some(b));
     }
 
     #[test]
     fn edits_are_flushed_before_create_delete_and_active_changes() {
         let db = Arc::new(Database::new_in_memory());
-        let a = db.create_environment("A").unwrap();
-        db.set_active_environment_id(Some(a)).unwrap();
+        let a = db.create_environment("A").wait().unwrap();
+        db.set_active_environment_id(Some(a)).wait().unwrap();
         let persistence = queue(db.clone());
         drop(edit(&persistence, a, "pending"));
         let create = persistence.submit(None, move |db| {
-            assert_eq!(db.load_environments()?[0].variables[0].value, "pending");
-            db.create_environment("B")
+            assert_eq!(
+                db.load_environments().wait()?[0].variables[0].value,
+                "pending"
+            );
+            db.create_environment("B").wait()
         });
         let b = wait(create).unwrap();
-        drop(persistence.submit(None, move |db| db.set_active_environment_id(Some(b))));
-        drop(persistence.submit(None, move |db| db.delete_environment(a)));
+        drop(persistence.submit(None, move |db| db.set_active_environment_id(Some(b)).wait()));
+        drop(persistence.submit(None, move |db| db.delete_environment(a).wait()));
         wait(persistence.shutdown()).unwrap();
-        assert_eq!(db.get_active_environment_id().unwrap(), Some(b));
-        assert_eq!(db.load_environments().unwrap().len(), 1);
+        assert_eq!(db.get_active_environment_id().wait().unwrap(), Some(b));
+        assert_eq!(db.load_environments().wait().unwrap().len(), 1);
     }
 
     #[test]
     fn deleting_the_persisted_active_environment_clears_it() {
         let db = Arc::new(Database::new_in_memory());
-        let a = db.create_environment("A").unwrap();
+        let a = db.create_environment("A").wait().unwrap();
         let persistence = queue(db.clone());
-        drop(persistence.submit(None, move |db| db.set_active_environment_id(Some(a))));
-        drop(persistence.submit(None, move |db| db.delete_environment(a)));
+        drop(persistence.submit(None, move |db| db.set_active_environment_id(Some(a)).wait()));
+        drop(persistence.submit(None, move |db| db.delete_environment(a).wait()));
         wait(persistence.shutdown()).unwrap();
-        assert_eq!(db.get_active_environment_id().unwrap(), None);
+        assert_eq!(db.get_active_environment_id().wait().unwrap(), None);
     }
 
     #[test]
@@ -261,12 +265,14 @@ mod tests {
         let db = Arc::new(Database::new_in_memory());
         let persistence = queue(db.clone());
         drop(persistence.submit::<(), _>(None, |_| Err(anyhow!("simulated disk failure"))));
-        drop(persistence.submit(None, |db| db.create_environment("Still processed")));
+        drop(persistence.submit(None, |db| db.create_environment("Still processed").wait()));
         let error = wait(persistence.shutdown()).unwrap_err();
         assert!(error.to_string().contains("simulated disk failure"));
-        assert_eq!(db.load_environments().unwrap().len(), 1);
-        assert!(wait(persistence.submit(None, |db| db.create_environment("Too late"))).is_err());
-        assert_eq!(db.load_environments().unwrap().len(), 1);
+        assert_eq!(db.load_environments().wait().unwrap().len(), 1);
+        assert!(
+            wait(persistence.submit(None, |db| db.create_environment("Too late").wait())).is_err()
+        );
+        assert_eq!(db.load_environments().wait().unwrap().len(), 1);
     }
 
     #[test]
@@ -281,11 +287,11 @@ mod tests {
     #[test]
     fn expired_debounce_saves_without_shutdown() {
         let db = Arc::new(Database::new_in_memory());
-        let id = db.create_environment("A").unwrap();
+        let id = db.create_environment("A").wait().unwrap();
         let persistence = EnvironmentPersistence::with_debounce(db.clone(), Duration::ZERO);
         wait(edit(&persistence, id, "saved")).unwrap();
         assert_eq!(
-            db.load_environments().unwrap()[0].variables[0].value,
+            db.load_environments().wait().unwrap()[0].variables[0].value,
             "saved"
         );
     }
@@ -303,13 +309,13 @@ mod tests {
             NEXT_FILE.fetch_add(1, Ordering::Relaxed)
         ));
         let db = Arc::new(Database::open_test_file(&path));
-        let id = db.create_environment("A").unwrap();
+        let id = db.create_environment("A").wait().unwrap();
         let persistence = queue(db.clone());
         drop(edit(&persistence, id, "survives relaunch"));
         wait(persistence.shutdown()).unwrap();
         let reopened = Database::open_test_file(&path);
         assert_eq!(
-            reopened.load_environments().unwrap()[0].variables[0].value,
+            reopened.load_environments().wait().unwrap()[0].variables[0].value,
             "survives relaunch"
         );
         drop(reopened);

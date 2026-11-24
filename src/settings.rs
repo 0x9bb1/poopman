@@ -197,8 +197,7 @@ impl SettingsPanel {
             if !is_current {
                 return Ok(());
             }
-            let save = cx.background_spawn(async move { db.save_app_settings(&settings) });
-            let result = save.await;
+            let result = db.save_app_settings(&settings).await;
             this.update(cx, |this, cx| {
                 if this.save_generation != generation {
                     return;

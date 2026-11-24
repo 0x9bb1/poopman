@@ -115,23 +115,29 @@ enum SidebarView {
 /// is performed on GPUI's background executor, so even schema migration cannot
 /// stall an already-running UI event loop.
 pub(crate) struct AppInitialState {
-    db: Arc<Database>,
+    pub(crate) db: Arc<Database>,
     pub(crate) environment_persistence: crate::environment_persistence::EnvironmentPersistence,
     environments: Vec<crate::types::Environment>,
     active_environment_id: Option<i64>,
-    history: Vec<crate::types::HistoryItem>,
+    history: Vec<crate::types::HistorySummary>,
     collections: Vec<crate::types::Collection>,
     settings: crate::types::AppSettings,
 }
 
 impl AppInitialState {
-    pub(crate) fn load() -> anyhow::Result<Self> {
+    pub(crate) async fn load() -> anyhow::Result<Self> {
         let db = Arc::new(Database::new()?);
-        let environments = db.load_environments()?;
-        let active_environment_id = db.get_active_environment_id()?;
-        let history = db.load_recent_history(crate::history_panel::HISTORY_LIMIT)?;
-        let collections = db.load_collections()?;
-        let settings = db.load_app_settings()?;
+        // Queue every read up front; the database thread runs them in order.
+        let environments = db.load_environments();
+        let active_environment_id = db.get_active_environment_id();
+        let history = db.load_recent_history(crate::history_panel::HISTORY_LIMIT);
+        let collections = db.load_collections();
+        let settings = db.load_app_settings();
+        let environments = environments.await?;
+        let active_environment_id = active_environment_id.await?;
+        let history = history.await?;
+        let collections = collections.await?;
+        let settings = settings.await?;
         Ok(Self {
             environment_persistence: crate::environment_persistence::EnvironmentPersistence::new(
                 db.clone(),
@@ -288,13 +294,14 @@ impl PoopmanApp {
                 this.update_tab_bar(cx);
 
                 // Postman behavior: every send is logged to History, including a
-                // re-send of a request opened from history. Database::call is
-                // synchronous by design, so run it only on GPUI's background
-                // executor and refresh the panel after the write has completed.
+                // re-send of a request opened from history. Serializing the
+                // request (its body can be large) happens on GPUI's background
+                // executor; the panel refreshes after the write has completed.
                 let db = db_clone.clone();
                 let request = event.history_request.clone();
                 let history_panel = history_panel_clone.clone();
-                let persist = cx.background_spawn(async move { Self::persist_send(&db, &request) });
+                let persist =
+                    cx.background_spawn(async move { Self::persist_send(&db, &request).await });
                 cx.spawn_in(window, async move |_this, cx| {
                     match persist.await {
                         Ok(_) => {
@@ -550,7 +557,7 @@ impl PoopmanApp {
     /// opened from history. (Previously gated on `!is_from_history`, which
     /// silently dropped edits — e.g. added auth — made to a restored request.)
     /// Only the request is stored; response bodies are not.
-    fn persist_send(db: &Database, request: &crate::types::RequestData) -> anyhow::Result<i64> {
+    fn persist_send(db: &Database, request: &crate::types::RequestData) -> crate::db::DbReply<i64> {
         let request_headers = serde_json::to_string(&request.headers).unwrap_or_default();
         db.insert_history(
             request.method.as_str(),
@@ -931,15 +938,12 @@ impl PoopmanApp {
         if saved_ids.is_empty() {
             return;
         }
-        let db = self.db.clone();
-        let task = cx.background_spawn(async move {
-            saved_ids
-                .into_iter()
-                .map(|id| db.load_saved_request(id).map(|saved| (id, saved)))
-                .collect::<anyhow::Result<Vec<_>>>()
-        });
+        let replies = saved_ids
+            .into_iter()
+            .map(|id| self.db.load_saved_request(id).map(move |saved| (id, saved)))
+            .collect::<Vec<_>>();
         cx.spawn_in(window, async move |this, cx| {
-            match task.await {
+            match futures::future::try_join_all(replies).await {
                 Ok(saved_rows) => {
                     this.update(cx, |this, cx| {
                         if this.collections_reconcile_generation != generation {
@@ -1279,7 +1283,7 @@ mod tests {
 
         // First send: a fresh request, no auth.
         let original = RequestData::new(HttpMethod::GET, "https://api.test/x".to_string());
-        PoopmanApp::persist_send(&db, &original).unwrap();
+        PoopmanApp::persist_send(&db, &original).wait().unwrap();
 
         // Same request re-opened from history, edited to add Bearer auth, re-sent.
         let mut edited = original.clone();
@@ -1288,9 +1292,15 @@ mod tests {
             bearer_token: "t0ken".into(),
             ..Default::default()
         };
-        PoopmanApp::persist_send(&db, &edited).unwrap();
+        PoopmanApp::persist_send(&db, &edited).wait().unwrap();
 
-        let items = db.load_recent_history(10).unwrap();
+        let items: Vec<_> = db
+            .load_recent_history(10)
+            .wait()
+            .unwrap()
+            .into_iter()
+            .map(|summary| db.load_history_item(summary.id).wait().unwrap().unwrap())
+            .collect();
         assert_eq!(items.len(), 2, "each send must append its own history row");
         // Newest first: the edited re-send carries the Bearer auth...
         assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);

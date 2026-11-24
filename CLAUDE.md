@@ -58,7 +58,9 @@ There is a **single** `RequestEditor` and a single `ResponseViewer` entity. Tabs
 
 ### Database: single owner thread, never block the UI
 
-`Database` (src/db.rs) owns the rusqlite `Connection` on a dedicated thread; callers send closures over a channel and block on a reply channel (`Database::call`). `register_ui_thread()` makes `call` **return an error if invoked on the GPUI thread** — all DB access from UI code must go through `cx.background_spawn(...)`. Startup loading happens in `AppInitialState::load()` before the window opens. Environment edits are persisted asynchronously in order via `EnvironmentPersistence` and flushed on shutdown (main.rs).
+`Database` (src/db.rs) owns the rusqlite `Connection` on a dedicated thread. Every method queues its job **when called** and returns a `DbReply<T>` future backed by a oneshot, so UI code calls it directly and awaits the reply inside `cx.spawn_in` — no background thread sits waiting. Jobs run in call order, and dropping a reply never cancels its job. `DbReply::wait()` blocks; it is for startup (`AppInitialState::load()`, before the window opens), the `EnvironmentPersistence` worker and tests, and `register_ui_thread()` makes it **return an error on the GPUI thread**. Use `cx.background_spawn` only when building a call's arguments is itself costly (the history insert serializes the request; collection import copies the tree). Quit flushes environment edits, then drains the queue with `Database::flush` (main.rs).
+
+In gpui tests, DB replies arrive from outside the test scheduler, so `run_until_parked` can return while a task still awaits one: use `test_support::settle(cx, &db)` wherever a test waits on the database.
 
 Schema is created in `init_schema` (shared by real and in-memory test DBs); column additions use idempotent `PRAGMA table_info` checks (see `migrate_add_request_auth`). DB path resolution and the one-time legacy `~/.poopman/history.db` migration live in src/data_directory.rs (behavior documented in README "Data Storage"). Auth secrets are intentionally kept out of history rows.
 

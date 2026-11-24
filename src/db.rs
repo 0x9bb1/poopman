@@ -3,27 +3,76 @@
 //! The SQLite `Connection` is **owned by a single background thread**. Callers
 //! never touch it directly and there is no `Mutex`; instead each operation is
 //! sent to that thread as a job over a channel, and the result comes back over a
-//! per-call reply channel. This is the "share memory by communicating" model —
-//! the connection has exactly one owner, so data races are impossible by
-//! construction and a panic inside one query can't poison a lock for the others.
+//! per-call oneshot that the caller awaits (`DbReply`). This is the "share
+//! memory by communicating" model — the connection has exactly one owner, so
+//! data races are impossible by construction and a panic inside one query can't
+//! poison a lock for the others.
 
 use anyhow::{Result, anyhow};
+use futures::{FutureExt as _, channel::oneshot, future::BoxFuture};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
     mpsc::{self, Sender},
 };
+use std::task::Poll;
 use std::thread;
 
 use crate::types::{
     AppSettings, AuthConfig, BodyDraft, BodyType, Collection, CollectionFolder, EnvVar,
-    Environment, HeaderState, HistoryItem, HttpMethod, ParamState, RequestData, SavedRequest,
+    Environment, HeaderState, HistoryItem, HistorySummary, HttpMethod, ParamState, RequestData,
+    SavedRequest,
 };
 
 /// A unit of work executed on the database's owning thread.
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
+
+/// The result of a job that is already queued on the database thread.
+///
+/// Every `Database` method queues its job before returning, so jobs run in
+/// call order no matter when, or whether, their replies are awaited. Dropping
+/// a reply never cancels its job: an accepted write still happens.
+///
+/// Await it from async code: waiting then occupies no thread. `wait` blocks
+/// the calling thread instead, for code that may block (startup loading, the
+/// environment persistence worker, tests); it is refused on the GPUI thread.
+#[must_use = "the job runs either way; await or wait to observe its result"]
+pub struct DbReply<T> {
+    result: BoxFuture<'static, Result<T>>,
+    ui_thread: Option<thread::ThreadId>,
+}
+
+impl<T: Send + 'static> DbReply<T> {
+    /// Transform the eventual value, like `Result::map`. The job is unaffected.
+    pub fn map<U: Send + 'static>(self, f: impl FnOnce(T) -> U + Send + 'static) -> DbReply<U> {
+        let result = self.result;
+        DbReply {
+            result: async move { result.await.map(f) }.boxed(),
+            ui_thread: self.ui_thread,
+        }
+    }
+
+    /// Block the current thread until the job has run.
+    pub fn wait(self) -> Result<T> {
+        if self.ui_thread == Some(thread::current().id()) {
+            return Err(anyhow!(
+                "blocking database operation attempted on the GPUI thread"
+            ));
+        }
+        futures::executor::block_on(self.result)
+    }
+}
+
+impl<T> Future for DbReply<T> {
+    type Output = Result<T>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Result<T>> {
+        self.result.as_mut().poll(cx)
+    }
+}
 
 /// History older than this is deleted whenever a new entry is recorded.
 pub(crate) const HISTORY_RETENTION_DAYS: i64 = 90;
@@ -40,18 +89,31 @@ fn prune_history(conn: &Connection, now: chrono::DateTime<chrono::Utc>) -> Resul
     Ok(conn.execute("DELETE FROM history WHERE timestamp < ?1", params![cutoff])?)
 }
 
-/// Map a `history` row (id, timestamp, method, url, request_headers,
-/// request_body, request_auth) into a `HistoryItem`. Shared by
+/// Columns read by the history list queries, in `row_to_history_summary` order.
+const HISTORY_SUMMARY_COLUMNS: &str = "id, timestamp, method, url";
+
+/// Map a `HISTORY_SUMMARY_COLUMNS` row into a `HistorySummary`. Shared by
 /// `load_recent_history` and `search_history` so the two queries can never
 /// drift in how they decode a row.
+fn row_to_history_summary(row: &rusqlite::Row) -> rusqlite::Result<HistorySummary> {
+    let method: String = row.get(2)?;
+    Ok(HistorySummary {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        method: HttpMethod::from_str(&method).unwrap_or(HttpMethod::GET),
+        url: row.get(3)?,
+    })
+}
+
+/// Map a full `history` row (id, method, url, request_headers, request_body,
+/// request_auth) into a `HistoryItem`.
 fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
     let id: i64 = row.get(0)?;
-    let timestamp: String = row.get(1)?;
-    let method: String = row.get(2)?;
-    let url: String = row.get(3)?;
-    let request_headers: String = row.get(4)?;
-    let request_body: String = row.get(5)?;
-    let request_auth: Option<String> = row.get(6)?;
+    let method: String = row.get(1)?;
+    let url: String = row.get(2)?;
+    let request_headers: String = row.get(3)?;
+    let request_body: String = row.get(4)?;
+    let request_auth: Option<String> = row.get(5)?;
 
     let mut headers: Vec<(String, String)> =
         serde_json::from_str(&request_headers).unwrap_or_default();
@@ -69,7 +131,7 @@ fn row_to_history_item(row: &rusqlite::Row) -> rusqlite::Result<HistoryItem> {
         body,
         auth,
     };
-    Ok(HistoryItem::new(id, timestamp, request, None))
+    Ok(HistoryItem::new(id, request, None))
 }
 
 /// Escape a user query so SQLite `LIKE` treats `%`, `_`, and `\` literally.
@@ -278,6 +340,82 @@ fn encode_saved_request(
     ))
 }
 
+/// Read the complete collection/folder/request tree in display order.
+fn query_collections(conn: &Connection) -> Result<Vec<Collection>> {
+    let collection_rows = conn
+        .prepare("SELECT id, name, position FROM collections ORDER BY position, id")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<(i64, String, i64)>>>()?;
+
+    let folder_rows = conn
+        .prepare(
+            "SELECT id, collection_id, parent_id, name, position
+             FROM collection_folders
+             ORDER BY collection_id, parent_id, position, id",
+        )?
+        .query_map([], |row| {
+            Ok(FolderRow {
+                id: row.get(0)?,
+                collection_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                name: row.get(3)?,
+                position: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let request_rows = conn
+        .prepare(
+            "SELECT id, collection_id, folder_id, name, request_json,
+                    params_json, headers_json, position, created_at, updated_at
+             FROM saved_requests
+             ORDER BY collection_id, folder_id, position, id",
+        )?
+        .query_map([], |row| {
+            Ok(SavedRequestRow {
+                id: row.get(0)?,
+                collection_id: row.get(1)?,
+                folder_id: row.get(2)?,
+                name: row.get(3)?,
+                request_json: row.get(4)?,
+                params_json: row.get(5)?,
+                headers_json: row.get(6)?,
+                position: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    build_collection_tree(collection_rows, folder_rows, request_rows)
+}
+
+fn query_saved_request(conn: &Connection, id: i64) -> Result<Option<SavedRequest>> {
+    let raw = conn
+        .query_row(
+            "SELECT id, collection_id, folder_id, name, request_json,
+                    params_json, headers_json, position, created_at, updated_at
+             FROM saved_requests WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(SavedRequestRow {
+                    id: row.get(0)?,
+                    collection_id: row.get(1)?,
+                    folder_id: row.get(2)?,
+                    name: row.get(3)?,
+                    request_json: row.get(4)?,
+                    params_json: row.get(5)?,
+                    headers_json: row.get(6)?,
+                    position: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()?;
+    raw.map(decode_saved_request).transpose()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_saved_request_tx(
     tx: &Transaction<'_>,
@@ -461,6 +599,7 @@ impl Database {
     #[cfg(test)]
     pub(crate) fn execute_batch_for_test(&self, sql: &'static str) {
         self.call(move |conn| Ok(conn.execute_batch(sql)?))
+            .wait()
             .expect("test SQL");
     }
 
@@ -471,35 +610,42 @@ impl Database {
         Self::spawn(conn)
     }
 
-    /// Send `f` to the owning thread and block until it returns a result.
-    #[cfg_attr(feature = "profile", profiling::function)]
-    fn call<T, F>(&self, f: F) -> Result<T>
+    /// Queue `f` on the owning thread and return its pending result. The job
+    /// is queued before this returns; see `DbReply`.
+    fn call<T, F>(&self, f: F) -> DbReply<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        if self
-            .ui_thread
-            .get()
-            .is_some_and(|ui_thread| *ui_thread == thread::current().id())
-        {
-            return Err(anyhow!(
-                "blocking database operation attempted on the GPUI thread"
-            ));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let queued = self.tx.send(Box::new(move |conn| {
+            let _ = reply_tx.send(f(conn));
+        }));
+        let result = match queued {
+            Ok(()) => async move {
+                reply_rx
+                    .await
+                    .map_err(|_| anyhow!("database thread dropped the response"))?
+            }
+            .boxed(),
+            Err(_) => {
+                futures::future::ready(Err(anyhow!("database thread is not running"))).boxed()
+            }
+        };
+        DbReply {
+            result,
+            ui_thread: self.ui_thread.get().copied(),
         }
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.tx
-            .send(Box::new(move |conn| {
-                let _ = reply_tx.send(f(conn));
-            }))
-            .map_err(|_| anyhow!("database thread is not running"))?;
-        reply_rx
-            .recv()
-            .map_err(|_| anyhow!("database thread dropped the response"))?
+    }
+
+    /// Resolves once every job queued before it has run. Used on quit so
+    /// accepted writes reach the disk before the process exits.
+    pub fn flush(&self) -> DbReply<()> {
+        self.call(|_| Ok(()))
     }
 
     /// Permanently identify the GPUI thread so a future call site cannot
-    /// accidentally reintroduce a synchronous `recv()` into an event handler.
+    /// accidentally block an event handler with `DbReply::wait`.
     pub(crate) fn register_ui_thread(&self) {
         let _ = self.ui_thread.set(thread::current().id());
     }
@@ -596,7 +742,7 @@ impl Database {
         request_headers: &str,
         request_body: &BodyType,
         auth: &AuthConfig,
-    ) -> Result<i64> {
+    ) -> DbReply<i64> {
         let method = method.to_string();
         let url = url.to_string();
         let mut request_headers: Vec<(String, String)> =
@@ -627,53 +773,61 @@ impl Database {
         })
     }
 
-    /// Load recent history items (request only, no response - aligned with Postman)
+    /// Load the newest history rows for the list, newest first.
     #[cfg_attr(feature = "profile", profiling::function)]
-    pub fn load_recent_history(&self, limit: usize) -> Result<Vec<HistoryItem>> {
+    pub fn load_recent_history(&self, limit: usize) -> DbReply<Vec<HistorySummary>> {
         self.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, method, url, request_headers, request_body, request_auth
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {HISTORY_SUMMARY_COLUMNS}
                  FROM history
                  ORDER BY timestamp DESC, id DESC
-                 LIMIT ?1",
-            )?;
+                 LIMIT ?1"
+            ))?;
 
             // rusqlite 0.40 dropped the `ToSql` impl for `usize`; bind as i64.
-            let items = stmt.query_map([limit as i64], row_to_history_item)?;
+            let items = stmt.query_map([limit as i64], row_to_history_summary)?;
+            Ok(items.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
 
-            let mut result = Vec::new();
-            for item in items {
-                result.push(item?);
-            }
-            Ok(result)
+    /// Load one history entry with its full request (request only, no
+    /// response - aligned with Postman). `None` if the row no longer exists.
+    #[cfg_attr(feature = "profile", profiling::function)]
+    pub fn load_history_item(&self, id: i64) -> DbReply<Option<HistoryItem>> {
+        self.call(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id, method, url, request_headers, request_body, request_auth
+                     FROM history
+                     WHERE id = ?1",
+                    params![id],
+                    row_to_history_item,
+                )
+                .optional()?)
         })
     }
 
     /// Search history by URL or method (case-insensitive substring), newest
     /// first, up to `limit` rows. An empty query matches everything.
     #[cfg_attr(feature = "profile", profiling::function)]
-    pub fn search_history(&self, query: &str, limit: usize) -> Result<Vec<HistoryItem>> {
+    pub fn search_history(&self, query: &str, limit: usize) -> DbReply<Vec<HistorySummary>> {
         let pattern = format!("%{}%", escape_like(query));
         self.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, timestamp, method, url, request_headers, request_body, request_auth
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {HISTORY_SUMMARY_COLUMNS}
                  FROM history
                  WHERE url LIKE ?1 ESCAPE '\\' OR method LIKE ?1 ESCAPE '\\'
                  ORDER BY timestamp DESC, id DESC
-                 LIMIT ?2",
-            )?;
-            let items = stmt.query_map(params![pattern, limit as i64], row_to_history_item)?;
-            let mut result = Vec::new();
-            for item in items {
-                result.push(item?);
-            }
-            Ok(result)
+                 LIMIT ?2"
+            ))?;
+            let items = stmt.query_map(params![pattern, limit as i64], row_to_history_summary)?;
+            Ok(items.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
     /// Delete a history item by ID
     #[allow(dead_code)]
-    pub fn delete_history(&self, id: i64) -> Result<()> {
+    pub fn delete_history(&self, id: i64) -> DbReply<()> {
         self.call(move |conn| {
             conn.execute("DELETE FROM history WHERE id = ?1", params![id])?;
             Ok(())
@@ -681,7 +835,7 @@ impl Database {
     }
 
     /// Clear all history
-    pub fn clear_all_history(&self) -> Result<()> {
+    pub fn clear_all_history(&self) -> DbReply<()> {
         self.call(|conn| {
             conn.execute("DELETE FROM history", [])?;
             Ok(())
@@ -690,7 +844,7 @@ impl Database {
 
     /// Get total history count
     #[allow(dead_code)]
-    pub fn get_history_count(&self) -> Result<usize> {
+    pub fn get_history_count(&self) -> DbReply<usize> {
         self.call(|conn| {
             let count: i64 =
                 conn.query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))?;
@@ -702,61 +856,15 @@ impl Database {
 
     /// Load the complete collection/folder/request tree in display order.
     #[cfg_attr(feature = "profile", profiling::function)]
-    pub fn load_collections(&self) -> Result<Vec<Collection>> {
-        self.call(|conn| {
-            let collection_rows = conn
-                .prepare("SELECT id, name, position FROM collections ORDER BY position, id")?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<rusqlite::Result<Vec<(i64, String, i64)>>>()?;
-
-            let folder_rows = conn
-                .prepare(
-                    "SELECT id, collection_id, parent_id, name, position
-                     FROM collection_folders
-                     ORDER BY collection_id, parent_id, position, id",
-                )?
-                .query_map([], |row| {
-                    Ok(FolderRow {
-                        id: row.get(0)?,
-                        collection_id: row.get(1)?,
-                        parent_id: row.get(2)?,
-                        name: row.get(3)?,
-                        position: row.get(4)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-
-            let request_rows = conn
-                .prepare(
-                    "SELECT id, collection_id, folder_id, name, request_json,
-                            params_json, headers_json, position, created_at, updated_at
-                     FROM saved_requests
-                     ORDER BY collection_id, folder_id, position, id",
-                )?
-                .query_map([], |row| {
-                    Ok(SavedRequestRow {
-                        id: row.get(0)?,
-                        collection_id: row.get(1)?,
-                        folder_id: row.get(2)?,
-                        name: row.get(3)?,
-                        request_json: row.get(4)?,
-                        params_json: row.get(5)?,
-                        headers_json: row.get(6)?,
-                        position: row.get(7)?,
-                        created_at: row.get(8)?,
-                        updated_at: row.get(9)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-
-            build_collection_tree(collection_rows, folder_rows, request_rows)
-        })
+    pub fn load_collections(&self) -> DbReply<Vec<Collection>> {
+        self.call(|conn| query_collections(conn))
     }
 
     /// Create an empty top-level collection.
-    pub fn create_collection(&self, name: &str) -> Result<i64> {
-        let name = require_name(name)?;
+    pub fn create_collection(&self, name: &str) -> DbReply<i64> {
+        let name = name.to_string();
         self.call(move |conn| {
+            let name = require_name(&name)?;
             conn.execute(
                 "INSERT INTO collections (name, position)
                  VALUES (?1, (SELECT COALESCE(MAX(position), -1) + 1 FROM collections))",
@@ -772,9 +880,10 @@ impl Database {
         collection_id: i64,
         parent_id: Option<i64>,
         name: &str,
-    ) -> Result<i64> {
-        let name = require_name(name)?;
+    ) -> DbReply<i64> {
+        let name = name.to_string();
         self.call(move |conn| {
+            let name = require_name(&name)?;
             let tx = conn.transaction()?;
             validate_folder_parent(&tx, collection_id, parent_id)?;
             let position: i64 = tx.query_row(
@@ -804,7 +913,7 @@ impl Database {
         request: &RequestData,
         params_state: &[ParamState],
         headers_state: &[HeaderState],
-    ) -> Result<i64> {
+    ) -> DbReply<i64> {
         self.save_request_draft(
             None,
             collection_id,
@@ -828,7 +937,7 @@ impl Database {
         request: &RequestData,
         params_state: &[ParamState],
         headers_state: &[HeaderState],
-    ) -> Result<()> {
+    ) -> DbReply<()> {
         self.save_request_draft(
             Some(id),
             collection_id,
@@ -853,13 +962,14 @@ impl Database {
         params_state: &[ParamState],
         headers_state: &[HeaderState],
         body_draft: Option<&BodyDraft>,
-    ) -> Result<i64> {
-        let name = require_name(name)?;
+    ) -> DbReply<i64> {
+        let name = name.to_string();
         let request = request.clone();
         let params_state = params_state.to_vec();
         let headers_state = headers_state.to_vec();
         let body_draft = body_draft.cloned();
         self.call(move |conn| {
+            let name = require_name(&name)?;
             let tx = conn.transaction()?;
             let Some(id) = id else {
                 let id = insert_saved_request_tx(
@@ -905,37 +1015,14 @@ impl Database {
         })
     }
 
-    pub fn load_saved_request(&self, id: i64) -> Result<Option<SavedRequest>> {
-        self.call(move |conn| {
-            let raw = conn
-                .query_row(
-                    "SELECT id, collection_id, folder_id, name, request_json,
-                            params_json, headers_json, position, created_at, updated_at
-                     FROM saved_requests WHERE id = ?1",
-                    [id],
-                    |row| {
-                        Ok(SavedRequestRow {
-                            id: row.get(0)?,
-                            collection_id: row.get(1)?,
-                            folder_id: row.get(2)?,
-                            name: row.get(3)?,
-                            request_json: row.get(4)?,
-                            params_json: row.get(5)?,
-                            headers_json: row.get(6)?,
-                            position: row.get(7)?,
-                            created_at: row.get(8)?,
-                            updated_at: row.get(9)?,
-                        })
-                    },
-                )
-                .optional()?;
-            raw.map(decode_saved_request).transpose()
-        })
+    pub fn load_saved_request(&self, id: i64) -> DbReply<Option<SavedRequest>> {
+        self.call(move |conn| query_saved_request(conn, id))
     }
 
-    pub fn rename_collection(&self, id: i64, name: &str) -> Result<()> {
-        let name = require_name(name)?;
+    pub fn rename_collection(&self, id: i64, name: &str) -> DbReply<()> {
+        let name = name.to_string();
         self.call(move |conn| {
+            let name = require_name(&name)?;
             let changed = conn.execute(
                 "UPDATE collections SET name = ?1 WHERE id = ?2",
                 params![name, id],
@@ -947,9 +1034,10 @@ impl Database {
         })
     }
 
-    pub fn rename_folder(&self, id: i64, name: &str) -> Result<()> {
-        let name = require_name(name)?;
+    pub fn rename_folder(&self, id: i64, name: &str) -> DbReply<()> {
+        let name = name.to_string();
         self.call(move |conn| {
+            let name = require_name(&name)?;
             let changed = conn.execute(
                 "UPDATE collection_folders SET name = ?1 WHERE id = ?2",
                 params![name, id],
@@ -961,9 +1049,10 @@ impl Database {
         })
     }
 
-    pub fn rename_saved_request(&self, id: i64, name: &str) -> Result<()> {
-        let name = require_name(name)?;
+    pub fn rename_saved_request(&self, id: i64, name: &str) -> DbReply<()> {
+        let name = name.to_string();
         self.call(move |conn| {
+            let name = require_name(&name)?;
             let changed = conn.execute(
                 "UPDATE saved_requests SET name = ?1, updated_at = ?2 WHERE id = ?3",
                 params![name, chrono::Utc::now().to_rfc3339(), id],
@@ -975,21 +1064,21 @@ impl Database {
         })
     }
 
-    pub fn delete_collection(&self, id: i64) -> Result<()> {
+    pub fn delete_collection(&self, id: i64) -> DbReply<()> {
         self.call(move |conn| {
             conn.execute("DELETE FROM collections WHERE id = ?1", [id])?;
             Ok(())
         })
     }
 
-    pub fn delete_folder(&self, id: i64) -> Result<()> {
+    pub fn delete_folder(&self, id: i64) -> DbReply<()> {
         self.call(move |conn| {
             conn.execute("DELETE FROM collection_folders WHERE id = ?1", [id])?;
             Ok(())
         })
     }
 
-    pub fn delete_saved_request(&self, id: i64) -> Result<()> {
+    pub fn delete_saved_request(&self, id: i64) -> DbReply<()> {
         self.call(move |conn| {
             conn.execute("DELETE FROM saved_requests WHERE id = ?1", [id])?;
             Ok(())
@@ -1001,11 +1090,12 @@ impl Database {
         collection: &Collection,
         name: &str,
         variables: &[EnvVar],
-    ) -> Result<(i64, Option<Environment>)> {
-        let name = require_name(name)?;
+    ) -> DbReply<(i64, Option<Environment>)> {
+        let name = name.to_string();
         let collection = collection.clone();
         let variables = variables.to_vec();
         self.call(move |conn| {
+            let name = require_name(&name)?;
             let tx = conn.transaction()?;
             let id = insert_collection_tree_tx(&tx, &collection, &name)?;
             let environment = if variables.is_empty() {
@@ -1049,63 +1139,68 @@ impl Database {
         })
     }
 
-    pub fn insert_collection_tree(&self, collection: &Collection, name: &str) -> Result<i64> {
+    #[cfg(test)]
+    pub fn insert_collection_tree(&self, collection: &Collection, name: &str) -> DbReply<i64> {
         self.insert_collection_import(collection, name, &[])
             .map(|(id, _)| id)
     }
 
-    pub fn duplicate_collection(&self, id: i64) -> Result<i64> {
-        let collections = self.load_collections()?;
-        let collection = collections
-            .iter()
-            .find(|collection| collection.id == id)
-            .cloned()
-            .ok_or_else(|| anyhow!("collection {} does not exist", id))?;
-        let name = copy_name(&collection.name);
-        self.insert_collection_tree(&collection, &name)
-    }
-
-    pub fn duplicate_folder(&self, id: i64) -> Result<i64> {
-        let collections = self.load_collections()?;
-        let folder = collections
-            .iter()
-            .find_map(|collection| find_folder(&collection.folders, id))
-            .cloned()
-            .ok_or_else(|| anyhow!("folder {} does not exist", id))?;
-        let collection_id = folder.collection_id;
-        let parent_id = folder.parent_id;
-        let name = copy_name(&folder.name);
+    /// Copy a collection with everything in it. Reading the source and writing
+    /// the copy are one job, so no other write can land between them.
+    pub fn duplicate_collection(&self, id: i64) -> DbReply<i64> {
         self.call(move |conn| {
             let tx = conn.transaction()?;
-            let mut copy = folder.clone();
-            copy.name = name;
-            let new_id = insert_folder_tree_tx(&tx, collection_id, parent_id, &copy)?;
+            let collection = query_collections(&tx)?
+                .into_iter()
+                .find(|collection| collection.id == id)
+                .ok_or_else(|| anyhow!("collection {} does not exist", id))?;
+            let new_id = insert_collection_tree_tx(&tx, &collection, &copy_name(&collection.name))?;
             tx.commit()?;
             Ok(new_id)
         })
     }
 
-    pub fn duplicate_saved_request(&self, id: i64) -> Result<i64> {
-        let request = self
-            .load_saved_request(id)?
-            .ok_or_else(|| anyhow!("saved request {} does not exist", id))?;
-        let name = copy_name(&request.name);
-        self.save_request_draft(
-            None,
-            request.collection_id,
-            request.folder_id,
-            &name,
-            &request.request,
-            &request.params_state,
-            &request.headers_state,
-            request.body_draft.as_ref(),
-        )
+    pub fn duplicate_folder(&self, id: i64) -> DbReply<i64> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let mut folder = query_collections(&tx)?
+                .iter()
+                .find_map(|collection| find_folder(&collection.folders, id))
+                .cloned()
+                .ok_or_else(|| anyhow!("folder {} does not exist", id))?;
+            folder.name = copy_name(&folder.name);
+            let new_id =
+                insert_folder_tree_tx(&tx, folder.collection_id, folder.parent_id, &folder)?;
+            tx.commit()?;
+            Ok(new_id)
+        })
+    }
+
+    pub fn duplicate_saved_request(&self, id: i64) -> DbReply<i64> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let request = query_saved_request(&tx, id)?
+                .ok_or_else(|| anyhow!("saved request {} does not exist", id))?;
+            let new_id = insert_saved_request_tx(
+                &tx,
+                request.collection_id,
+                request.folder_id,
+                &copy_name(&request.name),
+                &request.request,
+                &request.params_state,
+                &request.headers_state,
+                None,
+                request.body_draft.as_ref(),
+            )?;
+            tx.commit()?;
+            Ok(new_id)
+        })
     }
 
     // ===== Environments =====
 
     /// Load all environments (with their variables), ordered by position.
-    pub fn load_environments(&self) -> Result<Vec<Environment>> {
+    pub fn load_environments(&self) -> DbReply<Vec<Environment>> {
         self.call(|conn| {
             let mut stmt =
                 conn.prepare("SELECT id, name FROM environments ORDER BY position, id")?;
@@ -1140,7 +1235,7 @@ impl Database {
     }
 
     /// Create a new (empty) environment, returning its id.
-    pub fn create_environment(&self, name: &str) -> Result<i64> {
+    pub fn create_environment(&self, name: &str) -> DbReply<i64> {
         let name = name.to_string();
         self.call(move |conn| {
             conn.execute(
@@ -1153,7 +1248,7 @@ impl Database {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn rename_environment(&self, id: i64, name: &str) -> Result<()> {
+    pub fn rename_environment(&self, id: i64, name: &str) -> DbReply<()> {
         let name = name.to_string();
         self.call(move |conn| {
             conn.execute(
@@ -1164,7 +1259,7 @@ impl Database {
         })
     }
 
-    pub fn delete_environment(&self, id: i64) -> Result<()> {
+    pub fn delete_environment(&self, id: i64) -> DbReply<()> {
         self.call(move |conn| {
             let tx = conn.transaction()?;
             // env_variables rows are removed by ON DELETE CASCADE (foreign_keys = ON).
@@ -1182,7 +1277,7 @@ impl Database {
 
     /// Replace all variables of an environment in a single transaction.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn replace_variables(&self, environment_id: i64, vars: &[EnvVar]) -> Result<()> {
+    pub fn replace_variables(&self, environment_id: i64, vars: &[EnvVar]) -> DbReply<()> {
         let vars = vars.to_vec();
         self.call(move |conn| {
             let tx = conn.transaction()?;
@@ -1217,7 +1312,7 @@ impl Database {
         vars: &[EnvVar],
         epoch: Arc<AtomicU64>,
         generation: u64,
-    ) -> Result<()> {
+    ) -> DbReply<()> {
         let name = name.to_string();
         let vars = vars.to_vec();
         self.call(move |conn| {
@@ -1254,7 +1349,7 @@ impl Database {
     }
 
     /// Active environment id, or None for "No Environment".
-    pub fn get_active_environment_id(&self) -> Result<Option<i64>> {
+    pub fn get_active_environment_id(&self) -> DbReply<Option<i64>> {
         self.call(|conn| {
             let value: Option<String> = conn
                 .query_row(
@@ -1267,7 +1362,7 @@ impl Database {
         })
     }
 
-    pub fn set_active_environment_id(&self, id: Option<i64>) -> Result<()> {
+    pub fn set_active_environment_id(&self, id: Option<i64>) -> DbReply<()> {
         self.call(move |conn| {
             match id {
                 Some(id) => {
@@ -1291,7 +1386,7 @@ impl Database {
     /// Load the app-wide HTTP safeguards. Missing or malformed values are
     /// intentionally non-fatal: an upgrade should always start with safe
     /// defaults rather than leave the application unusable.
-    pub fn load_app_settings(&self) -> Result<AppSettings> {
+    pub fn load_app_settings(&self) -> DbReply<AppSettings> {
         self.call(|conn| {
             let value: Option<String> = conn
                 .query_row(
@@ -1311,9 +1406,10 @@ impl Database {
     /// Persist all General settings atomically in the existing app metadata
     /// table. Keeping them in one JSON value makes future settings additions
     /// backwards-compatible and avoids a schema migration for every field.
-    pub fn save_app_settings(&self, settings: &AppSettings) -> Result<()> {
-        let json = serde_json::to_string(&settings.clone().normalized())?;
+    pub fn save_app_settings(&self, settings: &AppSettings) -> DbReply<()> {
+        let settings = settings.clone().normalized();
         self.call(move |conn| {
+            let json = serde_json::to_string(&settings)?;
             conn.execute(
                 "INSERT INTO app_meta (key, value) VALUES ('app_settings', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1332,6 +1428,17 @@ mod tests {
     use super::*;
 
     use crate::types::{AppSettings, AuthConfig, AuthType};
+
+    /// The newest `limit` history entries with their full requests: the list
+    /// query returns summaries, so each one is opened by id like a click does.
+    fn full_history(db: &Database, limit: usize) -> Vec<HistoryItem> {
+        db.load_recent_history(limit)
+            .wait()
+            .unwrap()
+            .into_iter()
+            .map(|summary| db.load_history_item(summary.id).wait().unwrap().unwrap())
+            .collect()
+    }
 
     fn mem_db() -> Database {
         Database::new_in_memory()
@@ -1354,8 +1461,9 @@ mod tests {
                 &request.body,
                 &request.auth,
             )
+            .wait()
             .unwrap();
-        let environment_id = db.create_environment("Production").unwrap();
+        let environment_id = db.create_environment("Production").wait().unwrap();
         db.replace_variables(
             environment_id,
             &[EnvVar {
@@ -1364,15 +1472,21 @@ mod tests {
                 value: "preserved value".into(),
             }],
         )
+        .wait()
         .unwrap();
-        db.set_active_environment_id(Some(environment_id)).unwrap();
+        db.set_active_environment_id(Some(environment_id))
+            .wait()
+            .unwrap();
         let settings = AppSettings {
             connect_timeout_ms: 1234,
             ..AppSettings::default()
         };
-        db.save_app_settings(&settings).unwrap();
-        let collection_id = db.create_collection("Collection").unwrap();
-        let folder_id = db.create_folder(collection_id, None, "Folder").unwrap();
+        db.save_app_settings(&settings).wait().unwrap();
+        let collection_id = db.create_collection("Collection").wait().unwrap();
+        let folder_id = db
+            .create_folder(collection_id, None, "Folder")
+            .wait()
+            .unwrap();
         db.insert_saved_request(
             collection_id,
             Some(folder_id),
@@ -1381,18 +1495,19 @@ mod tests {
             &params,
             &headers,
         )
+        .wait()
         .unwrap();
-        let expected_collections = db.load_collections().unwrap();
+        let expected_collections = db.load_collections().wait().unwrap();
 
         let paths =
             crate::data_directory::DatabasePaths::from_roots(&root.path().join("native"), &home);
         let destination = paths.prepare().unwrap();
         let migrated = Database::open_test_file(&destination);
-        let history = migrated.load_recent_history(10).unwrap();
+        let history = full_history(&migrated, 10);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, history_id);
         assert_eq!(history[0].request, request);
-        let environments = migrated.load_environments().unwrap();
+        let environments = migrated.load_environments().wait().unwrap();
         assert_eq!(environments.len(), 1);
         assert_eq!(environments[0].id, environment_id);
         assert_eq!(environments[0].name, "Production");
@@ -1401,11 +1516,14 @@ mod tests {
         assert_eq!(environments[0].variables[0].key, "token");
         assert_eq!(environments[0].variables[0].value, "preserved value");
         assert_eq!(
-            migrated.get_active_environment_id().unwrap(),
+            migrated.get_active_environment_id().wait().unwrap(),
             Some(environment_id)
         );
-        assert_eq!(migrated.load_app_settings().unwrap(), settings);
-        assert_eq!(migrated.load_collections().unwrap(), expected_collections);
+        assert_eq!(migrated.load_app_settings().wait().unwrap(), settings);
+        assert_eq!(
+            migrated.load_collections().wait().unwrap(),
+            expected_collections
+        );
         assert!(legacy.is_file());
         // Close the file connections on their owner threads before TempDir cleanup.
         for database in [db, migrated] {
@@ -1414,6 +1532,7 @@ mod tests {
                     *conn = Connection::open_in_memory()?;
                     Ok(())
                 })
+                .wait()
                 .unwrap();
         }
     }
@@ -1428,8 +1547,8 @@ mod tests {
             total_timeout_ms: 3_500,
             max_response_size_bytes: 12 * 1024 * 1024,
         };
-        db.save_app_settings(&settings).unwrap();
-        assert_eq!(db.load_app_settings().unwrap(), settings);
+        db.save_app_settings(&settings).wait().unwrap();
+        assert_eq!(db.load_app_settings().wait().unwrap(), settings);
     }
 
     #[test]
@@ -1439,18 +1558,64 @@ mod tests {
 
         let error = db
             .load_recent_history(1)
-            .expect_err("UI-thread database calls must fail before recv");
+            .wait()
+            .expect_err("the UI thread must never block on the database");
         assert!(
             error
                 .to_string()
                 .contains("blocking database operation attempted on the GPUI thread")
         );
+        // Awaiting is how the UI thread gets results; that never blocks.
+        assert!(futures::executor::block_on(db.load_recent_history(1)).is_ok());
+    }
+
+    fn insert_example(db: &Database) -> DbReply<i64> {
+        db.insert_history(
+            "GET",
+            "https://x",
+            "[]",
+            &BodyType::None,
+            &AuthConfig::default(),
+        )
+    }
+
+    #[test]
+    fn jobs_run_in_call_order_however_replies_are_handled() {
+        let db = mem_db();
+        // Neither dropping a reply nor awaiting replies out of order may
+        // cancel or reorder the jobs: they were queued when called.
+        drop(insert_example(&db));
+        let clear = db.clear_all_history();
+        let last = insert_example(&db);
+        last.wait().unwrap();
+        clear.wait().unwrap();
+        assert_eq!(db.load_recent_history(10).wait().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn flush_resolves_after_every_earlier_job() {
+        let db = mem_db();
+        let write = insert_example(&db);
+        db.flush().wait().unwrap();
+        let written = write.now_or_never().expect("the earlier write has run");
+        assert!(written.is_ok());
+    }
+
+    #[test]
+    fn replies_fail_instead_of_hanging_when_the_database_thread_dies() {
+        let db = mem_db();
+        let crashed = db.call::<(), _>(|_| panic!("simulated crash inside a job"));
+        let error = crashed.wait().unwrap_err();
+        assert!(error.to_string().contains("dropped the response"));
+        // The thread is gone: later jobs fail too, whether or not they got
+        // into the queue before it closed.
+        assert!(db.load_recent_history(1).wait().is_err());
     }
 
     #[test]
     fn stale_environment_snapshot_is_not_persisted() {
         let db = mem_db();
-        let id = db.create_environment("original").unwrap();
+        let id = db.create_environment("original").wait().unwrap();
         let epoch = Arc::new(AtomicU64::new(2));
 
         db.save_environment_if_current(
@@ -1464,8 +1629,9 @@ mod tests {
             epoch.clone(),
             1,
         )
+        .wait()
         .unwrap();
-        let environment = db.load_environments().unwrap().remove(0);
+        let environment = db.load_environments().wait().unwrap().remove(0);
         assert_eq!(environment.name, "original");
         assert!(environment.variables.is_empty());
 
@@ -1480,8 +1646,9 @@ mod tests {
             epoch,
             2,
         )
+        .wait()
         .unwrap();
-        let environment = db.load_environments().unwrap().remove(0);
+        let environment = db.load_environments().wait().unwrap().remove(0);
         assert_eq!(environment.name, "current");
         assert_eq!(environment.variables[0].value, "new");
     }
@@ -1489,17 +1656,19 @@ mod tests {
     #[test]
     fn environment_save_epochs_are_independent() {
         let db = mem_db();
-        let first_id = db.create_environment("first").unwrap();
-        let second_id = db.create_environment("second").unwrap();
+        let first_id = db.create_environment("first").wait().unwrap();
+        let second_id = db.create_environment("second").wait().unwrap();
         let first_epoch = Arc::new(AtomicU64::new(1));
         let second_epoch = Arc::new(AtomicU64::new(1));
 
         db.save_environment_if_current(first_id, "first edited", &[], first_epoch, 1)
+            .wait()
             .unwrap();
         db.save_environment_if_current(second_id, "second edited", &[], second_epoch, 1)
+            .wait()
             .unwrap();
 
-        let environments = db.load_environments().unwrap();
+        let environments = db.load_environments().wait().unwrap();
         assert_eq!(
             environments
                 .iter()
@@ -1544,7 +1713,7 @@ mod tests {
         Database::migrate_add_request_auth(&conn).unwrap(); // second run is a no-op
 
         let db = Database::spawn(conn);
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].request.auth.auth_type, AuthType::None);
     }
@@ -1558,8 +1727,9 @@ mod tests {
             ..Default::default()
         };
         db.insert_history("GET", "https://x", "[]", &BodyType::None, &auth)
+            .wait()
             .unwrap();
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(items[0].request.auth.auth_type, AuthType::Bearer);
         assert_eq!(items[0].request.auth.bearer_token, "abc");
     }
@@ -1577,9 +1747,10 @@ mod tests {
             },
             &AuthConfig::default(),
         )
+        .wait()
         .unwrap();
 
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(
             items[0].request.headers,
             vec![("X-Trace".into(), "kept".into())]
@@ -1606,9 +1777,10 @@ mod tests {
             &BodyType::None,
             &auth,
         )
+        .wait()
         .unwrap();
 
-        let item = db.load_recent_history(1).unwrap().remove(0);
+        let item = full_history(&db, 1).remove(0);
         assert_eq!(item.request.url, "{{base_url}}/private");
         assert_eq!(
             item.request.headers,
@@ -1620,7 +1792,7 @@ mod tests {
     #[test]
     fn crud_and_active() {
         let db = mem_db();
-        let id = db.create_environment("dev").unwrap();
+        let id = db.create_environment("dev").wait().unwrap();
         db.replace_variables(
             id,
             &[
@@ -1636,26 +1808,27 @@ mod tests {
                 },
             ],
         )
+        .wait()
         .unwrap();
 
-        let envs = db.load_environments().unwrap();
+        let envs = db.load_environments().wait().unwrap();
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].name, "dev");
         assert_eq!(envs[0].variables.len(), 2);
         assert_eq!(envs[0].variables[0].key, "baseUrl");
         assert!(!envs[0].variables[1].enabled);
 
-        db.rename_environment(id, "staging").unwrap();
-        assert_eq!(db.load_environments().unwrap()[0].name, "staging");
+        db.rename_environment(id, "staging").wait().unwrap();
+        assert_eq!(db.load_environments().wait().unwrap()[0].name, "staging");
 
-        assert_eq!(db.get_active_environment_id().unwrap(), None);
-        db.set_active_environment_id(Some(id)).unwrap();
-        assert_eq!(db.get_active_environment_id().unwrap(), Some(id));
-        db.set_active_environment_id(None).unwrap();
-        assert_eq!(db.get_active_environment_id().unwrap(), None);
+        assert_eq!(db.get_active_environment_id().wait().unwrap(), None);
+        db.set_active_environment_id(Some(id)).wait().unwrap();
+        assert_eq!(db.get_active_environment_id().wait().unwrap(), Some(id));
+        db.set_active_environment_id(None).wait().unwrap();
+        assert_eq!(db.get_active_environment_id().wait().unwrap(), None);
 
-        db.delete_environment(id).unwrap();
-        assert!(db.load_environments().unwrap().is_empty());
+        db.delete_environment(id).wait().unwrap();
+        assert!(db.load_environments().wait().unwrap().is_empty());
     }
 
     #[test]
@@ -1668,12 +1841,71 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
-        let items = db.load_recent_history(10).unwrap();
+        let items = full_history(&db, 10);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].request.url, "https://api.test/x");
-        db.clear_all_history().unwrap();
-        assert!(db.load_recent_history(10).unwrap().is_empty());
+        db.clear_all_history().wait().unwrap();
+        assert!(db.load_recent_history(10).wait().unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_list_reads_summaries_newest_first() {
+        let db = mem_db();
+        let auth = AuthConfig {
+            auth_type: AuthType::Bearer,
+            bearer_token: "secret".into(),
+            ..Default::default()
+        };
+        db.insert_history("GET", "https://api.test/a", "[]", &BodyType::None, &auth)
+            .wait()
+            .unwrap();
+        let newest = db
+            .insert_history(
+                "PATCH",
+                "https://api.test/b",
+                r#"[["X-Trace","1"]]"#,
+                &BodyType::Raw {
+                    content: "{}".into(),
+                    subtype: crate::types::RawSubtype::Json,
+                },
+                &AuthConfig::default(),
+            )
+            .wait()
+            .unwrap();
+
+        let list = db.load_recent_history(10).wait().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, newest);
+        assert_eq!(list[0].method, HttpMethod::PATCH);
+        assert_eq!(list[0].url, "https://api.test/b");
+        assert!(!list[0].timestamp.is_empty());
+        assert_eq!(list[1].url, "https://api.test/a");
+
+        // The full request is read by id, not carried by the list.
+        let item = db.load_history_item(newest).wait().unwrap().unwrap();
+        assert_eq!(item.id, newest);
+        assert_eq!(item.request.method, HttpMethod::PATCH);
+        assert_eq!(item.request.headers, vec![("X-Trace".into(), "1".into())]);
+        assert!(matches!(item.request.body, BodyType::Raw { .. }));
+    }
+
+    #[test]
+    fn load_history_item_is_none_for_a_deleted_row() {
+        let db = mem_db();
+        let id = db
+            .insert_history(
+                "GET",
+                "https://x",
+                "[]",
+                &BodyType::None,
+                &AuthConfig::default(),
+            )
+            .wait()
+            .unwrap();
+        db.clear_all_history().wait().unwrap();
+        assert!(db.load_history_item(id).wait().unwrap().is_none());
     }
 
     fn insert_history_at(db: &Database, timestamp: &str, url: &str) {
@@ -1686,14 +1918,16 @@ mod tests {
             )?;
             Ok(())
         })
+        .wait()
         .unwrap();
     }
 
     fn history_urls(db: &Database) -> Vec<String> {
         db.load_recent_history(100)
+            .wait()
             .unwrap()
             .into_iter()
-            .map(|item| item.request.url)
+            .map(|summary| summary.url)
             .collect()
     }
 
@@ -1721,6 +1955,7 @@ mod tests {
             &BodyType::None,
             &AuthConfig::default(),
         )
+        .wait()
         .unwrap();
 
         assert_eq!(history_urls(&db), vec!["https://new", "https://recent"]);
@@ -1744,7 +1979,10 @@ mod tests {
             insert_history_at(&db, timestamp, url);
         }
 
-        let deleted = db.call(move |conn| prune_history(conn, now)).unwrap();
+        let deleted = db
+            .call(move |conn| prune_history(conn, now))
+            .wait()
+            .unwrap();
 
         assert_eq!(deleted, 3);
         assert_eq!(
@@ -1763,6 +2001,7 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
         db.insert_history(
             "POST",
@@ -1771,6 +2010,7 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
         db.insert_history(
             "DELETE",
@@ -1779,22 +2019,23 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
 
         // URL substring
-        let r = db.search_history("login", 10).unwrap();
+        let r = db.search_history("login", 10).wait().unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.url, "https://api.test/login");
+        assert_eq!(r[0].url, "https://api.test/login");
 
         // method match, case-insensitive
-        let r = db.search_history("post", 10).unwrap();
+        let r = db.search_history("post", 10).wait().unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.method, HttpMethod::POST);
+        assert_eq!(r[0].method, HttpMethod::POST);
 
         // shared substring across all three, newest (last inserted) first
-        let r = db.search_history("api.test", 10).unwrap();
+        let r = db.search_history("api.test", 10).wait().unwrap();
         assert_eq!(r.len(), 3);
-        assert_eq!(r[0].request.url, "https://api.test/orders/1");
+        assert_eq!(r[0].url, "https://api.test/orders/1");
     }
 
     #[test]
@@ -1807,6 +2048,7 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
         db.insert_history(
             "GET",
@@ -1815,6 +2057,7 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
         db.insert_history(
             "GET",
@@ -1823,18 +2066,19 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
 
         // '%' must be treated literally: matches only the URL with a literal '%'
-        let r = db.search_history("a%b", 10).unwrap();
+        let r = db.search_history("a%b", 10).wait().unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.url, "https://api.test/a%b");
+        assert_eq!(r[0].url, "https://api.test/a%b");
 
         // '_' must be treated literally: matches only the URL with a literal '_',
         // not the single-char wildcard that would also match "/axb" and "/a%b".
-        let r = db.search_history("a_b", 10).unwrap();
+        let r = db.search_history("a_b", 10).wait().unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].request.url, "https://api.test/a_b");
+        assert_eq!(r[0].url, "https://api.test/a_b");
     }
 
     #[test]
@@ -1847,8 +2091,9 @@ mod tests {
             &crate::types::BodyType::None,
             &crate::types::AuthConfig::default(),
         )
+        .wait()
         .unwrap();
-        let r = db.search_history("", 10).unwrap();
+        let r = db.search_history("", 10).wait().unwrap();
         assert_eq!(r.len(), 1);
     }
 
@@ -1905,10 +2150,14 @@ mod tests {
     #[test]
     fn collections_roundtrip_nested_tree_and_editor_state() {
         let db = mem_db();
-        let collection_id = db.create_collection("Demo").unwrap();
-        let root_folder_id = db.create_folder(collection_id, None, "Root").unwrap();
+        let collection_id = db.create_collection("Demo").wait().unwrap();
+        let root_folder_id = db
+            .create_folder(collection_id, None, "Root")
+            .wait()
+            .unwrap();
         let child_folder_id = db
             .create_folder(collection_id, Some(root_folder_id), "Child")
+            .wait()
             .unwrap();
         let (request, params, headers) =
             saved_request_fixture("Nested", "https://api.test/items?page=1");
@@ -1921,6 +2170,7 @@ mod tests {
                 &params,
                 &headers,
             )
+            .wait()
             .unwrap();
         let nested_request_id = db
             .insert_saved_request(
@@ -1931,9 +2181,10 @@ mod tests {
                 &params,
                 &headers,
             )
+            .wait()
             .unwrap();
 
-        let collections = db.load_collections().unwrap();
+        let collections = db.load_collections().wait().unwrap();
         assert_eq!(collections.len(), 1);
         assert_eq!(collections[0].requests[0].id, root_request_id);
         assert_eq!(collections[0].folders[0].name, "Root");
@@ -1966,19 +2217,20 @@ mod tests {
     fn collection_tree_keeps_nesting_and_order_across_collections() {
         let db = mem_db();
         let (request, params, headers) = saved_request_fixture("R", "https://api.test/r");
-        let first = db.create_collection("First").unwrap();
-        let second = db.create_collection("Second").unwrap();
-        let a = db.create_folder(first, None, "A").unwrap();
-        let b = db.create_folder(first, None, "B").unwrap();
-        let a1 = db.create_folder(first, Some(a), "A1").unwrap();
-        let a2 = db.create_folder(first, Some(a), "A2").unwrap();
-        db.create_folder(first, Some(a1), "A1x").unwrap();
-        db.create_folder(first, Some(b), "B1").unwrap();
-        let s = db.create_folder(second, None, "S").unwrap();
-        db.create_folder(second, Some(s), "S1").unwrap();
+        let first = db.create_collection("First").wait().unwrap();
+        let second = db.create_collection("Second").wait().unwrap();
+        let a = db.create_folder(first, None, "A").wait().unwrap();
+        let b = db.create_folder(first, None, "B").wait().unwrap();
+        let a1 = db.create_folder(first, Some(a), "A1").wait().unwrap();
+        let a2 = db.create_folder(first, Some(a), "A2").wait().unwrap();
+        db.create_folder(first, Some(a1), "A1x").wait().unwrap();
+        db.create_folder(first, Some(b), "B1").wait().unwrap();
+        let s = db.create_folder(second, None, "S").wait().unwrap();
+        db.create_folder(second, Some(s), "S1").wait().unwrap();
         for (folder, name) in [(Some(a1), "in A1"), (Some(a2), "in A2"), (Some(s), "in S")] {
             let collection = if folder == Some(s) { second } else { first };
             db.insert_saved_request(collection, folder, name, &request, &params, &headers)
+                .wait()
                 .unwrap();
         }
         // Equal positions everywhere: siblings fall back to id order.
@@ -1989,7 +2241,7 @@ mod tests {
              UPDATE collection_folders SET position = 0 WHERE name = 'A2';",
         );
 
-        let collections = db.load_collections().unwrap();
+        let collections = db.load_collections().wait().unwrap();
         assert_eq!(collections.len(), 2);
         assert_eq!(
             folder_shape(&collections[0].folders),
@@ -2010,7 +2262,7 @@ mod tests {
     #[test]
     fn saved_request_persistence_strips_legacy_content_length() {
         let db = mem_db();
-        let collection_id = db.create_collection("Demo").unwrap();
+        let collection_id = db.create_collection("Demo").wait().unwrap();
         let (mut request, params, mut headers) =
             saved_request_fixture("Request", "https://api.test/a");
         request.headers.push(("content-length".into(), "1".into()));
@@ -2024,8 +2276,9 @@ mod tests {
 
         let id = db
             .insert_saved_request(collection_id, None, "Request", &request, &params, &headers)
+            .wait()
             .unwrap();
-        let saved = db.load_saved_request(id).unwrap().unwrap();
+        let saved = db.load_saved_request(id).wait().unwrap().unwrap();
 
         assert_eq!(
             saved.request.headers,
@@ -2076,8 +2329,11 @@ mod tests {
     #[test]
     fn collection_update_duplicate_and_cascade_delete() {
         let db = mem_db();
-        let collection_id = db.create_collection("Demo").unwrap();
-        let folder_id = db.create_folder(collection_id, None, "Folder").unwrap();
+        let collection_id = db.create_collection("Demo").wait().unwrap();
+        let folder_id = db
+            .create_folder(collection_id, None, "Folder")
+            .wait()
+            .unwrap();
         let (request, params, headers) = saved_request_fixture("Request", "https://api.test/a");
         let request_id = db
             .insert_saved_request(
@@ -2088,6 +2344,7 @@ mod tests {
                 &params,
                 &headers,
             )
+            .wait()
             .unwrap();
 
         let mut changed = request.clone();
@@ -2101,22 +2358,24 @@ mod tests {
             &[],
             &[],
         )
+        .wait()
         .unwrap();
-        let updated = db.load_saved_request(request_id).unwrap().unwrap();
+        let updated = db.load_saved_request(request_id).wait().unwrap().unwrap();
         assert_eq!(updated.name, "Updated");
         assert_eq!(updated.request.url, "https://api.test/b");
         assert!(updated.params_state.is_empty());
 
-        let copied_request_id = db.duplicate_saved_request(request_id).unwrap();
+        let copied_request_id = db.duplicate_saved_request(request_id).wait().unwrap();
         assert_eq!(
             db.load_saved_request(copied_request_id)
+                .wait()
                 .unwrap()
                 .unwrap()
                 .name,
             "Updated (Copy)"
         );
-        let copied_folder_id = db.duplicate_folder(folder_id).unwrap();
-        let copied_tree = db.load_collections().unwrap();
+        let copied_folder_id = db.duplicate_folder(folder_id).wait().unwrap();
+        let copied_tree = db.load_collections().wait().unwrap();
         assert!(
             copied_tree[0]
                 .folders
@@ -2126,16 +2385,16 @@ mod tests {
 
         // Folder deletion cascades to both the original and its copied request;
         // the unrelated root collection remains intact.
-        db.delete_folder(folder_id).unwrap();
-        assert!(db.load_saved_request(request_id).unwrap().is_none());
+        db.delete_folder(folder_id).wait().unwrap();
+        assert!(db.load_saved_request(request_id).wait().unwrap().is_none());
         assert!(
-            db.load_collections().unwrap()[0]
+            db.load_collections().wait().unwrap()[0]
                 .folders
                 .iter()
                 .all(|folder| folder.id != folder_id)
         );
-        db.delete_collection(collection_id).unwrap();
-        assert!(db.load_collections().unwrap().is_empty());
+        db.delete_collection(collection_id).wait().unwrap();
+        assert!(db.load_collections().wait().unwrap().is_empty());
     }
 
     #[test]
@@ -2178,8 +2437,11 @@ mod tests {
                 }],
             }],
         };
-        let collection_id = db.insert_collection_tree(&imported, "Imported").unwrap();
-        let tree = db.load_collections().unwrap();
+        let collection_id = db
+            .insert_collection_tree(&imported, "Imported")
+            .wait()
+            .unwrap();
+        let tree = db.load_collections().wait().unwrap();
         assert_eq!(tree[0].id, collection_id);
         let outer = &tree[0].folders[0];
         let inner = &outer.folders[0];

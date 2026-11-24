@@ -11,10 +11,10 @@ use std::sync::Arc;
 fn partial_scratch_edits_survive_opening_history_and_collections(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
     let saved = saved_fixture(&db);
-    let (app, cx) = setup(cx, db);
+    let (app, cx) = setup(cx, db.clone());
     for from_history in [true, false] {
         for field in 0..6 {
-            cx.run_until_parked();
+            crate::test_support::settle(cx, &db);
             cx.update(|_, cx| assert!(app.read(cx).request_tabs[0].is_blank()));
             let mut request = RequestData::new(HttpMethod::GET, String::new());
             request.body = BodyType::default();
@@ -55,14 +55,14 @@ fn partial_scratch_edits_survive_opening_history_and_collections(cx: &mut TestAp
                     });
                 })
             });
-            cx.run_until_parked();
+            crate::test_support::settle(cx, &db);
             cx.update(|window, cx| {
                 app.update(cx, |app, cx| {
                     assert!(app.request_tabs[0].is_dirty(), "field {field}");
                     let expected = app.request_tabs[0].snapshot();
                     if from_history {
                         app.open_history_in_new_tab(
-                            &HistoryItem::new(1, String::new(), saved.request.clone(), None),
+                            &HistoryItem::new(1, saved.request.clone(), None),
                             window,
                             cx,
                         );
@@ -84,13 +84,13 @@ fn partial_scratch_edits_survive_opening_history_and_collections(cx: &mut TestAp
 fn loading_and_switching_saved_requests_does_not_create_false_dirty_state(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
     let saved = saved_fixture(&db);
-    let (app, cx) = setup(cx, db);
+    let (app, cx) = setup(cx, db.clone());
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.open_saved_request_in_new_tab(&saved, window, cx)
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             assert!(!app.request_tabs[0].is_dirty());
@@ -98,14 +98,14 @@ fn loading_and_switching_saved_requests_does_not_create_false_dirty_state(cx: &m
             app.switch_to_tab(0, window, cx);
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|_, cx| assert!(app.read(cx).request_tabs.iter().all(|tab| !tab.is_dirty())));
 }
 
 #[gpui::test]
 fn close_cancel_and_discard_preserve_or_remove_the_target_tab(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
-    let (app, cx) = setup(cx, db);
+    let (app, cx) = setup(cx, db.clone());
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.request_editor.update(cx, |editor, cx| {
@@ -117,7 +117,7 @@ fn close_cancel_and_discard_preserve_or_remove_the_target_tab(cx: &mut TestAppCo
             assert!(window.has_active_dialog(cx));
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes("escape");
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
@@ -127,14 +127,14 @@ fn close_cancel_and_discard_preserve_or_remove_the_target_tab(cx: &mut TestAppCo
             app.close_tab(0, window, cx);
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| window.draw(cx).clear());
     let bounds = cx
         .debug_bounds("discard-request-changes")
         .expect("discard button rendered");
     cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
     cx.simulate_click(bounds.center(), Modifiers::none());
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| {
         assert!(!window.has_active_dialog(cx));
         let app = app.read(cx);
@@ -162,11 +162,12 @@ fn save_before_close_updates_the_record_then_resets_the_last_tab(cx: &mut TestAp
             id
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     assert_eq!(
         db.load_saved_request(saved.id)
+            .wait()
             .unwrap()
             .unwrap()
             .request
@@ -184,7 +185,7 @@ fn save_before_close_updates_the_record_then_resets_the_last_tab(cx: &mut TestAp
 #[gpui::test]
 fn canceled_first_save_does_not_close_or_clean_the_tab(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
-    let collection = db.create_collection("API").unwrap();
+    let collection = db.create_collection("API").wait().unwrap();
     let (app, cx) = setup(cx, db.clone());
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
@@ -194,7 +195,7 @@ fn canceled_first_save_does_not_close_or_clean_the_tab(cx: &mut TestAppContext) 
             app.close_tab(0, window, cx);
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes("enter");
     cx.update(|window, cx| assert!(window.has_active_dialog(cx)));
     cx.simulate_keystrokes("escape");
@@ -203,7 +204,7 @@ fn canceled_first_save_does_not_close_or_clean_the_tab(cx: &mut TestAppContext) 
         assert!(app.read(cx).request_tabs[0].is_dirty());
         assert_eq!(app.read(cx).request_tabs[0].id, 0);
     });
-    let collections = db.load_collections().unwrap();
+    let collections = db.load_collections().wait().unwrap();
     assert_eq!(collections[0].id, collection);
     assert!(collections[0].requests.is_empty());
 }
@@ -222,10 +223,10 @@ fn failed_save_before_close_keeps_the_tab_and_dirty_state(cx: &mut TestAppContex
             app.close_tab(0, window, cx);
         })
     });
-    db.delete_saved_request(saved.id).unwrap();
-    cx.run_until_parked();
+    db.delete_saved_request(saved.id).wait().unwrap();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
         let app = app.read(cx);
@@ -249,9 +250,9 @@ fn save_as_creates_a_new_id_without_updating_the_original(cx: &mut TestAppContex
             app.save_active_request(true, window, cx);
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     let new_id = cx.update(|window, cx| {
         assert!(!window.has_active_dialog(cx));
         let tab = &app.read(cx).request_tabs[0];
@@ -259,8 +260,11 @@ fn save_as_creates_a_new_id_without_updating_the_original(cx: &mut TestAppContex
         tab.saved_request_id.unwrap()
     });
     assert_ne!(new_id, saved.id);
-    assert_eq!(db.load_saved_request(saved.id).unwrap().unwrap(), saved);
-    let copy = db.load_saved_request(new_id).unwrap().unwrap();
+    assert_eq!(
+        db.load_saved_request(saved.id).wait().unwrap().unwrap(),
+        saved
+    );
+    let copy = db.load_saved_request(new_id).wait().unwrap().unwrap();
     assert_eq!(copy.request.body, edited_request().body);
     assert_eq!(copy.collection_id, saved.collection_id);
     assert_eq!(copy.folder_id, saved.folder_id);
@@ -285,13 +289,14 @@ fn inactive_body_drafts_survive_save_reload_and_duplicate(cx: &mut TestAppContex
             app.save_request(window, cx);
         })
     });
-    cx.run_until_parked();
-    let updated = db.load_saved_request(saved.id).unwrap().unwrap();
+    crate::test_support::settle(cx, &db);
+    let updated = db.load_saved_request(saved.id).wait().unwrap().unwrap();
     assert_eq!(updated.body_draft, Some(draft.clone()));
     assert_eq!(updated.request.body, BodyType::None);
-    let duplicate = db.duplicate_saved_request(saved.id).unwrap();
+    let duplicate = db.duplicate_saved_request(saved.id).wait().unwrap();
     assert_eq!(
         db.load_saved_request(duplicate)
+            .wait()
             .unwrap()
             .unwrap()
             .body_draft,
@@ -312,7 +317,7 @@ fn inactive_body_drafts_survive_save_reload_and_duplicate(cx: &mut TestAppContex
 fn typing_and_reverting_body_updates_the_visible_dirty_indicator(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
     let saved = saved_fixture(&db);
-    let (app, cx) = setup(cx, db);
+    let (app, cx) = setup(cx, db.clone());
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
             app.open_saved_request_in_new_tab(&saved, window, cx);
@@ -320,7 +325,7 @@ fn typing_and_reverting_body_updates_the_visible_dirty_indicator(cx: &mut TestAp
                 .update(cx, |editor, cx| editor.focus_body_for_save_test(window, cx));
         })
     });
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.simulate_input("draft");
     cx.refresh().unwrap();
     cx.update(|_, cx| assert!(app.read(cx).request_tabs[0].is_dirty()));
@@ -339,7 +344,7 @@ fn typing_and_reverting_body_updates_the_visible_dirty_indicator(cx: &mut TestAp
 #[gpui::test]
 fn failed_first_save_preserves_the_unsaved_tab(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
-    let collection = db.create_collection("API").unwrap();
+    let collection = db.create_collection("API").wait().unwrap();
     let (app, cx) = setup(cx, db.clone());
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
@@ -349,10 +354,10 @@ fn failed_first_save_preserves_the_unsaved_tab(cx: &mut TestAppContext) {
             app.save_request(window, cx);
         })
     });
-    cx.run_until_parked();
-    db.delete_collection(collection).unwrap();
+    crate::test_support::settle(cx, &db);
+    db.delete_collection(collection).wait().unwrap();
     cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    crate::test_support::settle(cx, &db);
     cx.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
         let app = app.read(cx);
@@ -367,8 +372,11 @@ fn failed_first_save_preserves_the_unsaved_tab(cx: &mut TestAppContext) {
 fn update_persists_name_and_destination_without_changing_id(cx: &mut TestAppContext) {
     let db = Arc::new(Database::new_in_memory());
     let saved = saved_fixture(&db);
-    let destination = db.create_collection("Other").unwrap();
-    let folder = db.create_folder(destination, None, "Nested").unwrap();
+    let destination = db.create_collection("Other").wait().unwrap();
+    let folder = db
+        .create_folder(destination, None, "Nested")
+        .wait()
+        .unwrap();
     let (app, cx) = setup(cx, db.clone());
     cx.update(|window, cx| {
         app.update(cx, |app, cx| {
@@ -380,8 +388,8 @@ fn update_persists_name_and_destination_without_changing_id(cx: &mut TestAppCont
             app.save_request(window, cx);
         })
     });
-    cx.run_until_parked();
-    let updated = db.load_saved_request(saved.id).unwrap().unwrap();
+    crate::test_support::settle(cx, &db);
+    let updated = db.load_saved_request(saved.id).wait().unwrap().unwrap();
     assert_eq!(updated.name, "Renamed");
     assert_eq!(updated.collection_id, destination);
     assert_eq!(updated.folder_id, Some(folder));
