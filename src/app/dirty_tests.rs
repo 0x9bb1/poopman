@@ -128,7 +128,7 @@ fn close_cancel_and_discard_preserve_or_remove_the_target_tab(cx: &mut TestAppCo
         })
     });
     crate::test_support::settle(cx, &db);
-    cx.update(|window, cx| window.draw(cx).clear());
+    crate::test_support::finish_dialog_animation(cx);
     let bounds = cx
         .debug_bounds("discard-request-changes")
         .expect("discard button rendered");

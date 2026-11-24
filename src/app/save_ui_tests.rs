@@ -105,7 +105,7 @@ fn save_controls_and_close_confirmation_fit_the_minimum_window(cx: &mut TestAppC
         })
     });
     crate::test_support::settle(cx, &db);
-    cx.update(|window, cx| window.draw(cx).clear());
+    crate::test_support::finish_dialog_animation(cx);
     let discard = cx.debug_bounds("discard-request-changes").unwrap();
     let viewport = cx.update(|window, _| window.viewport_size());
     assert!(discard.origin.x >= px(0.));
