@@ -45,6 +45,13 @@ tempfile = "3"
 flate2 = "1"
 gpui = { version = "0.2.2", features = ["test-support"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Not used directly: caps the lockfile's libc. libc 0.2.190 removed Linux's
+# `ENOATTR`, which xattr 0.2.3 (gpui 0.2.2 -> gpui_http_client ->
+# zed-async-tar) still uses, so newer libc breaks the Linux build. Drop this
+# once gpui no longer pulls xattr 0.2.
+libc = ">=0.2.186, <0.2.190"
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
 

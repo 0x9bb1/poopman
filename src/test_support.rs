@@ -1,5 +1,5 @@
-use gpui::{Subscription, TestAppContext};
-use std::{cell::Cell, rc::Rc};
+use gpui::{Subscription, TestAppContext, VisualTestContext};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 use crate::db::Database;
 
@@ -18,6 +18,20 @@ pub(crate) fn settle(cx: &mut TestAppContext, db: &Database) {
             return;
         }
     }
+}
+
+/// Let an open gpui-component dialog reach its resting position, then redraw.
+///
+/// The dialog slides 30px down over 0.25 s of wall-clock time (dialog.rs in
+/// gpui-component 0.5.1), and test builds redraw the window after every
+/// simulated event. A click aimed at bounds read mid-animation is hit-tested
+/// against a later frame where the button has moved, so on a slow machine it
+/// misses. Call this after the dialog has been drawn once (any `update`
+/// draws it) and before reading bounds inside it. A finished animation stops
+/// requesting frames, so the bounds then stay put.
+pub(crate) fn finish_dialog_animation(cx: &mut VisualTestContext) {
+    std::thread::sleep(Duration::from_millis(300));
+    cx.update(|window, cx| window.draw(cx).clear());
 }
 
 /// Observe disposal of real GPUI listeners without depending on GPUI internals.
