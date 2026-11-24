@@ -138,8 +138,8 @@ application profiling spans.
    variables, then select the active one from the Edit menu. Reference them anywhere as
    `{{name}}`.
 4. **Export code** — click the `</>` button next to Send, choose a language, and Copy.
-5. **History** — sent requests are saved automatically; filter with the search box,
-   click one to reload it, or Clear.
+5. **History** — sent requests are saved automatically and kept for 90 days; filter
+   with the search box, click one to reload it, or Clear.
 6. **Postman** — use **Import** in the Collections sidebar, or use a collection's
    context menu to export a v2.1 JSON file.
 
@@ -182,6 +182,11 @@ the destination is still absent. Abandoned `.history-migration-*.db` files in th
 new directory are ignored and can be removed while Poopman is closed. An existing
 destination that cannot be opened produces an error rather than a fallback to
 the legacy database.
+
+History keeps the last 90 days. Each time a request is recorded, entries older
+than that are permanently deleted, including any carried over by the migration
+above. The database file does not shrink; SQLite reuses the freed space for new
+entries.
 
 ## Architecture
 
